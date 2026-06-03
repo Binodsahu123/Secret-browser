@@ -84,7 +84,30 @@ data class BrowserUiState(
     
     // Address Bar & Home Shortcut settings states
     val addressBarPosition: String = "top",
-    val showHomeButton: Boolean = true
+    val showHomeButton: Boolean = true,
+
+    // Download states
+    val downloadConfirmState: DownloadConfirmState = DownloadConfirmState(),
+    val downloadProgressState: DownloadProgressState = DownloadProgressState()
+)
+
+data class DownloadConfirmState(
+    val show: Boolean = false,
+    val url: String = "",
+    val fileName: String = "",
+    val contentLength: Long = 0L,
+    val mimeType: String = "",
+    val userAgent: String = ""
+)
+
+data class DownloadProgressState(
+    val showProgress: Boolean = false,
+    val fileName: String = "",
+    val progress: Int = 0,
+    val downloadId: Long = 0L,
+    val isComplete: Boolean = false,
+    val isFailed: Boolean = false,
+    val mimeType: String = ""
 )
 
 class BrowserViewModel(
@@ -346,19 +369,10 @@ class BrowserViewModel(
                 currentTab?.isDesktopMode ?: false
             )
 
-            setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
+            setDownloadListener { url, userAgent, contentDisposition, mimetype, contentLength ->
                 try {
-                    val request = android.app.DownloadManager.Request(Uri.parse(url)).apply {
-                        setMimeType(mimetype)
-                        addRequestHeader("User-Agent", userAgent)
-                        setDescription("Downloading file via SwiftBrowser...")
-                        setTitle(android.webkit.URLUtil.guessFileName(url, contentDisposition, mimetype))
-                        setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                        setDestinationInExternalPublicDir(android.os.Environment.DIRECTORY_DOWNLOADS, android.webkit.URLUtil.guessFileName(url, contentDisposition, mimetype))
-                    }
-                    val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as android.app.DownloadManager
-                    dm.enqueue(request)
-                    android.widget.Toast.makeText(context, "Download started...", android.widget.Toast.LENGTH_SHORT).show()
+                    val fileName = extractFileName(contentDisposition, url, mimetype)
+                    showDownloadConfirmation(url, fileName, contentLength, mimetype, userAgent)
                 } catch (e: Exception) {
                     e.printStackTrace()
                     android.widget.Toast.makeText(context, "Download failed: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
@@ -388,6 +402,16 @@ class BrowserViewModel(
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                     try {
                         super.onPageStarted(view, url, favicon)
+                        if (url != null && view != null && !url.startsWith("orion://")) {
+                            val host = android.net.Uri.parse(url).host
+                            if (!host.isNullOrEmpty()) {
+                                val isDesktop = DesktopModeManager.isDesktopMode(getApplication(), host)
+                                if (isDesktop) {
+                                    DesktopModeManager.applyMode(view, true)
+                                    updateTabState(tabId) { it.copy(isDesktopMode = true) }
+                                }
+                            }
+                        }
                         updateTabState(tabId) {
                             it.copy(
                                 url = url ?: it.url,
@@ -1322,21 +1346,14 @@ class BrowserViewModel(
         val activeId = _uiState.value.activeTabId
         if (activeId.isEmpty()) return
         val currentTab = _uiState.value.tabs.find { it.id == activeId } ?: return
-        val newDesktopState = !currentTab.isDesktopMode
+        val webView = webViewMap[activeId] ?: return
+        val currentUrl = currentTab.url
+        if (currentUrl.isEmpty() || currentUrl.startsWith("orion://")) return
+
+        val isNowDesktop = DesktopModeManager.toggleDesktopMode(getApplication(), webView, currentUrl)
 
         updateTabState(activeId) {
-            it.copy(isDesktopMode = newDesktopState)
-        }
-
-        val webView = webViewMap[activeId]
-        if (webView != null) {
-            applyWebViewSettings(
-                webView = webView,
-                jsEnabled = _uiState.value.isJavaScriptEnabled,
-                hwEnabled = _uiState.value.isHardwareAccelerationEnabled,
-                isDesktop = newDesktopState
-            )
-            webView.reload()
+            it.copy(isDesktopMode = isNowDesktop)
         }
     }
 
@@ -1622,6 +1639,179 @@ class BrowserViewModel(
                 }
             }
             android.widget.Toast.makeText(getApplication(), "Browsing data successfully cleared", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun dismissDownloadConfirm() {
+        _uiState.update { it.copy(downloadConfirmState = DownloadConfirmState(show = false)) }
+    }
+
+    fun dismissDownloadProgress() {
+        _uiState.update { it.copy(downloadProgressState = DownloadProgressState(showProgress = false)) }
+    }
+
+    fun showDownloadConfirmation(url: String, fileName: String, contentLength: Long, mimeType: String, userAgent: String) {
+        _uiState.update {
+            it.copy(
+                downloadConfirmState = DownloadConfirmState(
+                    show = true,
+                    url = url,
+                    fileName = fileName,
+                    contentLength = contentLength,
+                    mimeType = mimeType,
+                    userAgent = userAgent
+                )
+            )
+        }
+    }
+
+    fun extractFileName(disposition: String?, url: String, mimeType: String): String {
+        if (!disposition.isNullOrEmpty()) {
+            val match = Regex("""filename[^;=\n]*=((['"]).*?\2|[^;\n]*)""")
+                .find(disposition)
+            if (match != null) {
+                return match.groupValues[1].trim('"', '\'', ' ')
+            }
+        }
+        
+        val urlPath = android.net.Uri.parse(url).lastPathSegment
+        if (!urlPath.isNullOrEmpty() && urlPath.contains(".")) {
+            return urlPath
+        }
+        
+        val ext = android.webkit.MimeTypeMap.getSingleton()
+            .getExtensionFromMimeType(mimeType) ?: "bin"
+        return "download_${System.currentTimeMillis()}.$ext"
+    }
+
+    fun startDownload(url: String, fileName: String, mimeType: String, userAgent: String, destinationDir: String = android.os.Environment.DIRECTORY_DOWNLOADS) {
+        try {
+            if (url.contains("youtube.com") || url.contains("youtu.be")) {
+                android.widget.Toast.makeText(getApplication(), "To download YouTube videos, use YouTube Premium or a dedicated downloader app", android.widget.Toast.LENGTH_LONG).show()
+                return
+            }
+
+            val request = android.app.DownloadManager.Request(android.net.Uri.parse(url)).apply {
+                setTitle(fileName)
+                setDescription("Downloading...")
+                setMimeType(mimeType)
+                addRequestHeader("User-Agent", userAgent)
+                addRequestHeader("Cookie", android.webkit.CookieManager.getInstance().getCookie(url) ?: "")
+                setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                setDestinationInExternalPublicDir(destinationDir, fileName)
+                setAllowedOverMetered(true)
+                setAllowedOverRoaming(true)
+            }
+            
+            val downloadManager = getApplication<Application>().getSystemService(Context.DOWNLOAD_SERVICE) as android.app.DownloadManager
+            val downloadId = downloadManager.enqueue(request)
+            
+            viewModelScope.launch {
+                repository.saveDownloadToDb(downloadId, fileName, url, mimeType, "PENDING")
+            }
+            
+            trackDownloadProgress(downloadId, fileName, mimeType)
+            
+            android.widget.Toast.makeText(getApplication(), "Downloading: $fileName", android.widget.Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            e.printStackTrace()
+            android.widget.Toast.makeText(getApplication(), "Download failed: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun trackDownloadProgress(downloadId: Long, fileName: String, mimeType: String) {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val downloadManager = getApplication<Application>().getSystemService(Context.DOWNLOAD_SERVICE) as android.app.DownloadManager
+            
+            _uiState.update {
+                it.copy(
+                    downloadProgressState = DownloadProgressState(
+                        showProgress = true,
+                        fileName = fileName,
+                        progress = 0,
+                        downloadId = downloadId,
+                        mimeType = mimeType
+                    )
+                )
+            }
+
+            var isDownloading = true
+            while (isDownloading) {
+                val query = android.app.DownloadManager.Query().setFilterById(downloadId)
+                val cursor = downloadManager.query(query)
+                
+                if (cursor != null && cursor.moveToFirst()) {
+                    val statusCol = cursor.getColumnIndex(android.app.DownloadManager.COLUMN_STATUS)
+                    val downloadedCol = cursor.getColumnIndex(android.app.DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR)
+                    val totalCol = cursor.getColumnIndex(android.app.DownloadManager.COLUMN_TOTAL_SIZE_BYTES)
+                    
+                    if (statusCol >= 0 && downloadedCol >= 0 && totalCol >= 0) {
+                        val status = cursor.getInt(statusCol)
+                        val downloaded = cursor.getLong(downloadedCol)
+                        val total = cursor.getLong(totalCol)
+                        
+                        when (status) {
+                            android.app.DownloadManager.STATUS_SUCCESSFUL -> {
+                                isDownloading = false
+                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                    _uiState.update {
+                                        it.copy(
+                                            downloadProgressState = it.downloadProgressState.copy(
+                                                progress = 100,
+                                                isComplete = true
+                                            )
+                                        )
+                                    }
+                                    repository.updateDownloadStatusInDb(downloadId, "COMPLETE")
+                                }
+                            }
+                            android.app.DownloadManager.STATUS_FAILED -> {
+                                isDownloading = false
+                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                    _uiState.update {
+                                        it.copy(
+                                            downloadProgressState = it.downloadProgressState.copy(
+                                                isFailed = true
+                                            )
+                                        )
+                                    }
+                                    repository.updateDownloadStatusInDb(downloadId, "FAILED")
+                                }
+                            }
+                            else -> {
+                                val progress = if (total > 0) (downloaded * 100 / total).toInt() else 0
+                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                    _uiState.update {
+                                        it.copy(
+                                            downloadProgressState = it.downloadProgressState.copy(
+                                                progress = progress
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                cursor?.close()
+                kotlinx.coroutines.delay(500)
+            }
+        }
+    }
+
+    fun printSavedPdf(fileName: String, tabId: String) {
+        try {
+            val webView = webViewMap[tabId] ?: return
+            val printManager = getApplication<Application>().getSystemService(Context.PRINT_SERVICE) as android.print.PrintManager
+            val printAdapter = webView.createPrintDocumentAdapter(fileName)
+            printManager.print(
+                fileName,
+                printAdapter,
+                android.print.PrintAttributes.Builder().build()
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+            android.widget.Toast.makeText(getApplication(), "Failed to save PDF: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
         }
     }
 

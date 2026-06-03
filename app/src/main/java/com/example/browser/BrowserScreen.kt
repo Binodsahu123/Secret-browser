@@ -20,6 +20,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -92,6 +93,7 @@ fun BrowserScreen(
     var showHelpFeedbackDialog by remember { mutableStateOf(false) }
     var showAddShortcutDialog by remember { mutableStateOf(false) }
     var showGroupTabDialog by remember { mutableStateOf(false) }
+    var showAboutDialog by remember { mutableStateOf(false) }
 
     val addressBarContent = @Composable {
         Surface(
@@ -164,6 +166,10 @@ fun BrowserScreen(
                                     },
                                     modifier = Modifier.size(16.dp)
                                 )
+                            }
+
+                            if (activeTab?.isDesktopMode == true) {
+                                Text("🖥", modifier = Modifier.padding(start = 4.dp), fontSize = 14.sp)
                             }
 
                             Spacer(modifier = Modifier.width(8.dp))
@@ -277,6 +283,10 @@ fun BrowserScreen(
                         onTabSelect = { viewModel.selectTab(it) },
                         onTabClose = { viewModel.closeTab(it) },
                         onNewTab = { viewModel.addNewTab() },
+                        onReopenClosedTab = { viewModel.reopenClosedTab(it) },
+                        onMergeTabs = { ids, name, color ->
+                            ids.forEach { viewModel.moveTabToGroup(it, name, color) }
+                        },
                         onCloseSwitcher = { viewModel.setTabSwitcherOpen(false) }
                     )
                 } else if (uiState.readerModeActive) {
@@ -330,6 +340,159 @@ fun BrowserScreen(
                     onNext = { viewModel.findInPageNext() },
                     onClose = { viewModel.toggleFindInPage(false) }
                 )
+            }
+
+            // Download Progress / Complete Bottom Bar (above bottom nav)
+            if (uiState.downloadProgressState.showProgress && !uiState.isTabSwitcherOpen) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    tonalElevation = 8.dp,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    if (uiState.downloadProgressState.isComplete) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CheckCircle,
+                                contentDescription = "Success",
+                                tint = Color(0xFF4CAF50),
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text(
+                                text = uiState.downloadProgressState.fileName,
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 1,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Button(
+                                onClick = {
+                                    val file = java.io.File(
+                                        android.os.Environment.getExternalStoragePublicDirectory(
+                                            android.os.Environment.DIRECTORY_DOWNLOADS
+                                        ), uiState.downloadProgressState.fileName
+                                    )
+                                    val uri = androidx.core.content.FileProvider.getUriForFile(
+                                        context,
+                                        "${context.packageName}.provider",
+                                        file
+                                    )
+                                    val intent = Intent(Intent.ACTION_VIEW).apply {
+                                        setDataAndType(uri, uiState.downloadProgressState.mimeType)
+                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    }
+                                    try {
+                                        context.startActivity(intent)
+                                    } catch (e: Exception) {
+                                        android.widget.Toast.makeText(context, "No app to open this file", android.widget.Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                                modifier = Modifier.padding(end = 4.dp)
+                            ) {
+                                Text("Open")
+                            }
+                            Button(
+                                onClick = {
+                                    val file = java.io.File(
+                                        android.os.Environment.getExternalStoragePublicDirectory(
+                                            android.os.Environment.DIRECTORY_DOWNLOADS
+                                        ), uiState.downloadProgressState.fileName
+                                    )
+                                    val uri = androidx.core.content.FileProvider.getUriForFile(
+                                        context,
+                                        "${context.packageName}.provider",
+                                        file
+                                    )
+                                    val intent = Intent(Intent.ACTION_SEND).apply {
+                                        type = uiState.downloadProgressState.mimeType
+                                        putExtra(Intent.EXTRA_STREAM, uri)
+                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    }
+                                    try {
+                                        context.startActivity(Intent.createChooser(intent, "Share File"))
+                                    } catch (e: Exception) {
+                                        android.widget.Toast.makeText(context, "Failed to share file: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                                modifier = Modifier.padding(end = 4.dp)
+                            ) {
+                                Text("Share")
+                            }
+                            IconButton(onClick = { viewModel.dismissDownloadProgress() }) {
+                                Icon(imageVector = Icons.Default.Close, contentDescription = "Dismiss")
+                            }
+                        }
+                    } else if (uiState.downloadProgressState.isFailed) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Error,
+                                contentDescription = "Failed",
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text(
+                                text = "Download failed: ${uiState.downloadProgressState.fileName}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.weight(1f)
+                            )
+                            IconButton(onClick = { viewModel.dismissDownloadProgress() }) {
+                                Icon(imageVector = Icons.Default.Close, contentDescription = "Dismiss")
+                            }
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Download,
+                                contentDescription = "Downloading",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = uiState.downloadProgressState.fileName,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1
+                                )
+                                LinearProgressIndicator(
+                                    progress = uiState.downloadProgressState.progress.toFloat() / 100f,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 4.dp)
+                                )
+                                Text(
+                                    text = "${uiState.downloadProgressState.progress}%",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            IconButton(onClick = { 
+                                val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as android.app.DownloadManager
+                                dm.remove(uiState.downloadProgressState.downloadId)
+                                viewModel.dismissDownloadProgress()
+                                android.widget.Toast.makeText(context, "Download cancelled", android.widget.Toast.LENGTH_SHORT).show()
+                            }) {
+                                Icon(imageVector = Icons.Default.Close, contentDescription = "Cancel Download")
+                            }
+                        }
+                    }
+                }
             }
 
             // 4. Default Bottom Nav bar Toolbar (Hidden during tab switcher & reader mode)
@@ -717,12 +880,43 @@ fun BrowserScreen(
                 com.example.engine.AdBlocker.getDomainName(activeTab.url) ?: ""
             }
             val isWhitelisted = uiState.adblockWhitelist.contains(domain)
-            SslCertificateDialog(
+            SiteInfoBottomSheet(
                 url = activeTab.url,
-                blockedAdsCount = activeTab.blockedAdsCount,
+                title = activeTab.title,
+                blockedCount = activeTab.blockedAdsCount,
                 isAdBlockWhitelisted = isWhitelisted,
-                onToggleAdBlockForSite = { viewModel.toggleAdBlockForSite(activeTab.url) },
+                historyItems = history,
+                onToggleAdBlock = { viewModel.toggleAdBlockForSite(activeTab.url) },
+                onOpenSearch = { query ->
+                    try {
+                        viewModel.navigateTo("https://www.google.com/search?q=" + java.net.URLEncoder.encode(query, "UTF-8"))
+                        showSslDialog = false
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                },
+                onOpenSiteSettings = { 
+                    showSslDialog = false
+                    viewModel.setSettingsOpen(true)
+                },
                 onDismiss = { showSslDialog = false }
+            )
+        }
+
+        if (uiState.downloadConfirmState.show) {
+            val isPdf = uiState.downloadConfirmState.mimeType.contains("pdf", ignoreCase = true) || uiState.downloadConfirmState.fileName.endsWith(".pdf", ignoreCase = true)
+            DownloadConfirmBottomSheet(
+                state = uiState.downloadConfirmState,
+                onDismiss = { viewModel.dismissDownloadConfirm() },
+                onConfirm = { url, name, mime, ua, dir ->
+                    viewModel.startDownload(url, name, mime, ua, dir)
+                },
+                onPrintPdf = {
+                    activeTab?.id?.let { tabId ->
+                        viewModel.printSavedPdf(uiState.downloadConfirmState.fileName, tabId)
+                    }
+                },
+                isPdfType = isPdf
             )
         }
 
@@ -849,156 +1043,368 @@ fun TabSwitcherLayout(
     onTabSelect: (String) -> Unit,
     onTabClose: (String) -> Unit,
     onNewTab: () -> Unit,
+    onReopenClosedTab: (TabState) -> Unit,
+    onMergeTabs: (List<String>, String, Long) -> Unit,
     onCloseSwitcher: () -> Unit
 ) {
+    val context = LocalContext.current
+    var searchQuery by remember { mutableStateOf("") }
+    var isSelectionMode by remember { mutableStateOf(false) }
+    val selectedTabIds = remember { mutableStateListOf<String>() }
+
+    val filteredTabs = remember(state.tabs, searchQuery) {
+        if (searchQuery.isBlank()) {
+            state.tabs
+        } else {
+            state.tabs.filter {
+                it.title.contains(searchQuery, ignoreCase = true) ||
+                        it.url.contains(searchQuery, ignoreCase = true)
+            }
+        }
+    }
+
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         topBar = {
-            TopAppBar(
-                title = { Text("Open Tabs (${state.tabs.size})", fontWeight = FontWeight.Bold) },
-                navigationIcon = {
-                    IconButton(onClick = onCloseSwitcher) {
-                        Icon(imageVector = Icons.Default.Close, contentDescription = "Close Grid Switcher")
+            if (isSelectionMode) {
+                TopAppBar(
+                    title = { Text("Selected: ${selectedTabIds.size}", fontWeight = FontWeight.Bold) },
+                    navigationIcon = {
+                        IconButton(onClick = {
+                            isSelectionMode = false
+                            selectedTabIds.clear()
+                        }) {
+                            Icon(imageVector = Icons.Default.Close, contentDescription = "Exit Selection")
+                        }
+                    },
+                    actions = {
+                        // Merge Tabs button
+                        Button(
+                            onClick = {
+                                if (selectedTabIds.isNotEmpty()) {
+                                    val leadingTabId = selectedTabIds.first()
+                                    val matchedTab = state.tabs.find { it.id == leadingTabId }
+                                    val guessedDomain = matchedTab?.url?.let {
+                                        try {
+                                            android.net.Uri.parse(it).host?.substringBeforeLast(".") ?: "Work Group"
+                                        } catch (e: Exception) {
+                                            "Tab Group"
+                                        }
+                                    } ?: "Tab Group"
+                                    
+                                    onMergeTabs(selectedTabIds.toList(), guessedDomain, 0xFF818CF8)
+                                    isSelectionMode = false
+                                    selectedTabIds.clear()
+                                }
+                            },
+                            enabled = selectedTabIds.size >= 2
+                        ) {
+                            Text("Merge Group")
+                        }
                     }
-                }
-            )
+                )
+            } else {
+                TopAppBar(
+                    title = {
+                        OutlinedTextField(
+                            value = searchQuery,
+                            onValueChange = { searchQuery = it },
+                            placeholder = { Text("Search tabs...", fontSize = 14.sp) },
+                            singleLine = true,
+                            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(52.dp)
+                                .padding(vertical = 4.dp),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant
+                            ),
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Default.Search,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            },
+                            trailingIcon = {
+                                if (searchQuery.isNotEmpty()) {
+                                    IconButton(onClick = { searchQuery = "" }) {
+                                        Icon(
+                                            imageVector = Icons.Default.Clear,
+                                            contentDescription = "Clear search",
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        )
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = onCloseSwitcher) {
+                            Icon(imageVector = Icons.Default.Close, contentDescription = "Close Grid Switcher")
+                        }
+                    },
+                    actions = {
+                        IconButton(onClick = { isSelectionMode = true }) {
+                            Icon(imageVector = Icons.Default.Edit, contentDescription = "Select Mode")
+                        }
+                    }
+                )
+            }
         },
         floatingActionButton = {
-            FloatingActionButton(
-                onClick = onNewTab,
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = MaterialTheme.colorScheme.onPrimary,
-                modifier = Modifier.testTag("new_tab_fab")
-            ) {
-                Icon(imageVector = Icons.Default.Add, contentDescription = "Add New Tab")
+            if (!isSelectionMode) {
+                FloatingActionButton(
+                    onClick = onNewTab,
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                    modifier = Modifier.testTag("new_tab_fab")
+                ) {
+                    Icon(imageVector = Icons.Default.Add, contentDescription = "Add New Tab")
+                }
             }
         }
     ) { innerPadding ->
-        LazyVerticalGrid(
-            columns = GridCells.Fixed(2),
+        Column(
             modifier = Modifier
                 .padding(innerPadding)
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
-                .padding(12.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            items(state.tabs) { tab ->
-                val isActive = tab.id == state.activeTabId
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(0.7f)
-                        .clickable { onTabSelect(tab.id) }
-                        .testTag("tab_card_${tab.id}"),
-                    colors = CardDefaults.cardColors(
-                        containerColor = if (isActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface
-                    ),
-                    border = BorderStroke(
-                        width = if (isActive) 2.dp else 0.5.dp,
-                        color = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
-                    )
-                ) {
-                    Box(modifier = Modifier.fillMaxSize()) {
-                        Column(modifier = Modifier.fillMaxSize()) {
-                            // Header of each single Tab item Card
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(8.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Row(
-                                    modifier = Modifier.weight(1f),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    if (tab.favicon != null) {
-                                        Image(
-                                            bitmap = tab.favicon.asImageBitmap(),
-                                            contentDescription = null,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                    } else {
-                                        Icon(
-                                            imageVector = Icons.Default.Language,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(16.dp),
-                                            tint = MaterialTheme.colorScheme.primary
-                                        )
-                                    }
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = tab.title,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onSurface,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-
-                                // Terminate single active tab button
-                                IconButton(
-                                    onClick = { onTabClose(tab.id) },
-                                    modifier = Modifier.size(24.dp).testTag("close_tab_btn_${tab.id}")
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Close,
-                                        contentDescription = "Close tab",
-                                        modifier = Modifier.size(14.dp)
-                                    )
+            // Tab cards grid
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(2),
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                items(filteredTabs) { tab ->
+                    val isActive = tab.id == state.activeTabId
+                    val isSelected = selectedTabIds.contains(tab.id)
+                    
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .aspectRatio(0.75f)
+                            .clickable {
+                                if (isSelectionMode) {
+                                    if (isSelected) selectedTabIds.remove(tab.id) else selectedTabIds.add(tab.id)
+                                } else {
+                                    onTabSelect(tab.id)
                                 }
                             }
-
-                            Divider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.1f))
-
-                            // Mini webpage JPEG screenshot container
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .fillMaxWidth()
-                                    .background(MaterialTheme.colorScheme.surfaceVariant),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                if (tab.url == "orion://newtab") {
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxSize()
-                                            .frostedGlassBackground(state.newTabWallpaper),
-                                        contentAlignment = Alignment.Center
+                            .testTag("tab_card_${tab.id}"),
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (isSelected) {
+                                MaterialTheme.colorScheme.primaryContainer
+                            } else if (isActive) {
+                                MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f)
+                            } else {
+                                MaterialTheme.colorScheme.surface
+                            }
+                        ),
+                        border = BorderStroke(
+                            width = if (isSelected) 3.dp else if (isActive) 2.dp else 0.5.dp,
+                            color = if (isSelected) {
+                                MaterialTheme.colorScheme.primary
+                            } else if (isActive) {
+                                MaterialTheme.colorScheme.secondary
+                            } else {
+                                MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+                            }
+                        )
+                    ) {
+                        Box(modifier = Modifier.fillMaxSize()) {
+                            Column(modifier = Modifier.fillMaxSize()) {
+                                // Header of each tab card
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(8.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(
+                                        modifier = Modifier.weight(1f),
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Text(
-                                            text = "New Tab",
-                                            color = Color.White.copy(alpha = 0.6f),
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.Medium
+                                        if (tab.favicon != null) {
+                                            Image(
+                                                bitmap = tab.favicon.asImageBitmap(),
+                                                contentDescription = null,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        } else {
+                                            Icon(
+                                                imageVector = Icons.Default.Language,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(16.dp),
+                                                tint = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Column {
+                                            if (!tab.groupName.isNullOrEmpty()) {
+                                                Text(
+                                                    text = tab.groupName,
+                                                    fontSize = 9.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = Color(tab.groupColor ?: 0xFF818CF8)
+                                                )
+                                            }
+                                            Text(
+                                                text = tab.title,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+
+                                    if (!isSelectionMode) {
+                                        IconButton(
+                                            onClick = { onTabClose(tab.id) },
+                                            modifier = Modifier.size(24.dp).testTag("close_tab_btn_${tab.id}")
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Close,
+                                                contentDescription = "Close tab",
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                        }
+                                    } else {
+                                        Checkbox(
+                                            checked = isSelected,
+                                            onCheckedChange = { checked ->
+                                                if (checked == true) selectedTabIds.add(tab.id) else selectedTabIds.remove(tab.id)
+                                            },
+                                            modifier = Modifier.size(24.dp)
                                         )
                                     }
-                                } else if (tab.screenshot != null) {
-                                    Image(
-                                        bitmap = tab.screenshot.asImageBitmap(),
-                                        contentDescription = tab.title,
-                                        modifier = Modifier.fillMaxSize(),
-                                        contentScale = ContentScale.Crop
+                                }
+
+                                Divider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.1f))
+
+                                // Screenshot/Preview box below header
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxWidth()
+                                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (tab.url == "orion://newtab") {
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxSize()
+                                                .frostedGlassBackground(state.newTabWallpaper),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(
+                                                text = "New Tab",
+                                                color = Color.White.copy(alpha = 0.6f),
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                        }
+                                    } else if (tab.screenshot != null) {
+                                        Image(
+                                            bitmap = tab.screenshot.asImageBitmap(),
+                                            contentDescription = tab.title,
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentScale = ContentScale.Crop
+                                        )
+                                    } else {
+                                        Column(
+                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                            verticalArrangement = Arrangement.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Web,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                                                modifier = Modifier.size(28.dp)
+                                            )
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            val domainStr = try {
+                                                android.net.Uri.parse(tab.url).host ?: ""
+                                            } catch (e: Exception) {
+                                                ""
+                                            }
+                                            Text(
+                                                text = domainStr.ifEmpty { "No Preview" },
+                                                fontSize = 9.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Horizontally Scrollable Recently Closed Tabs
+            if (state.recentlyClosedTabs.isNotEmpty() && !isSelectionMode) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 4.dp,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp)
+                    ) {
+                        Text(
+                            text = "Recently Closed Tabs",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+                        
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            state.recentlyClosedTabs.forEach { closedTab ->
+                                Card(
+                                    modifier = Modifier
+                                        .width(160.dp)
+                                        .clickable { onReopenClosedTab(closedTab) },
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
                                     )
-                                } else {
-                                    Column(
-                                        horizontalAlignment = Alignment.CenterHorizontally,
-                                        verticalArrangement = Arrangement.Center
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         Icon(
-                                            imageVector = Icons.Default.Web,
+                                            imageVector = Icons.Default.History,
                                             contentDescription = null,
-                                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                                            modifier = Modifier.size(32.dp)
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(16.dp)
                                         )
-                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
                                         Text(
-                                            text = "No Preview",
-                                            fontSize = 10.sp,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                            text = closedTab.title,
+                                            fontSize = 11.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f)
                                         )
                                     }
                                 }
@@ -1115,6 +1521,7 @@ fun SettingsOverlay(
     var showAddWhitelistDialog by remember { mutableStateOf(false) }
     var newWhitelistHost by remember { mutableStateOf("") }
     var showLocalClearDataDialog by remember { mutableStateOf(false) }
+    var showAboutDialog by remember { mutableStateOf(false) }
     
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -1474,9 +1881,10 @@ fun SettingsOverlay(
                                 )
 
                                 ListItem(
-                                    headlineContent = { Text("Version", fontWeight = FontWeight.Medium) },
-                                    supportingContent = { Text("SwiftBrowser v2.0.0 (Custom Engine)", fontSize = 11.sp) },
-                                    leadingContent = { Icon(Icons.Default.Info, contentDescription = null) }
+                                    headlineContent = { Text("About SwiftBrowser", fontWeight = FontWeight.Medium) },
+                                    supportingContent = { Text("SwiftBrowser v2.5.0 (Quantum Glass)", fontSize = 11.sp) },
+                                    leadingContent = { Icon(Icons.Default.Info, contentDescription = null) },
+                                    modifier = Modifier.clickable { showAboutDialog = true }
                                 )
 
                                 ListItem(
@@ -1651,6 +2059,11 @@ fun SettingsOverlay(
             onDismiss = { showLocalClearDataDialog = false }
         )
     }
+
+    AboutAppDialog(
+        show = showAboutDialog,
+        onDismiss = { showAboutDialog = false }
+    )
 }
 
 // FlowRow layout helper

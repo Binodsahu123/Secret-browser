@@ -43,3 +43,13 @@ data class ArticleCacheEntity(
     val cachedAt: Long = System.currentTimeMillis()
 )
 
+@Entity(tableName = "downloads")
+data class DownloadItem(
+    @PrimaryKey val downloadId: Long,
+    val fileName: String,
+    val url: String,
+    val mimeType: String,
+    val status: String, // "PENDING", "DOWNLOADING", "COMPLETE", "FAILED"
+    val timestamp: Long = System.currentTimeMillis()
+)
+

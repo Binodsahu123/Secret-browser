@@ -9,9 +9,23 @@ class BrowserRepository(private val db: BrowserDatabase) {
     private val historyDao = db.historyDao()
     private val topSiteDao = db.topSiteDao()
     private val articleDao = db.articleDao()
+    private val downloadDao = db.downloadDao()
 
     val bookmarks: Flow<List<Bookmark>> = bookmarkDao.getAllBookmarks()
     val history: Flow<List<HistoryItem>> = historyDao.getAllHistory()
+    val downloads: Flow<List<DownloadItem>> = downloadDao.getAllDownloads()
+
+    suspend fun saveDownloadToDb(downloadId: Long, fileName: String, url: String, mimeType: String, status: String = "PENDING") {
+        downloadDao.insertDownload(DownloadItem(downloadId, fileName, url, mimeType, status))
+    }
+
+    suspend fun updateDownloadStatusInDb(downloadId: Long, status: String) {
+        downloadDao.updateDownloadStatus(downloadId, status)
+    }
+
+    suspend fun deleteDownloadFromDb(downloadId: Long) {
+        downloadDao.deleteDownload(downloadId)
+    }
 
     fun getArticlesByCategory(category: String): Flow<List<ArticleCacheEntity>> {
         return articleDao.getArticlesByCategory(category)
