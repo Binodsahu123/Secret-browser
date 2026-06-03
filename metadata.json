@@ -1,5 +1,5 @@
 {
-  "name": "Orion Browser",
+  "name": "SwiftBrowser",
   "description": "A high-performance modern web browser with multi-tab layout, customized New Tab page, search highlighting, Reader mode, and privacy controls.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]

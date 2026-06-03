@@ -43,6 +43,9 @@ interface HistoryDao {
 
     @Query("DELETE FROM history WHERE id = :id")
     suspend fun deleteHistoryItem(id: Int)
+
+    @Query("DELETE FROM history WHERE timestamp >= :timestamp")
+    suspend fun deleteHistorySince(timestamp: Long)
 }
 
 @Dao
@@ -62,3 +65,19 @@ interface TopSiteDao {
     @Delete
     suspend fun deleteTopSite(topSite: TopSite)
 }
+
+@Dao
+interface ArticleDao {
+    @Query("SELECT * FROM articles WHERE category = :category ORDER BY cachedAt DESC")
+    fun getArticlesByCategory(category: String): Flow<List<ArticleCacheEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertArticles(articles: List<ArticleCacheEntity>)
+
+    @Query("DELETE FROM articles WHERE category = :category")
+    suspend fun deleteArticlesByCategory(category: String)
+
+    @Query("DELETE FROM articles")
+    suspend fun clearAllArticles()
+}
+

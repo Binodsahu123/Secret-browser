@@ -5,11 +5,12 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 
-@Database(entities = [Bookmark::class, HistoryItem::class, TopSite::class], version = 1, exportSchema = false)
+@Database(entities = [Bookmark::class, HistoryItem::class, TopSite::class, ArticleCacheEntity::class], version = 2, exportSchema = false)
 abstract class BrowserDatabase : RoomDatabase() {
     abstract fun bookmarkDao(): BookmarkDao
     abstract fun historyDao(): HistoryDao
     abstract fun topSiteDao(): TopSiteDao
+    abstract fun articleDao(): ArticleDao
 
     companion object {
         @Volatile

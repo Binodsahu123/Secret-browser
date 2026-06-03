@@ -29,3 +29,17 @@ data class TopSite(
     val isHidden: Boolean = false,
     val visitCount: Int = 0
 )
+
+@Entity(tableName = "articles")
+data class ArticleCacheEntity(
+    @PrimaryKey val id: String,
+    val title: String,
+    val description: String,
+    val imageUrl: String,
+    val sourceUrl: String,
+    val sourceName: String,
+    val publishedAt: String,
+    val category: String,
+    val cachedAt: Long = System.currentTimeMillis()
+)
+

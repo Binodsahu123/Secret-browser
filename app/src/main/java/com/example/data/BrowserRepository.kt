@@ -8,9 +8,22 @@ class BrowserRepository(private val db: BrowserDatabase) {
     private val bookmarkDao = db.bookmarkDao()
     private val historyDao = db.historyDao()
     private val topSiteDao = db.topSiteDao()
+    private val articleDao = db.articleDao()
 
     val bookmarks: Flow<List<Bookmark>> = bookmarkDao.getAllBookmarks()
     val history: Flow<List<HistoryItem>> = historyDao.getAllHistory()
+
+    fun getArticlesByCategory(category: String): Flow<List<ArticleCacheEntity>> {
+        return articleDao.getArticlesByCategory(category)
+    }
+
+    suspend fun saveArticles(articles: List<ArticleCacheEntity>) {
+        articleDao.insertArticles(articles)
+    }
+
+    suspend fun clearArticlesByCategory(category: String) {
+        articleDao.deleteArticlesByCategory(category)
+    }
 
     suspend fun addBookmark(url: String, title: String) {
         if (url.isBlank()) return
@@ -60,6 +73,10 @@ class BrowserRepository(private val db: BrowserDatabase) {
 
     suspend fun deleteHistoryItem(id: Int) {
         historyDao.deleteHistoryItem(id)
+    }
+
+    suspend fun deleteHistorySince(timestamp: Long) {
+        historyDao.deleteHistorySince(timestamp)
     }
 
     // Custom Top Sites and hidden states

@@ -2,6 +2,7 @@ package com.example.browser
 
 import android.app.Application
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -32,7 +33,13 @@ data class TabState(
     val faviconUrl: String? = null,
     val favicon: Bitmap? = null,
     val isWebViewDestroyed: Boolean = false,
-    val readerModeAvailable: Boolean = false
+    val readerModeAvailable: Boolean = false,
+    val isDesktopMode: Boolean = false,
+    val isIncognito: Boolean = false,
+    val groupId: String? = null,
+    val groupName: String? = null,
+    val groupColor: Long? = null,
+    val blockedAdsCount: Int = 0
 )
 
 data class BrowserUiState(
@@ -55,7 +62,25 @@ data class BrowserUiState(
     val isBookmarksOpen: Boolean = false,
     val isTabSwitcherOpen: Boolean = false,
     val isSearchFocused: Boolean = false,
-    val currentInputUrl: String = ""
+    val currentInputUrl: String = "",
+    val feedCategory: String = "For You",
+    val articles: List<com.example.data.ArticleCacheEntity> = emptyList(),
+    val isFeedLoading: Boolean = false,
+    
+    // Ad Blocking properties
+    val globalAdBlockEnabled: Boolean = true,
+    val globalTrackersEnabled: Boolean = true,
+    val youtubeAdSkipEnabled: Boolean = true,
+    val adblockWhitelist: Set<String> = emptySet(),
+    val adblockBlacklist: Set<String> = emptySet(),
+    
+    // Text To Speech (Listen to page) properties
+    val isTtsActive: Boolean = false,
+    val isTtsPlaying: Boolean = false,
+    val ttsSpeed: Float = 1.0f,
+    
+    // Recently closed tabs tracking
+    val recentlyClosedTabs: List<TabState> = emptyList()
 )
 
 class BrowserViewModel(
@@ -85,7 +110,12 @@ class BrowserViewModel(
     val topSites: StateFlow<List<TopSite>> = repository.getMergedTopSites()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    private var ttsEngine: android.speech.tts.TextToSpeech? = null
+
     init {
+        // Initialize AdBlocker
+        com.example.engine.AdBlocker.init(application)
+        
         // OkHttp Cache Setup (50MB)
         val cacheSize = 50 * 1024 * 1024L
         val cacheDirectory = File(application.cacheDir, "http_cache_orion")
@@ -93,6 +123,26 @@ class BrowserViewModel(
         okHttpClient = OkHttpClient.Builder()
             .cache(httpCache)
             .build()
+
+        _uiState.update {
+            it.copy(
+                globalAdBlockEnabled = com.example.engine.AdBlocker.globalAdBlockEnabled,
+                globalTrackersEnabled = com.example.engine.AdBlocker.globalTrackersEnabled,
+                youtubeAdSkipEnabled = com.example.engine.AdBlocker.youtubeAdSkipEnabled,
+                adblockWhitelist = com.example.engine.AdBlocker.whitelistedSites.toSet(),
+                adblockBlacklist = com.example.engine.AdBlocker.blockedSites.toSet()
+            )
+        }
+
+        try {
+            ttsEngine = android.speech.tts.TextToSpeech(application) { status ->
+                if (status == android.speech.tts.TextToSpeech.SUCCESS) {
+                    ttsEngine?.language = java.util.Locale.getDefault()
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
 
         // Sync settings from PreferenceManager
         viewModelScope.launch {
@@ -111,25 +161,29 @@ class BrowserViewModel(
                     )
                 }
                 // Apply update to active WebViews
-                webViewMap.values.forEach { webView ->
-                    applyWebViewSettings(webView, js, hw)
+                _uiState.value.tabs.forEach { tab ->
+                    webViewMap[tab.id]?.let { webView ->
+                        applyWebViewSettings(webView, js, hw, tab.isDesktopMode)
+                    }
                 }
             }.collect()
         }
 
         // Add initial tab
         addNewTab()
+        loadArticlesForCategory("For You", false)
     }
 
     // Tab Management
-    fun addNewTab(url: String = "orion://newtab") {
+    fun addNewTab(url: String = "orion://newtab", isIncognito: Boolean = false) {
         val tabId = UUID.randomUUID().toString()
-        val formatted = formatUrlOrSearch(url)
+        val formatted = if (url == "orion://newtab" && isIncognito) "orion://newtab-incognito" else formatUrlOrSearch(url)
         val newTab = TabState(
             id = tabId,
             url = formatted,
-            title = if (formatted == "orion://newtab") "New Tab" else "Loading...",
-            lastActiveTime = System.currentTimeMillis()
+            title = if (isIncognito) "Incognito Tab" else if (formatted == "orion://newtab") "New Tab" else "Loading...",
+            lastActiveTime = System.currentTimeMillis(),
+            isIncognito = isIncognito
         )
 
         _uiState.update { state ->
@@ -137,7 +191,7 @@ class BrowserViewModel(
             state.copy(
                 tabs = updatedTabs,
                 activeTabId = tabId,
-                currentInputUrl = if (formatted == "orion://newtab") "" else formatted,
+                currentInputUrl = if (formatted == "orion://newtab" || formatted == "orion://newtab-incognito") "" else formatted,
                 isTabSwitcherOpen = false,
                 readerModeActive = false
             )
@@ -251,15 +305,54 @@ class BrowserViewModel(
             return existing
         }
 
+        val currentTab = _uiState.value.tabs.find { it.id == tabId }
+
         val webView = WebView(context).apply {
             id = View.generateViewId()
             layoutParams = android.view.ViewGroup.LayoutParams(
                 android.view.ViewGroup.LayoutParams.MATCH_PARENT,
                 android.view.ViewGroup.LayoutParams.MATCH_PARENT
             )
-            applyWebViewSettings(this, _uiState.value.isJavaScriptEnabled, _uiState.value.isHardwareAccelerationEnabled)
+            applyWebViewSettings(
+                this,
+                _uiState.value.isJavaScriptEnabled,
+                _uiState.value.isHardwareAccelerationEnabled,
+                currentTab?.isDesktopMode ?: false
+            )
+
+            setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
+                try {
+                    val request = android.app.DownloadManager.Request(Uri.parse(url)).apply {
+                        setMimeType(mimetype)
+                        addRequestHeader("User-Agent", userAgent)
+                        setDescription("Downloading file via SwiftBrowser...")
+                        setTitle(android.webkit.URLUtil.guessFileName(url, contentDisposition, mimetype))
+                        setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                        setDestinationInExternalPublicDir(android.os.Environment.DIRECTORY_DOWNLOADS, android.webkit.URLUtil.guessFileName(url, contentDisposition, mimetype))
+                    }
+                    val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as android.app.DownloadManager
+                    dm.enqueue(request)
+                    android.widget.Toast.makeText(context, "Download started...", android.widget.Toast.LENGTH_SHORT).show()
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    android.widget.Toast.makeText(context, "Download failed: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
 
             webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(
+                    view: WebView?,
+                    request: WebResourceRequest?
+                ): WebResourceResponse? {
+                    val urlStr = request?.url?.toString()
+                    val currentDocUrl = view?.url ?: _uiState.value.tabs.find { it.id == tabId }?.url
+                    if (com.example.engine.AdBlocker.shouldBlock(urlStr, currentDocUrl)) {
+                        incrementBlockedAdsCount(tabId)
+                        return com.example.engine.AdBlocker.createEmptyResponse()
+                    }
+                    return super.shouldInterceptRequest(view, request)
+                }
+
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                     super.onPageStarted(view, url, favicon)
                     updateTabState(tabId) {
@@ -268,21 +361,32 @@ class BrowserViewModel(
                             isLoading = true,
                             progress = 10,
                             favicon = favicon ?: it.favicon,
-                            readerModeAvailable = false
+                            readerModeAvailable = false,
+                            blockedAdsCount = 0
                         )
                     }
                     if (_uiState.value.activeTabId == tabId) {
-                        _uiState.update { it.copy(currentInputUrl = if (url == "orion://newtab") "" else (url ?: "")) }
+                        val isTabIncognito = _uiState.value.tabs.find { it.id == tabId }?.isIncognito == true
+                        _uiState.update { 
+                            it.copy(
+                                currentInputUrl = if (url == "orion://newtab" || url == "orion://newtab-incognito") "" else (url ?: "")
+                            ) 
+                        }
                     }
                 }
 
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
                     val title = view?.title ?: ""
+                    val isTabIncognito = _uiState.value.tabs.find { it.id == tabId }?.isIncognito == true
                     updateTabState(tabId) {
                         it.copy(
                             url = url ?: it.url,
-                            title = if (url == "orion://newtab") "New Tab" else title.ifBlank { url ?: "Loaded" },
+                            title = if (url == "orion://newtab" || url == "orion://newtab-incognito") {
+                                if (isTabIncognito) "Incognito Tab" else "New Tab"
+                            } else {
+                                title.ifBlank { url ?: "Loaded" }
+                            },
                             isLoading = false,
                             progress = 100,
                             canGoBack = view?.canGoBack() ?: false,
@@ -290,10 +394,36 @@ class BrowserViewModel(
                         )
                     }
 
-                    if (url != null && url != "orion://newtab" && !url.startsWith("orion://")) {
+                    if (url != null && url != "orion://newtab" && url != "orion://newtab-incognito" && !url.startsWith("orion://") && !isTabIncognito) {
                         viewModelScope.launch {
                             repository.addHistory(url, title)
                         }
+                    }
+
+                    if (url != null && url.contains("youtube.com") && com.example.engine.AdBlocker.youtubeAdSkipEnabled) {
+                        view?.evaluateJavascript("""
+                            (function() {
+                                var selectors = [
+                                    '.ad-showing', '.ad-interrupting',
+                                    '#player-ads', '.ytp-ad-module',
+                                    '.ytd-display-ad-renderer',
+                                    '.ytd-promoted-sparkles-web-renderer',
+                                    'ytd-ad-slot-renderer',
+                                    'ytd-in-feed-ad-layout-renderer'
+                                ];
+                                selectors.forEach(function(sel) {
+                                    document.querySelectorAll(sel).forEach(function(el) { el.remove(); });
+                                });
+                                
+                                setInterval(function() {
+                                    var skipBtn = document.querySelector('.ytp-ad-skip-button, .ytp-skip-ad-button');
+                                    if (skipBtn) { skipBtn.click(); }
+                                    
+                                    var adVideo = document.querySelector('video.ad-showing');
+                                    if (adVideo) { adVideo.currentTime = adVideo.duration; }
+                                }, 300);
+                            })();
+                        """.trimIndent(), null)
                     }
 
                     // Check for Reader Mode
@@ -351,6 +481,30 @@ class BrowserViewModel(
                             view?.loadUrl(queryUrl)
                         } else {
                             view?.loadUrl("orion://newtab")
+                        }
+                        return true
+                    }
+                    if (url.startsWith("javascript:", true)) {
+                        return true
+                    }
+                    if (url.startsWith("intent://", true)) {
+                        try {
+                            val intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME)
+                            intent.addCategory(Intent.CATEGORY_BROWSABLE)
+                            intent.setComponent(null)
+                            intent.setSelector(null)
+                            view?.context?.startActivity(intent)
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                        return true
+                    }
+                    if (url.startsWith("tel:", true) || url.startsWith("mailto:", true) || url.startsWith("market:", true)) {
+                        try {
+                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                            view?.context?.startActivity(intent)
+                        } catch (e: Exception) {
+                            e.printStackTrace()
                         }
                         return true
                     }
@@ -412,10 +566,14 @@ class BrowserViewModel(
             }, "OrionJS")
         }
 
-        applyWebViewSettings(webView, _uiState.value.isJavaScriptEnabled, _uiState.value.isHardwareAccelerationEnabled)
+        applyWebViewSettings(
+            webView,
+            _uiState.value.isJavaScriptEnabled,
+            _uiState.value.isHardwareAccelerationEnabled,
+            currentTab?.isDesktopMode ?: false
+        )
 
         // If the URL is already present in TabState, load it initially
-        val currentTab = _uiState.value.tabs.find { it.id == tabId }
         val urlToLoad = currentTab?.url ?: "orion://newtab"
         if (urlToLoad != "orion://newtab") {
             webView.loadUrl(urlToLoad)
@@ -425,7 +583,7 @@ class BrowserViewModel(
         return webView
     }
 
-    private fun applyWebViewSettings(webView: WebView, jsEnabled: Boolean, hwEnabled: Boolean) {
+    private fun applyWebViewSettings(webView: WebView, jsEnabled: Boolean, hwEnabled: Boolean, isDesktop: Boolean = false) {
         webView.settings.apply {
             javaScriptEnabled = jsEnabled
             domStorageEnabled = true
@@ -437,6 +595,18 @@ class BrowserViewModel(
             cacheMode = WebSettings.LOAD_DEFAULT
             mediaPlaybackRequiresUserGesture = false
             allowFileAccess = true
+            allowContentAccess = true
+            setSupportZoom(true)
+            setSupportMultipleWindows(true)
+            javaScriptCanOpenWindowsAutomatically = true
+            loadsImagesAutomatically = true
+            blockNetworkImage = false
+            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+            userAgentString = if (isDesktop) {
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            } else {
+                "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+            }
         }
 
         if (hwEnabled) {
@@ -1029,5 +1199,322 @@ class BrowserViewModel(
 
     fun setSearchFocused(focused: Boolean) {
         _uiState.update { it.copy(isSearchFocused = focused) }
+    }
+
+    fun toggleDesktopMode() {
+        val activeId = _uiState.value.activeTabId
+        if (activeId.isEmpty()) return
+        val currentTab = _uiState.value.tabs.find { it.id == activeId } ?: return
+        val newDesktopState = !currentTab.isDesktopMode
+
+        updateTabState(activeId) {
+            it.copy(isDesktopMode = newDesktopState)
+        }
+
+        val webView = webViewMap[activeId]
+        if (webView != null) {
+            applyWebViewSettings(
+                webView = webView,
+                jsEnabled = _uiState.value.isJavaScriptEnabled,
+                hwEnabled = _uiState.value.isHardwareAccelerationEnabled,
+                isDesktop = newDesktopState
+            )
+            webView.reload()
+        }
+    }
+
+    private var feedJob: kotlinx.coroutines.Job? = null
+
+    fun changeFeedCategory(category: String) {
+        _uiState.update { it.copy(feedCategory = category, articles = emptyList()) }
+        loadArticlesForCategory(category, forceRefresh = false)
+    }
+
+    fun refreshArticles() {
+        loadArticlesForCategory(_uiState.value.feedCategory, forceRefresh = true)
+    }
+
+    fun loadArticlesForCategory(category: String, forceRefresh: Boolean = false) {
+        feedJob?.cancel()
+        feedJob = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            _uiState.update { it.copy(isFeedLoading = true) }
+            
+            try {
+                repository.getArticlesByCategory(category).first().let { cached ->
+                    if (cached.isNotEmpty()) {
+                        _uiState.update { it.copy(articles = cached) }
+                        
+                        val isFresh = (System.currentTimeMillis() - cached.first().cachedAt) < 30 * 60 * 1000L
+                        if (isFresh && !forceRefresh) {
+                            _uiState.update { it.copy(isFeedLoading = false) }
+                            return@launch
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+
+            val feedUrl = when (category) {
+                "For You" -> "https://news.google.com/rss?hl=hi&gl=IN&ceid=IN:hi"
+                "Top Stories" -> "https://news.google.com/rss?hl=en-IN&gl=IN&ceid=IN:en"
+                "India" -> "https://timesofindia.indiatimes.com/rssfeedstopstories.cms"
+                "Technology" -> "https://news.google.com/rss/search?q=technology&hl=en-IN&gl=IN&ceid=IN:en"
+                "Sports" -> "https://news.google.com/rss/search?q=sports&hl=en-IN&gl=IN&ceid=IN:en"
+                "Entertainment" -> "https://news.google.com/rss/search?q=entertainment&hl=en-IN&gl=IN&ceid=IN:en"
+                "Business" -> "https://news.google.com/rss/search?q=business&hl=en-IN&gl=IN&ceid=IN:en"
+                "Science" -> "https://news.google.com/rss/search?q=science&hl=en-IN&gl=IN&ceid=IN:en"
+                else -> "https://news.google.com/rss?hl=en-IN&gl=IN&ceid=IN:en"
+            }
+
+            val fetched = com.example.network.RssFeedParser.fetchAndParseRss(okHttpClient, feedUrl, category)
+            if (fetched.isNotEmpty()) {
+                repository.clearArticlesByCategory(category)
+                repository.saveArticles(fetched)
+                _uiState.update { it.copy(articles = fetched, isFeedLoading = false) }
+            } else {
+                _uiState.update { it.copy(isFeedLoading = false) }
+            }
+        }
+    }
+
+    fun printCurrentPage(context: Context) {
+        val activeId = _uiState.value.activeTabId
+        val webView = webViewMap[activeId] ?: return
+        try {
+            val printManager = context.getSystemService(Context.PRINT_SERVICE) as android.print.PrintManager
+            val printAdapter = webView.createPrintDocumentAdapter("SwiftBrowser Document")
+            printManager.print("SwiftBrowser Print Job", printAdapter, android.print.PrintAttributes.Builder().build())
+        } catch (e: Exception) {
+            e.printStackTrace()
+            android.widget.Toast.makeText(context, "Print failed: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // Ad blocker counters & preference bindings
+    fun incrementBlockedAdsCount(tabId: String) {
+        updateTabState(tabId) {
+            it.copy(blockedAdsCount = it.blockedAdsCount + 1)
+        }
+    }
+
+    fun setGlobalAdBlockEnabled(enabled: Boolean) {
+        com.example.engine.AdBlocker.globalAdBlockEnabled = enabled
+        com.example.engine.AdBlocker.savePreferences(getApplication())
+        _uiState.update { it.copy(globalAdBlockEnabled = enabled) }
+    }
+
+    fun setGlobalTrackersEnabled(enabled: Boolean) {
+        com.example.engine.AdBlocker.globalTrackersEnabled = enabled
+        com.example.engine.AdBlocker.savePreferences(getApplication())
+        _uiState.update { it.copy(globalTrackersEnabled = enabled) }
+    }
+
+    fun setYoutubeAdSkipEnabled(enabled: Boolean) {
+        com.example.engine.AdBlocker.youtubeAdSkipEnabled = enabled
+        com.example.engine.AdBlocker.savePreferences(getApplication())
+        _uiState.update { it.copy(youtubeAdSkipEnabled = enabled) }
+    }
+
+    fun toggleAdBlockForSite(url: String) {
+        val domain = com.example.engine.AdBlocker.getDomainName(url) ?: return
+        if (com.example.engine.AdBlocker.whitelistedSites.contains(domain)) {
+            com.example.engine.AdBlocker.whitelistedSites.remove(domain)
+        } else {
+            com.example.engine.AdBlocker.whitelistedSites.add(domain)
+        }
+        com.example.engine.AdBlocker.savePreferences(getApplication())
+        _uiState.update {
+            it.copy(
+                adblockWhitelist = com.example.engine.AdBlocker.whitelistedSites.toSet()
+            )
+        }
+    }
+
+    fun addWhitelistedSite(domain: String) {
+        if (domain.isBlank()) return
+        val clean = domain.trim().lowercase().removePrefix("www.")
+        com.example.engine.AdBlocker.whitelistedSites.add(clean)
+        com.example.engine.AdBlocker.savePreferences(getApplication())
+        _uiState.update {
+            it.copy(adblockWhitelist = com.example.engine.AdBlocker.whitelistedSites.toSet())
+        }
+    }
+
+    fun removeWhitelistedSite(domain: String) {
+        com.example.engine.AdBlocker.whitelistedSites.remove(domain)
+        com.example.engine.AdBlocker.savePreferences(getApplication())
+        _uiState.update {
+            it.copy(adblockWhitelist = com.example.engine.AdBlocker.whitelistedSites.toSet())
+        }
+    }
+
+    fun addBlockedSite(domain: String) {
+        if (domain.isBlank()) return
+        val clean = domain.trim().lowercase().removePrefix("www.")
+        com.example.engine.AdBlocker.blockedSites.add(clean)
+        com.example.engine.AdBlocker.savePreferences(getApplication())
+        _uiState.update {
+            it.copy(adblockBlacklist = com.example.engine.AdBlocker.blockedSites.toSet())
+        }
+    }
+
+    fun removeBlockedSite(domain: String) {
+        com.example.engine.AdBlocker.blockedSites.remove(domain)
+        com.example.engine.AdBlocker.savePreferences(getApplication())
+        _uiState.update {
+            it.copy(adblockBlacklist = com.example.engine.AdBlocker.blockedSites.toSet())
+        }
+    }
+
+    fun updateAdBlockerRulesList() {
+        viewModelScope.launch {
+            try {
+                _uiState.update { it.copy(isFeedLoading = true) }
+                val size = com.example.engine.AdBlocker.downloadBlocklists(getApplication())
+                android.widget.Toast.makeText(getApplication(), "Blocklists updated! $size rules downloaded.", android.widget.Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                android.widget.Toast.makeText(getApplication(), "Failed to update blocklists: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+            } finally {
+                _uiState.update { it.copy(isFeedLoading = false) }
+            }
+        }
+    }
+
+    // TTS Control Methods
+    fun startListeningToPageText() {
+        val activeId = _uiState.value.activeTabId
+        val webView = webViewMap[activeId] ?: return
+        webView.evaluateJavascript("document.body.innerText") { result ->
+            val cleanResult = result?.trim()
+                ?.removePrefix("\"")?.removeSuffix("\"")
+                ?.replace("\\n", " ")?.replace("\\\"", "\"")
+                ?.replace("\\\\", "\\") ?: ""
+            if (cleanResult.isNotBlank() && cleanResult != "null") {
+                _uiState.update { it.copy(isTtsActive = true, isTtsPlaying = true) }
+                ttsEngine?.setSpeechRate(_uiState.value.ttsSpeed)
+                ttsEngine?.speak(cleanResult.take(6000), android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, "swift_tts")
+            } else {
+                android.widget.Toast.makeText(getApplication(), "No text content found on this webpage.", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    fun toggleTtsPlayback() {
+        val playing = _uiState.value.isTtsPlaying
+        if (playing) {
+            ttsEngine?.stop()
+            _uiState.update { it.copy(isTtsPlaying = false) }
+        } else {
+            startListeningToPageText()
+        }
+    }
+
+    fun stopTtsPlayback() {
+        ttsEngine?.stop()
+        _uiState.update { it.copy(isTtsActive = false, isTtsPlaying = false) }
+    }
+
+    fun setTtsSpeechRate(speed: Float) {
+        _uiState.update { it.copy(ttsSpeed = speed) }
+        ttsEngine?.setSpeechRate(speed)
+    }
+
+    // Tab Grouping & Group States
+    fun moveTabToGroup(tabId: String, name: String, colorValue: Long) {
+        updateTabState(tabId) {
+            it.copy(
+                groupId = name.lowercase().trim(),
+                groupName = name,
+                groupColor = colorValue
+            )
+        }
+    }
+
+    fun removeTabFromGroup(tabId: String) {
+        updateTabState(tabId) {
+            it.copy(
+                groupId = null,
+                groupName = null,
+                groupColor = null
+            )
+        }
+    }
+
+    // Advanced tab deletions / privately-held tabs
+    fun reopenClosedTab(closedTab: TabState) {
+        addNewTab(url = closedTab.url, isIncognito = closedTab.isIncognito)
+        _uiState.update { state ->
+            state.copy(
+                recentlyClosedTabs = state.recentlyClosedTabs.filter { it.id != closedTab.id }
+            )
+        }
+    }
+
+    fun closeAllTabs() {
+        val tabs = _uiState.value.tabs
+        tabs.forEach { destroyTabWebView(it.id) }
+        _uiState.update { state ->
+            state.copy(tabs = emptyList(), activeTabId = "")
+        }
+        addNewTab() // reopen default new tab
+    }
+
+    fun closeAllIncognitoTabs() {
+        val tabs = _uiState.value.tabs
+        val (incognito, normal) = tabs.partition { it.isIncognito }
+        incognito.forEach { destroyTabWebView(it.id) }
+        _uiState.update { state ->
+            state.copy(
+                tabs = normal,
+                activeTabId = normal.firstOrNull()?.id ?: ""
+            )
+        }
+        if (_uiState.value.tabs.isEmpty()) {
+            addNewTab()
+        }
+    }
+
+    fun clearBrowsingData(
+        history: Boolean,
+        cookies: Boolean,
+        cache: Boolean,
+        timeRangeIndex: Int
+    ) {
+        viewModelScope.launch {
+            val cutoff = when (timeRangeIndex) {
+                0 -> System.currentTimeMillis() - 3600 * 1000L
+                1 -> System.currentTimeMillis() - 24 * 3600 * 1000L
+                2 -> System.currentTimeMillis() - 7 * 24 * 3600 * 1000L
+                3 -> System.currentTimeMillis() - 28 * 24 * 3600 * 1000L
+                else -> 0L
+            }
+            if (history) {
+                if (cutoff == 0L) {
+                    repository.clearHistory()
+                } else {
+                    repository.deleteHistorySince(cutoff)
+                }
+            }
+            if (cookies) {
+                android.webkit.CookieManager.getInstance().removeAllCookies(null)
+            }
+            if (cache) {
+                _uiState.value.tabs.forEach { tab ->
+                    webViewMap[tab.id]?.clearCache(true)
+                }
+            }
+            android.widget.Toast.makeText(getApplication(), "Browsing data successfully cleared", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        try {
+            ttsEngine?.stop()
+            ttsEngine?.shutdown()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 }
