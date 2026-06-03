@@ -39,4 +39,29 @@ class PreferenceManager(context: Context) {
         prefs.edit().putInt("reader_font_size", size).apply()
         _readerFontSize.value = size
     }
+
+    // Generic preferences methods for advanced settings UI
+    fun getString(key: String, defaultValue: String): String {
+        return prefs.getString(key, defaultValue) ?: defaultValue
+    }
+
+    fun setString(key: String, value: String) {
+        prefs.edit().putString(key, value).apply()
+    }
+
+    fun getBoolean(key: String, defaultValue: Boolean): Boolean {
+        return prefs.getBoolean(key, defaultValue)
+    }
+
+    fun setBoolean(key: String, value: Boolean) {
+        prefs.edit().putBoolean(key, value).apply()
+    }
+
+    fun getInt(key: String, defaultValue: Int): Int {
+        return prefs.getInt(key, defaultValue)
+    }
+
+    fun setInt(key: String, value: Int) {
+        prefs.edit().putInt(key, value).apply()
+    }
 }

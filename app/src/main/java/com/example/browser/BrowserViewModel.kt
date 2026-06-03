@@ -80,7 +80,11 @@ data class BrowserUiState(
     val ttsSpeed: Float = 1.0f,
     
     // Recently closed tabs tracking
-    val recentlyClosedTabs: List<TabState> = emptyList()
+    val recentlyClosedTabs: List<TabState> = emptyList(),
+    
+    // Address Bar & Home Shortcut settings states
+    val addressBarPosition: String = "top",
+    val showHomeButton: Boolean = true
 )
 
 class BrowserViewModel(
@@ -172,10 +176,32 @@ class BrowserViewModel(
         // Add initial tab
         addNewTab()
         loadArticlesForCategory("For You", false)
+        refreshSettings()
+    }
+
+    fun refreshSettings() {
+        val position = prefs.getString("address_bar_position", "top")
+        val showHome = prefs.getBoolean("show_home_button", true)
+        _uiState.update {
+            it.copy(
+                addressBarPosition = position,
+                showHomeButton = showHome
+            )
+        }
     }
 
     // Tab Management
     fun addNewTab(url: String = "orion://newtab", isIncognito: Boolean = false) {
+        val currentTabs = _uiState.value.tabs
+        if (currentTabs.size >= 10) {
+            android.widget.Toast.makeText(
+                getApplication(),
+                "Tab limit of 10 reached. Please close other tabs to continue.",
+                android.widget.Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
+
         val tabId = UUID.randomUUID().toString()
         val formatted = if (url == "orion://newtab" && isIncognito) "orion://newtab-incognito" else formatUrlOrSearch(url)
         val newTab = TabState(
@@ -344,91 +370,103 @@ class BrowserViewModel(
                     view: WebView?,
                     request: WebResourceRequest?
                 ): WebResourceResponse? {
-                    val urlStr = request?.url?.toString()
-                    val currentDocUrl = view?.url ?: _uiState.value.tabs.find { it.id == tabId }?.url
-                    if (com.example.engine.AdBlocker.shouldBlock(urlStr, currentDocUrl)) {
-                        incrementBlockedAdsCount(tabId)
-                        return com.example.engine.AdBlocker.createEmptyResponse()
+                    return try {
+                        val urlStr = request?.url?.toString()
+                        val currentDocUrl = view?.url ?: _uiState.value.tabs.find { it.id == tabId }?.url
+                        if (com.example.engine.AdBlocker.shouldBlock(urlStr, currentDocUrl)) {
+                            incrementBlockedAdsCount(tabId)
+                            com.example.engine.AdBlocker.createEmptyResponse()
+                        } else {
+                            super.shouldInterceptRequest(view, request)
+                        }
+                    } catch (e: Throwable) {
+                        e.printStackTrace()
+                        super.shouldInterceptRequest(view, request)
                     }
-                    return super.shouldInterceptRequest(view, request)
                 }
 
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                    super.onPageStarted(view, url, favicon)
-                    updateTabState(tabId) {
-                        it.copy(
-                            url = url ?: it.url,
-                            isLoading = true,
-                            progress = 10,
-                            favicon = favicon ?: it.favicon,
-                            readerModeAvailable = false,
-                            blockedAdsCount = 0
-                        )
-                    }
-                    if (_uiState.value.activeTabId == tabId) {
-                        val isTabIncognito = _uiState.value.tabs.find { it.id == tabId }?.isIncognito == true
-                        _uiState.update { 
+                    try {
+                        super.onPageStarted(view, url, favicon)
+                        updateTabState(tabId) {
                             it.copy(
-                                currentInputUrl = if (url == "orion://newtab" || url == "orion://newtab-incognito") "" else (url ?: "")
-                            ) 
+                                url = url ?: it.url,
+                                isLoading = true,
+                                progress = 10,
+                                favicon = favicon ?: it.favicon,
+                                readerModeAvailable = false,
+                                blockedAdsCount = 0
+                            )
                         }
+                        if (_uiState.value.activeTabId == tabId) {
+                            _uiState.update { 
+                                it.copy(
+                                    currentInputUrl = if (url == "orion://newtab" || url == "orion://newtab-incognito") "" else (url ?: "")
+                                ) 
+                            }
+                        }
+                    } catch (e: Throwable) {
+                        e.printStackTrace()
                     }
                 }
 
                 override fun onPageFinished(view: WebView?, url: String?) {
-                    super.onPageFinished(view, url)
-                    val title = view?.title ?: ""
-                    val isTabIncognito = _uiState.value.tabs.find { it.id == tabId }?.isIncognito == true
-                    updateTabState(tabId) {
-                        it.copy(
-                            url = url ?: it.url,
-                            title = if (url == "orion://newtab" || url == "orion://newtab-incognito") {
-                                if (isTabIncognito) "Incognito Tab" else "New Tab"
-                            } else {
-                                title.ifBlank { url ?: "Loaded" }
-                            },
-                            isLoading = false,
-                            progress = 100,
-                            canGoBack = view?.canGoBack() ?: false,
-                            canGoForward = view?.canGoForward() ?: false
-                        )
-                    }
-
-                    if (url != null && url != "orion://newtab" && url != "orion://newtab-incognito" && !url.startsWith("orion://") && !isTabIncognito) {
-                        viewModelScope.launch {
-                            repository.addHistory(url, title)
+                    try {
+                        super.onPageFinished(view, url)
+                        val title = view?.title ?: ""
+                        val isTabIncognito = _uiState.value.tabs.find { it.id == tabId }?.isIncognito == true
+                        updateTabState(tabId) {
+                            it.copy(
+                                url = url ?: it.url,
+                                title = if (url == "orion://newtab" || url == "orion://newtab-incognito") {
+                                    if (isTabIncognito) "Incognito Tab" else "New Tab"
+                                } else {
+                                    title.ifBlank { url ?: "Loaded" }
+                                },
+                                isLoading = false,
+                                progress = 100,
+                                canGoBack = view?.canGoBack() ?: false,
+                                canGoForward = view?.canGoForward() ?: false
+                            )
                         }
-                    }
 
-                    if (url != null && url.contains("youtube.com") && com.example.engine.AdBlocker.youtubeAdSkipEnabled) {
-                        view?.evaluateJavascript("""
-                            (function() {
-                                var selectors = [
-                                    '.ad-showing', '.ad-interrupting',
-                                    '#player-ads', '.ytp-ad-module',
-                                    '.ytd-display-ad-renderer',
-                                    '.ytd-promoted-sparkles-web-renderer',
-                                    'ytd-ad-slot-renderer',
-                                    'ytd-in-feed-ad-layout-renderer'
-                                ];
-                                selectors.forEach(function(sel) {
-                                    document.querySelectorAll(sel).forEach(function(el) { el.remove(); });
-                                });
-                                
-                                setInterval(function() {
-                                    var skipBtn = document.querySelector('.ytp-ad-skip-button, .ytp-skip-ad-button');
-                                    if (skipBtn) { skipBtn.click(); }
+                        if (url != null && url != "orion://newtab" && url != "orion://newtab-incognito" && !url.startsWith("orion://") && !isTabIncognito) {
+                            viewModelScope.launch {
+                                repository.addHistory(url, title)
+                            }
+                        }
+
+                        if (url != null && url.contains("youtube.com") && com.example.engine.AdBlocker.youtubeAdSkipEnabled) {
+                            view?.evaluateJavascript("""
+                                (function() {
+                                    var selectors = [
+                                        '.ad-showing', '.ad-interrupting',
+                                        '#player-ads', '.ytp-ad-module',
+                                        '.ytd-display-ad-renderer',
+                                        '.ytd-promoted-sparkles-web-renderer',
+                                        'ytd-ad-slot-renderer',
+                                        'ytd-in-feed-ad-layout-renderer'
+                                    ];
+                                    selectors.forEach(function(sel) {
+                                        document.querySelectorAll(sel).forEach(function(el) { el.remove(); });
+                                    });
                                     
-                                    var adVideo = document.querySelector('video.ad-showing');
-                                    if (adVideo) { adVideo.currentTime = adVideo.duration; }
-                                }, 300);
-                            })();
-                        """.trimIndent(), null)
-                    }
+                                    setInterval(function() {
+                                        var skipBtn = document.querySelector('.ytp-ad-skip-button, .ytp-skip-ad-button');
+                                        if (skipBtn) { skipBtn.click(); }
+                                        
+                                        var adVideo = document.querySelector('video.ad-showing');
+                                        if (adVideo) { adVideo.currentTime = adVideo.duration; }
+                                    }, 300);
+                                })();
+                            """.trimIndent(), null)
+                        }
 
-                    // Check for Reader Mode
-                    if (url != null && !url.startsWith("orion://")) {
-                        detectReaderModeAvailability(view)
+                        if (url != null && !url.startsWith("orion://")) {
+                            detectReaderModeAvailability(view)
+                        }
+                    } catch (e: Throwable) {
+                        e.printStackTrace()
                     }
                 }
 
@@ -437,16 +475,20 @@ class BrowserViewModel(
                     request: WebResourceRequest?,
                     error: WebResourceError?
                 ) {
-                    val isMainFrame = request?.isForMainFrame ?: false
-                    if (isMainFrame) {
-                        val failingUrl = request?.url?.toString() ?: ""
-                        val description = error?.description?.toString() ?: "Connect failed"
-                        val errorType = when {
-                            description.contains("disconnected", true) || description.contains("offline", true) || error?.errorCode == ERROR_CONNECT -> "offline"
-                            error?.errorCode == ERROR_TIMEOUT -> "timeout"
-                            else -> "offline"
+                    try {
+                        val isMainFrame = request?.isForMainFrame ?: false
+                        if (isMainFrame) {
+                            val failingUrl = request?.url?.toString() ?: ""
+                            val description = error?.description?.toString() ?: "Connect failed"
+                            val errorType = when {
+                                description.contains("disconnected", true) || description.contains("offline", true) || error?.errorCode == ERROR_CONNECT -> "offline"
+                                error?.errorCode == ERROR_TIMEOUT -> "timeout"
+                                else -> "offline"
+                            }
+                            loadErrorHtml(view, errorType, failingUrl)
                         }
-                        loadErrorHtml(view, errorType, failingUrl)
+                    } catch (e: Throwable) {
+                        e.printStackTrace()
                     }
                 }
 
@@ -455,10 +497,14 @@ class BrowserViewModel(
                     request: WebResourceRequest?,
                     errorResponse: WebResourceResponse?
                 ) {
-                    val isMainFrame = request?.isForMainFrame ?: false
-                    if (isMainFrame && errorResponse?.statusCode == 404) {
-                        val failingUrl = request?.url?.toString() ?: ""
-                        loadErrorHtml(view, "404", failingUrl)
+                    try {
+                        val isMainFrame = request?.isForMainFrame ?: false
+                        if (isMainFrame && errorResponse?.statusCode == 404) {
+                            val failingUrl = request?.url?.toString() ?: ""
+                            loadErrorHtml(view, "404", failingUrl)
+                        }
+                    } catch (e: Throwable) {
+                        e.printStackTrace()
                     }
                 }
 
@@ -467,48 +513,64 @@ class BrowserViewModel(
                     handler: SslErrorHandler?,
                     error: android.net.http.SslError?
                 ) {
-                    // Custom HTML secure connection error
-                    val failingUrl = error?.url ?: ""
-                    loadErrorHtml(view, "ssl", failingUrl)
-                    handler?.cancel() // Cancel securely
+                    try {
+                        val failingUrl = error?.url ?: ""
+                        loadErrorHtml(view, "ssl", failingUrl)
+                        handler?.cancel()
+                    } catch (e: Throwable) {
+                        e.printStackTrace()
+                    }
                 }
 
                 override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                    val url = request?.url?.toString() ?: return false
-                    if (url.startsWith("orion://retry")) {
-                        val queryUrl = request.url.getQueryParameter("url")
-                        if (!queryUrl.isNullOrBlank()) {
-                            view?.loadUrl(queryUrl)
-                        } else {
-                            view?.loadUrl("orion://newtab")
+                    try {
+                        val url = request?.url?.toString() ?: return false
+                        if (url.startsWith("orion://retry")) {
+                            val queryUrl = request.url.getQueryParameter("url")
+                            if (!queryUrl.isNullOrBlank()) {
+                                safeLoadUrl(view, queryUrl)
+                            } else {
+                                safeLoadUrl(view, "orion://newtab")
+                            }
+                            return true
                         }
-                        return true
-                    }
-                    if (url.startsWith("javascript:", true)) {
-                        return true
-                    }
-                    if (url.startsWith("intent://", true)) {
-                        try {
-                            val intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME)
-                            intent.addCategory(Intent.CATEGORY_BROWSABLE)
-                            intent.setComponent(null)
-                            intent.setSelector(null)
-                            view?.context?.startActivity(intent)
-                        } catch (e: Exception) {
-                            e.printStackTrace()
+                        if (url.startsWith("javascript:", true)) {
+                            return true
                         }
-                        return true
-                    }
-                    if (url.startsWith("tel:", true) || url.startsWith("mailto:", true) || url.startsWith("market:", true)) {
-                        try {
-                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                            view?.context?.startActivity(intent)
-                        } catch (e: Exception) {
-                            e.printStackTrace()
+                        if (url.startsWith("intent://", true)) {
+                            try {
+                                val intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME)
+                                intent.addCategory(Intent.CATEGORY_BROWSABLE)
+                                intent.setComponent(null)
+                                intent.setSelector(null)
+                                view?.context?.startActivity(intent)
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                            }
+                            return true
                         }
-                        return true
+                        if (url.startsWith("tel:", true) || url.startsWith("mailto:", true) || url.startsWith("market:", true)) {
+                            try {
+                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                                view?.context?.startActivity(intent)
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                            }
+                            return true
+                        }
+                    } catch (e: Throwable) {
+                        e.printStackTrace()
                     }
                     return false
+                }
+
+                override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                    try {
+                        android.util.Log.e("WebViewClient", "WebView render process gone")
+                    } catch (e: Throwable) {
+                        e.printStackTrace()
+                    }
+                    return true
                 }
             }
 
@@ -576,7 +638,7 @@ class BrowserViewModel(
         // If the URL is already present in TabState, load it initially
         val urlToLoad = currentTab?.url ?: "orion://newtab"
         if (urlToLoad != "orion://newtab") {
-            webView.loadUrl(urlToLoad)
+            safeLoadUrl(webView, urlToLoad)
         }
 
         webViewMap[tabId] = webView
@@ -820,9 +882,9 @@ class BrowserViewModel(
         val webView = webViewMap[activeId]
         if (webView != null) {
             if (formatted == "orion://newtab") {
-                webView.loadUrl("about:blank")
+                safeLoadUrl(webView, "about:blank")
             } else {
-                webView.loadUrl(formatted)
+                safeLoadUrl(webView, formatted)
             }
         }
     }
@@ -1115,24 +1177,79 @@ class BrowserViewModel(
         return size
     }
 
-    private fun formatUrlOrSearch(input: String): String {
-        val trimmed = input.trim()
-        if (trimmed.isEmpty() || trimmed == "orion://newtab") return "orion://newtab"
+    fun safeLoadUrl(webView: android.webkit.WebView?, url: String) {
+        if (webView == null) return
+        val trimmed = url.trim()
+        if (trimmed.isEmpty()) return
+        
+        webView.post {
+            try {
+                webView.loadUrl(trimmed)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
 
-        if (trimmed == "about:blank" || trimmed.startsWith("orion://")) {
+    private fun getSelectedSearchEngine(): String {
+        return prefs.getString("default_search_engine", "Google")
+    }
+
+    private fun getSearchEngineUrl(engineName: String): String {
+        return when (engineName) {
+            "Google" -> "https://www.google.com/search?q={query}"
+            "Bing" -> "https://www.bing.com/search?q={query}"
+            "DuckDuckGo" -> "https://duckduckgo.com/?q={query}"
+            "Yahoo" -> "https://search.yahoo.com/search?p={query}"
+            "Brave" -> "https://search.brave.com/search?q={query}"
+            "ChatGPT" -> "https://chatgpt.com/?q={query}"
+            "Claude (Anthropic)" -> "https://claude.ai/search?q={query}"
+            "Perplexity AI" -> "https://www.perplexity.ai/search?q={query}"
+            "Ecosia" -> "https://www.ecosia.org/search?q={query}"
+            "Yandex" -> "https://yandex.com/search/?text={query}"
+            "Startpage" -> "https://www.startpage.com/search?q={query}"
+            "Qwant" -> "https://www.qwant.com/?q={query}"
+            else -> "https://www.google.com/search?q={query}"
+        }
+    }
+
+    fun processInput(input: String): String {
+        val trimmed = input.trim()
+        if (trimmed.isEmpty()) return "about:blank"
+        
+        // Check if it's a local or internal URI
+        if (trimmed.startsWith("file://") || trimmed.startsWith("content://") || trimmed.startsWith("about:") || trimmed.startsWith("orion://")) {
             return trimmed
         }
-
-        val hasSpace = trimmed.contains(" ")
-        val hasScheme = trimmed.startsWith("http://") || trimmed.startsWith("https://")
-        val hasDot = trimmed.contains(".") && trimmed.substringAfterLast(".").count() in 2..4
-
-        return if (!hasSpace && (hasScheme || hasDot)) {
-            if (hasScheme) trimmed else "https://$trimmed"
-        } else {
-            val encodedQuery = java.net.URLEncoder.encode(trimmed, "UTF-8")
-            "https://www.google.com/search?q=$encodedQuery"
+        
+        // Check if it's a valid URL or IP address
+        val webUrlPattern = android.util.Patterns.WEB_URL
+        val isUrl = webUrlPattern.matcher(trimmed).matches() || 
+                    (trimmed.contains(".") && !trimmed.contains(" ") && trimmed.length > 3)
+                    
+        if (isUrl) {
+            return if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+                trimmed
+            } else {
+                "https://$trimmed"
+            }
         }
+        
+        // If not a URL, treat it as a search query
+        return buildSearchUrl(trimmed)
+    }
+
+    fun buildSearchUrl(query: String): String {
+        val defaultEngine = getSelectedSearchEngine()
+        val queryEncoded = java.net.URLEncoder.encode(query, "UTF-8")
+        val urlTemplate = getSearchEngineUrl(defaultEngine)
+        return urlTemplate.replace("{query}", queryEncoded)
+    }
+
+    private fun formatUrlOrSearch(input: String): String {
+        val trimmed = input.trim()
+        if (trimmed == "orion://newtab" || trimmed == "orion://newtab-incognito") return trimmed
+        return processInput(trimmed)
     }
 
     private fun captureWebViewScreenshot(webView: WebView): Bitmap? {

@@ -48,6 +48,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.PreferenceManager
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.data.Bookmark
 import com.example.data.HistoryItem
@@ -92,6 +93,167 @@ fun BrowserScreen(
     var showAddShortcutDialog by remember { mutableStateOf(false) }
     var showGroupTabDialog by remember { mutableStateOf(false) }
 
+    val addressBarContent = @Composable {
+        Surface(
+            color = if (isGlass) Color(0xD90A0E17) else MaterialTheme.colorScheme.surface,
+            contentColor = if (isGlass) Color.White else MaterialTheme.colorScheme.onSurface,
+            border = if (isGlass) BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)) else null,
+            tonalElevation = if (isGlass) 0.dp else 4.dp,
+            shadowElevation = if (isGlass) 0.dp else 2.dp
+        ) {
+            Column {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Back Navigation Button
+                    IconButton(
+                        onClick = { viewModel.goBack() },
+                        enabled = activeTab?.canGoBack == true,
+                        modifier = Modifier.testTag("omnibox_back")
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back",
+                            tint = if (isGlass) {
+                                if (activeTab?.canGoBack == true) Color.White else Color.White.copy(alpha = 0.3f)
+                            } else {
+                                LocalContentColor.current
+                            }
+                        )
+                    }
+
+                    // URL input Bar
+                    Surface(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(44.dp)
+                            .padding(horizontal = 6.dp),
+                        shape = RoundedCornerShape(22.dp),
+                        color = if (isGlass) Color.White.copy(alpha = 0.10f) else MaterialTheme.colorScheme.surfaceVariant,
+                        contentColor = if (isGlass) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                        border = BorderStroke(
+                            1.dp,
+                            if (isGlass) Color.White.copy(alpha = 0.10f) else MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // Security Lock / Home Icon indicator
+                            IconButton(
+                                onClick = {
+                                    if (activeTab?.url?.startsWith("https://") == true) {
+                                        showSslDialog = true
+                                    }
+                                },
+                                modifier = Modifier.size(24.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (activeTab?.url?.startsWith("https://") == true) Icons.Default.Lock else Icons.Default.Search,
+                                    contentDescription = "Security Status",
+                                    tint = if (activeTab?.url?.startsWith("https://") == true) {
+                                        Color(0xFF4CAF50)
+                                    } else if (isGlass) {
+                                        Color.White.copy(alpha = 0.7f)
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.width(8.dp))
+
+                            // basic editable text field
+                            BasicTextFieldWithoutLabel(
+                                value = uiState.currentInputUrl,
+                                onValueChange = { viewModel.setInputUrlAndQuery(it) },
+                                onDone = {
+                                    focusManager.clearFocus()
+                                    viewModel.navigateTo(uiState.currentInputUrl)
+                                },
+                                placeholder = "Search or enter address",
+                                textStyle = LocalTextStyle.current.copy(
+                                    color = if (isGlass) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 14.sp
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .onFocusChanged { viewModel.setSearchFocused(it.isFocused) }
+                                    .testTag("url_input_bar")
+                            )
+
+                            // Reader Mode indicator icon (Only if available on load)
+                            if (activeTab?.readerModeAvailable == true) {
+                                IconButton(
+                                    onClick = { viewModel.triggerReaderMode() },
+                                    modifier = Modifier.size(28.dp).testTag("reader_mode_trigger")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.List,
+                                        contentDescription = "Reader Mode",
+                                        tint = if (isGlass) Color.White else MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+
+                            // Bookmark star toggle button
+                            if (activeTab?.url != "orion://newtab") {
+                                IconButton(
+                                    onClick = { viewModel.toggleBookmarkActive() },
+                                    modifier = Modifier.size(28.dp).testTag("bookmark_star_toggle")
+                                ) {
+                                    Icon(
+                                        imageVector = if (isBookmarked) Icons.Default.Star else Icons.Default.StarBorder,
+                                        contentDescription = "Bookmark Page",
+                                        tint = if (isBookmarked) Color(0xFFFFD700) else if (isGlass) Color.White.copy(alpha = 0.7f) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+
+                            // Stop / Reload button
+                            IconButton(
+                                onClick = {
+                                    if (activeTab?.isLoading == true) {
+                                        viewModel.getOrCreateWebView(activeTab.id, context).stopLoading()
+                                    } else {
+                                        viewModel.reload()
+                                    }
+                                },
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (activeTab?.isLoading == true) Icons.Default.Close else Icons.Default.Refresh,
+                                    contentDescription = "Refresh",
+                                    tint = if (isGlass) Color.White.copy(alpha = 0.8f) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Web Loader linear progress indicator
+                if (activeTab?.isLoading == true && activeTab.progress < 100) {
+                    LinearProgressIndicator(
+                        progress = activeTab.progress / 100f,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(2.dp)
+                    )
+                } else {
+                    Spacer(modifier = Modifier.height(2.dp))
+                }
+            }
+        }
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -99,165 +261,8 @@ fun BrowserScreen(
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
             // 1. Omnibox / Top Address Bar (Only when Tab Switcher & Reader Mode are inactive)
-            if (!uiState.isTabSwitcherOpen && !uiState.readerModeActive) {
-                Surface(
-                    color = if (isGlass) Color(0xD90A0E17) else MaterialTheme.colorScheme.surface,
-                    contentColor = if (isGlass) Color.White else MaterialTheme.colorScheme.onSurface,
-                    border = if (isGlass) BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)) else null,
-                    tonalElevation = if (isGlass) 0.dp else 4.dp,
-                    shadowElevation = if (isGlass) 0.dp else 2.dp
-                ) {
-                    Column {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 12.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            // Back Navigation Button
-                            IconButton(
-                                onClick = { viewModel.goBack() },
-                                enabled = activeTab?.canGoBack == true,
-                                modifier = Modifier.testTag("omnibox_back")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                    contentDescription = "Back",
-                                    tint = if (isGlass) {
-                                        if (activeTab?.canGoBack == true) Color.White else Color.White.copy(alpha = 0.3f)
-                                    } else {
-                                        LocalContentColor.current
-                                    }
-                                )
-                            }
-
-                            // URL input Bar
-                            Surface(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(44.dp)
-                                    .padding(horizontal = 6.dp),
-                                shape = RoundedCornerShape(22.dp),
-                                color = if (isGlass) Color.White.copy(alpha = 0.10f) else MaterialTheme.colorScheme.surfaceVariant,
-                                contentColor = if (isGlass) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
-                                border = BorderStroke(
-                                    1.dp,
-                                    if (isGlass) Color.White.copy(alpha = 0.10f) else MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
-                                )
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    // Security Lock / Home Icon indicator
-                                    IconButton(
-                                        onClick = {
-                                            if (activeTab?.url?.startsWith("https://") == true) {
-                                                showSslDialog = true
-                                            }
-                                        },
-                                        modifier = Modifier.size(24.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = if (activeTab?.url?.startsWith("https://") == true) Icons.Default.Lock else Icons.Default.Search,
-                                            contentDescription = "Security Status",
-                                            tint = if (activeTab?.url?.startsWith("https://") == true) {
-                                                Color(0xFF4CAF50)
-                                            } else if (isGlass) {
-                                                Color.White.copy(alpha = 0.7f)
-                                            } else {
-                                                MaterialTheme.colorScheme.onSurfaceVariant
-                                            },
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                    }
-
-                                    Spacer(modifier = Modifier.width(8.dp))
-
-                                    // basic editable text field
-                                    BasicTextFieldWithoutLabel(
-                                        value = uiState.currentInputUrl,
-                                        onValueChange = { viewModel.setInputUrlAndQuery(it) },
-                                        onDone = {
-                                            focusManager.clearFocus()
-                                            viewModel.navigateTo(uiState.currentInputUrl)
-                                        },
-                                        placeholder = "Search or enter address",
-                                        textStyle = LocalTextStyle.current.copy(
-                                            color = if (isGlass) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
-                                            fontSize = 14.sp
-                                        ),
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .onFocusChanged { viewModel.setSearchFocused(it.isFocused) }
-                                            .testTag("url_input_bar")
-                                    )
-
-                                    // Reader Mode indicator icon (Only if available on load)
-                                    if (activeTab?.readerModeAvailable == true) {
-                                        IconButton(
-                                            onClick = { viewModel.triggerReaderMode() },
-                                            modifier = Modifier.size(28.dp).testTag("reader_mode_trigger")
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.AutoMirrored.Filled.List,
-                                                contentDescription = "Reader Mode",
-                                                tint = if (isGlass) Color.White else MaterialTheme.colorScheme.primary,
-                                                modifier = Modifier.size(18.dp)
-                                            )
-                                        }
-                                    }
-
-                                    // Bookmark star toggle button
-                                    if (activeTab?.url != "orion://newtab") {
-                                        IconButton(
-                                            onClick = { viewModel.toggleBookmarkActive() },
-                                            modifier = Modifier.size(28.dp).testTag("bookmark_star_toggle")
-                                        ) {
-                                            Icon(
-                                                imageVector = if (isBookmarked) Icons.Default.Star else Icons.Default.StarBorder,
-                                                contentDescription = "Bookmark Page",
-                                                tint = if (isBookmarked) Color(0xFFFFD700) else if (isGlass) Color.White.copy(alpha = 0.7f) else MaterialTheme.colorScheme.onSurfaceVariant,
-                                                modifier = Modifier.size(18.dp)
-                                            )
-                                        }
-                                    }
-
-                                    // Stop / Reload button
-                                    IconButton(
-                                        onClick = {
-                                            if (activeTab?.isLoading == true) {
-                                                viewModel.getOrCreateWebView(activeTab.id, context).stopLoading()
-                                            } else {
-                                                viewModel.reload()
-                                            }
-                                        },
-                                        modifier = Modifier.size(28.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = if (activeTab?.isLoading == true) Icons.Default.Close else Icons.Default.Refresh,
-                                            contentDescription = "Refresh",
-                                            tint = if (isGlass) Color.White.copy(alpha = 0.8f) else MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-
-                        // Web Loader linear progress indicator
-                        if (activeTab?.isLoading == true && activeTab.progress < 100) {
-                            LinearProgressIndicator(
-                                progress = activeTab.progress / 100f,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(2.dp)
-                            )
-                        } else {
-                            Spacer(modifier = Modifier.height(2.dp))
-                        }
-                    }
-                }
+            if (!uiState.isTabSwitcherOpen && !uiState.readerModeActive && uiState.addressBarPosition != "bottom") {
+                addressBarContent()
             }
 
             // 2. Active Web Contents / New Tab Home Screen Frame
@@ -328,6 +333,10 @@ fun BrowserScreen(
             }
 
             // 4. Default Bottom Nav bar Toolbar (Hidden during tab switcher & reader mode)
+            if (!uiState.isTabSwitcherOpen && !uiState.readerModeActive && uiState.addressBarPosition == "bottom") {
+                addressBarContent()
+            }
+
             if (!uiState.isTabSwitcherOpen && !uiState.readerModeActive) {
                 Surface(
                     color = if (isGlass) Color(0xD90A0E17) else MaterialTheme.colorScheme.surface,
@@ -1105,12 +1114,16 @@ fun SettingsOverlay(
     var showImportDialog by remember { mutableStateOf(false) }
     var showAddWhitelistDialog by remember { mutableStateOf(false) }
     var newWhitelistHost by remember { mutableStateOf("") }
+    var showLocalClearDataDialog by remember { mutableStateOf(false) }
     
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val bookmarks by viewModel.bookmarks.collectAsState()
 
     val isGlass = state.newTabWallpaper == "Frosted Glass"
+    val prefs = remember { PreferenceManager(context) }
+    
+    var currentScreen by remember { mutableStateOf("main") }
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -1123,291 +1136,430 @@ fun SettingsOverlay(
                 .fillMaxHeight(0.85f)
                 .padding(vertical = 16.dp)
         ) {
-            Column(
+            Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(24.dp)
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Browser Settings",
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    IconButton(onClick = onDismiss) {
-                        Icon(imageVector = Icons.Default.Close, contentDescription = "Close settings")
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .verticalScroll(rememberScrollState())
-                ) {
-                    Text(
-                        text = "Ad Shield Protection",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    // Block Ads globally
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Block Ads & Trackers", fontWeight = FontWeight.Medium)
-                            Text("Aggressive ad-blocking shield for all websites", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        Switch(
-                            checked = state.globalAdBlockEnabled,
-                            onCheckedChange = { viewModel.setGlobalAdBlockEnabled(it) }
-                        )
-                    }
-
-                    // Block analytical trackers
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Advanced Tracking Protection", fontWeight = FontWeight.Medium)
-                            Text("Block analytical trackers and script overlays", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        Switch(
-                            checked = state.globalTrackersEnabled,
-                            onCheckedChange = { viewModel.setGlobalTrackersEnabled(it) }
-                        )
-                    }
-
-                    // YouTube ad skip
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("YouTube Ad Auto-Skipper", fontWeight = FontWeight.Medium)
-                            Text("Bypass youtube.com interstitial video ads automatically", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        Switch(
-                            checked = state.youtubeAdSkipEnabled,
-                            onCheckedChange = { viewModel.setYoutubeAdSkipEnabled(it) }
-                        )
-                    }
-
-                    // Check for database update
-                    ListItem(
-                        headlineContent = { Text("Update blockers blocklist", fontWeight = FontWeight.Medium) },
-                        supportingContent = { Text("Synchronize rules database from EasyList & EasyPrivacy", fontSize = 11.sp) },
-                        leadingContent = { Icon(Icons.Default.Refresh, contentDescription = null) },
-                        modifier = Modifier.clickable { viewModel.updateAdBlockerRulesList() }
-                    )
-
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text("Ad-Blocking Site Whitelist", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Websites allowed to show ads (${state.adblockWhitelist.size})", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        TextButton(onClick = { showAddWhitelistDialog = true }) {
-                            Text("+ Allow Site")
-                        }
-                    }
-
-                    if (state.adblockWhitelist.isEmpty()) {
-                        Text("No whitelisted sites.", fontSize = 11.sp, color = Color.Gray, modifier = Modifier.padding(bottom = 8.dp))
-                    } else {
-                        state.adblockWhitelist.forEach { host ->
+                when (currentScreen) {
+                    "main" -> {
+                        Column(modifier = Modifier.fillMaxSize()) {
                             Row(
-                                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text(host, fontSize = 12.sp)
-                                IconButton(onClick = { viewModel.removeWhitelistedSite(host) }, modifier = Modifier.size(28.dp)) {
-                                    Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color.Red.copy(alpha = 0.7f))
+                                Text(
+                                    text = "Settings",
+                                    fontSize = 20.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                IconButton(onClick = onDismiss) {
+                                    Icon(imageVector = Icons.Default.Close, contentDescription = "Close settings")
                                 }
                             }
-                        }
-                    }
 
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+                            Spacer(modifier = Modifier.height(16.dp))
 
-                    Text(
-                        text = "Advanced Settings",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    // SwitchPreference: JavaScript
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Enable JavaScript", fontWeight = FontWeight.Medium)
-                            Text("Allows webpages to execute JS scripts", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        Switch(
-                            checked = state.isJavaScriptEnabled,
-                            onCheckedChange = { viewModel.toggleJavaScript(it) },
-                            modifier = Modifier.testTag("js_enable_switch")
-                        )
-                    }
-
-                    // SwitchPreference: Hardware acceleration
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Hardware Acceleration", fontWeight = FontWeight.Medium)
-                            Text("Uses hardware GPU layer to load pages faster", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        Switch(
-                            checked = state.isHardwareAccelerationEnabled,
-                            onCheckedChange = { viewModel.toggleHardwareAcceleration(it) },
-                            modifier = Modifier.testTag("hw_enable_switch")
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text(
-                        text = "Content & Style",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    // Homepage Wallpapers config
-                    Text("Select Home Wallpaper", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    val wallpapers = listOf("Frosted Glass", "Minimal Slate", "Cosmic Twilight", "Purple Dusk", "Deep Ocean", "Warm Sunrise")
-                    FlowRow(
-                        modifier = Modifier.fillMaxWidth(),
-                        mainAxisSpacing = 8.dp,
-                        crossAxisSpacing = 8.dp
-                    ) {
-                        wallpapers.forEach { wp ->
-                            val isSelected = state.newTabWallpaper == wp
-                            Button(
-                                onClick = { viewModel.setNewTabWallpaper(wp) },
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                                    contentColor = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-                                ),
-                                shape = RoundedCornerShape(16.dp),
-                                modifier = Modifier.height(34.dp)
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .verticalScroll(rememberScrollState())
                             ) {
-                                Text(wp, fontSize = 11.sp)
+                                // Group: Basics
+                                Text(
+                                    text = "Basics",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(vertical = 8.dp)
+                                )
+
+                                ListItem(
+                                    headlineContent = { Text("Search engine") },
+                                    supportingContent = { Text(prefs.getString("default_search_engine", "Google"), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                                    leadingContent = { Icon(Icons.Default.Search, contentDescription = null) },
+                                    trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color.Gray) },
+                                    modifier = Modifier.clickable { currentScreen = "search_engine" }
+                                )
+
+                                ListItem(
+                                    headlineContent = { Text("Tabs") },
+                                    supportingContent = { Text("Tab limit: ${prefs.getInt("tab_limit", 10)} tabs active", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                                    leadingContent = { Icon(Icons.Default.Layers, contentDescription = null) },
+                                    trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color.Gray) },
+                                    modifier = Modifier.clickable { currentScreen = "tabs" }
+                                )
+
+                                ListItem(
+                                    headlineContent = { Text("Homepage") },
+                                    supportingContent = { Text("Wallpaper: ${prefs.getString("new_tab_wallpaper", "Cosmic Twilight")}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                                    leadingContent = { Icon(Icons.Default.Home, contentDescription = null) },
+                                    trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color.Gray) },
+                                    modifier = Modifier.clickable { currentScreen = "homepage" }
+                                )
+
+                                ListItem(
+                                    headlineContent = { Text("Appearance") },
+                                    supportingContent = { Text("Theme, Font & Address bar position (${prefs.getString("address_bar_position", "top")})", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                                    leadingContent = { Icon(Icons.Default.Palette, contentDescription = null) },
+                                    trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color.Gray) },
+                                    modifier = Modifier.clickable { currentScreen = "appearance" }
+                                )
+
+                                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+
+                                // Group: Advanced
+                                Text(
+                                    text = "Advanced",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(vertical = 8.dp)
+                                )
+
+                                ListItem(
+                                    headlineContent = { Text("Privacy and security") },
+                                    supportingContent = { Text("Manage tracking protection, secure SSL, cache settings", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                                    leadingContent = { Icon(Icons.Default.Security, contentDescription = null) },
+                                    trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color.Gray) },
+                                    modifier = Modifier.clickable { currentScreen = "privacy_security" }
+                                )
+
+                                ListItem(
+                                    headlineContent = { Text("Safety check") },
+                                    supportingContent = { Text("Check passwords, updates and safe browsing", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                                    leadingContent = { Icon(Icons.Default.CheckCircle, contentDescription = null) },
+                                    trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color.Gray) },
+                                    modifier = Modifier.clickable { currentScreen = "safety_check" }
+                                )
+
+                                ListItem(
+                                    headlineContent = { Text("Site settings") },
+                                    supportingContent = { Text("Manage permissions for camera, location, notifications", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                                    leadingContent = { Icon(Icons.Default.Settings, contentDescription = null) },
+                                    trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color.Gray) },
+                                    modifier = Modifier.clickable { currentScreen = "site_settings" }
+                                )
+
+                                ListItem(
+                                    headlineContent = { Text("Languages") },
+                                    supportingContent = { Text("Preferred app and webpage languages", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                                    leadingContent = { Icon(Icons.Default.Language, contentDescription = null) },
+                                    trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color.Gray) },
+                                    modifier = Modifier.clickable { currentScreen = "languages" }
+                                )
+
+                                ListItem(
+                                    headlineContent = { Text("Accessibility") },
+                                    supportingContent = { Text("Text scaling: ${prefs.getInt("text_scaling", 100)}%", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                                    leadingContent = { Icon(Icons.Default.Accessibility, contentDescription = null) },
+                                    trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color.Gray) },
+                                    modifier = Modifier.clickable { currentScreen = "accessibility" }
+                                )
+
+                                ListItem(
+                                    headlineContent = { Text("Downloads") },
+                                    supportingContent = { Text("Download folder location & options", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                                    leadingContent = { Icon(Icons.Default.Download, contentDescription = null) },
+                                    trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color.Gray) },
+                                    modifier = Modifier.clickable { currentScreen = "downloads" }
+                                )
+
+                                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+
+                                // Group: Ad Shield Protection (from previous layout)
+                                Text(
+                                    text = "Ad Shield Protection",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(vertical = 8.dp)
+                                )
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("Block Ads & Trackers", fontWeight = FontWeight.Medium)
+                                        Text("Aggressive ad-blocking shield for all websites", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                    Switch(
+                                        checked = state.globalAdBlockEnabled,
+                                        onCheckedChange = { viewModel.setGlobalAdBlockEnabled(it) }
+                                    )
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("Advanced Tracking Protection", fontWeight = FontWeight.Medium)
+                                        Text("Block analytical trackers and script overlays", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                    Switch(
+                                        checked = state.globalTrackersEnabled,
+                                        onCheckedChange = { viewModel.setGlobalTrackersEnabled(it) }
+                                    )
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("YouTube Ad Auto-Skipper", fontWeight = FontWeight.Medium)
+                                        Text("Bypass youtube.com interstitial video ads automatically", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                    Switch(
+                                        checked = state.youtubeAdSkipEnabled,
+                                        onCheckedChange = { viewModel.setYoutubeAdSkipEnabled(it) }
+                                    )
+                                }
+
+                                ListItem(
+                                    headlineContent = { Text("Update blockers list", fontWeight = FontWeight.Medium) },
+                                    supportingContent = { Text("Synchronize rules database from EasyList & EasyPrivacy", fontSize = 11.sp) },
+                                    leadingContent = { Icon(Icons.Default.Refresh, contentDescription = null) },
+                                    modifier = Modifier.clickable { viewModel.updateAdBlockerRulesList() }
+                                )
+
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text("Ad-Blocking Site Whitelist", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("Websites allowed to show ads (${state.adblockWhitelist.size})", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    TextButton(onClick = { showAddWhitelistDialog = true }) {
+                                        Text("+ Allow Site")
+                                    }
+                                }
+
+                                if (state.adblockWhitelist.isEmpty()) {
+                                    Text("No whitelisted sites.", fontSize = 11.sp, color = Color.Gray, modifier = Modifier.padding(bottom = 8.dp))
+                                } else {
+                                    state.adblockWhitelist.forEach { host ->
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(host, fontSize = 12.sp)
+                                            IconButton(onClick = { viewModel.removeWhitelistedSite(host) }, modifier = Modifier.size(28.dp)) {
+                                                Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color.Red.copy(alpha = 0.7f))
+                                            }
+                                        }
+                                    }
+                                }
+
+                                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+
+                                // Group: Advanced Settings (from previous layout)
+                                Text(
+                                    text = "Advanced Core Settings",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(vertical = 8.dp)
+                                )
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("Enable JavaScript", fontWeight = FontWeight.Medium)
+                                        Text("Allows webpages to execute JS scripts", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                    Switch(
+                                        checked = state.isJavaScriptEnabled,
+                                        onCheckedChange = { viewModel.toggleJavaScript(it) },
+                                        modifier = Modifier.testTag("js_enable_switch")
+                                    )
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("Hardware Acceleration", fontWeight = FontWeight.Medium)
+                                        Text("Uses hardware GPU layer to load pages faster", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                    Switch(
+                                        checked = state.isHardwareAccelerationEnabled,
+                                        onCheckedChange = { viewModel.toggleHardwareAcceleration(it) },
+                                        modifier = Modifier.testTag("hw_enable_switch")
+                                    )
+                                }
+
+                                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+
+                                // Group: Data Management
+                                Text(
+                                    text = "Data Management",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(vertical = 8.dp)
+                                )
+
+                                ListItem(
+                                    headlineContent = { Text("Clear local cache", fontWeight = FontWeight.Medium) },
+                                    supportingContent = { Text("Frees up local storage space ($finalCacheText)", fontSize = 11.sp) },
+                                    leadingContent = { Icon(Icons.Default.Delete, contentDescription = null) },
+                                    modifier = Modifier.clickable {
+                                        viewModel.clearWebViewCache(context)
+                                        finalCacheText = "0.00 B"
+                                    }.testTag("clear_cache_btn")
+                                )
+
+                                ListItem(
+                                    headlineContent = { Text("Export bookmarks", fontWeight = FontWeight.Medium) },
+                                    supportingContent = { Text("Share or back up bookmarks list", fontSize = 11.sp) },
+                                    leadingContent = { Icon(Icons.Default.Upload, contentDescription = null) },
+                                    modifier = Modifier.clickable {
+                                        val list = bookmarks
+                                        if (list.isEmpty()) {
+                                            Toast.makeText(context, "No bookmarks to export", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            try {
+                                                val array = JSONArray()
+                                                list.forEach {
+                                                    val obj = JSONObject()
+                                                    obj.put("title", it.title)
+                                                    obj.put("url", it.url)
+                                                    array.put(obj)
+                                                }
+                                                val jsonString = array.toString()
+                                                val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                                    type = "text/plain"
+                                                    putExtra(Intent.EXTRA_SUBJECT, "SwiftBrowser Bookmarks")
+                                                    putExtra(Intent.EXTRA_TEXT, jsonString)
+                                                }
+                                                context.startActivity(Intent.createChooser(shareIntent, "Export Bookmarks"))
+                                            } catch (e: Exception) {
+                                                Toast.makeText(context, "Export error: ${e.message}", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                    }
+                                )
+
+                                ListItem(
+                                    headlineContent = { Text("Import bookmarks", fontWeight = FontWeight.Medium) },
+                                    supportingContent = { Text("Import from previously exported JSON format", fontSize = 11.sp) },
+                                    leadingContent = { Icon(Icons.Default.Download, contentDescription = null) },
+                                    modifier = Modifier.clickable { showImportDialog = true }
+                                )
+
+                                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+
+                                // Group: About
+                                Text(
+                                    text = "About",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(vertical = 8.dp)
+                                )
+
+                                ListItem(
+                                    headlineContent = { Text("Version", fontWeight = FontWeight.Medium) },
+                                    supportingContent = { Text("SwiftBrowser v2.0.0 (Custom Engine)", fontSize = 11.sp) },
+                                    leadingContent = { Icon(Icons.Default.Info, contentDescription = null) }
+                                )
+
+                                ListItem(
+                                    headlineContent = { Text("Open Source Licenses", fontWeight = FontWeight.Medium) },
+                                    supportingContent = { Text("View license agreements of integrated components", fontSize = 11.sp) },
+                                    leadingContent = { Icon(Icons.Default.Article, contentDescription = null) },
+                                    modifier = Modifier.clickable {
+                                        Toast.makeText(context, "All components governed under the Android Apache-2.0 License.", Toast.LENGTH_LONG).show()
+                                    }
+                                )
                             }
                         }
                     }
-
-                    Spacer(modifier = Modifier.height(24.dp))
-                    Text(
-                        text = "Data Management",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    // Clear Cache preference
-                    ListItem(
-                        headlineContent = { Text("Clear local cache", fontWeight = FontWeight.Medium) },
-                        supportingContent = { Text("Frees up local storage space ($finalCacheText)", fontSize = 11.sp) },
-                        leadingContent = { Icon(Icons.Default.Delete, contentDescription = null) },
-                        modifier = Modifier.clickable {
-                            viewModel.clearWebViewCache(context)
-                            finalCacheText = "0.00 B"
-                        }.testTag("clear_cache_btn")
-                    )
-
-                    // Export bookmarks preference
-                    ListItem(
-                        headlineContent = { Text("Export bookmarks", fontWeight = FontWeight.Medium) },
-                        supportingContent = { Text("Share or back up bookmarks list", fontSize = 11.sp) },
-                        leadingContent = { Icon(Icons.Default.Upload, contentDescription = null) },
-                        modifier = Modifier.clickable {
-                            val list = bookmarks
-                            if (list.isEmpty()) {
-                                Toast.makeText(context, "No bookmarks to export", Toast.LENGTH_SHORT).show()
-                            } else {
-                                try {
-                                    val array = JSONArray()
-                                    list.forEach {
-                                        val obj = JSONObject()
-                                        obj.put("title", it.title)
-                                        obj.put("url", it.url)
-                                        array.put(obj)
-                                    }
-                                    val jsonString = array.toString()
-                                    val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                                        type = "text/plain"
-                                        putExtra(Intent.EXTRA_SUBJECT, "SwiftBrowser Bookmarks")
-                                        putExtra(Intent.EXTRA_TEXT, jsonString)
-                                    }
-                                    context.startActivity(Intent.createChooser(shareIntent, "Export Bookmarks"))
-                                } catch (e: Exception) {
-                                    Toast.makeText(context, "Export error: ${e.message}", Toast.LENGTH_SHORT).show()
-                                }
+                    "search_engine" -> {
+                        SearchEngineFragment(prefs = prefs, onBack = {
+                            currentScreen = "main"
+                            viewModel.refreshSettings()
+                        })
+                    }
+                    "privacy_security" -> {
+                        PrivacySecurityFragment(
+                            prefs = prefs,
+                            onClearBrowsingData = { showLocalClearDataDialog = true },
+                            onAdBlockingSettings = { currentScreen = "main" },
+                            onBack = {
+                                currentScreen = "main"
+                                viewModel.refreshSettings()
                             }
-                        }
-                    )
-
-                    // Import bookmarks preference
-                    ListItem(
-                        headlineContent = { Text("Import bookmarks", fontWeight = FontWeight.Medium) },
-                        supportingContent = { Text("Import from previously exported JSON format", fontSize = 11.sp) },
-                        leadingContent = { Icon(Icons.Default.Download, contentDescription = null) },
-                        modifier = Modifier.clickable { showImportDialog = true }
-                    )
-
-                    Spacer(modifier = Modifier.height(24.dp))
-                    Text(
-                        text = "About",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    // About section
-                    ListItem(
-                        headlineContent = { Text("Version", fontWeight = FontWeight.Medium) },
-                        supportingContent = { Text("SwiftBrowser v2.0.0 (Custom Engine)", fontSize = 11.sp) },
-                        leadingContent = { Icon(Icons.Default.Info, contentDescription = null) }
-                    )
-
-                    ListItem(
-                        headlineContent = { Text("Open Source Licenses", fontWeight = FontWeight.Medium) },
-                        supportingContent = { Text("View license agreements of integrated components", fontSize = 11.sp) },
-                        leadingContent = { Icon(Icons.Default.Article, contentDescription = null) },
-                        modifier = Modifier.clickable {
-                            Toast.makeText(context, "All components governed under the Android Apache-2.0 License.", Toast.LENGTH_LONG).show()
-                        }
-                    )
+                        )
+                    }
+                    "safety_check" -> {
+                        SafetyCheckFragment(
+                            prefs = prefs,
+                            onNavigateToPrivacy = { currentScreen = "privacy_security" },
+                            onNavigateToAdBlock = { currentScreen = "main" },
+                            onBack = {
+                                currentScreen = "main"
+                                viewModel.refreshSettings()
+                            }
+                        )
+                    }
+                    "tabs" -> {
+                        TabsSettingsFragment(prefs = prefs, onBack = {
+                            currentScreen = "main"
+                            viewModel.refreshSettings()
+                        })
+                    }
+                    "homepage" -> {
+                        HomepageSettingsFragment(prefs = prefs, onBack = {
+                            currentScreen = "main"
+                            viewModel.refreshSettings()
+                        })
+                    }
+                    "appearance" -> {
+                        AppearanceFragment(prefs = prefs, onBack = {
+                            currentScreen = "main"
+                            viewModel.refreshSettings()
+                        })
+                    }
+                    "accessibility" -> {
+                        AccessibilityFragment(prefs = prefs, onBack = {
+                            currentScreen = "main"
+                            viewModel.refreshSettings()
+                        })
+                    }
+                    "site_settings" -> {
+                        SiteSettingsFragment(prefs = prefs, onBack = {
+                            currentScreen = "main"
+                            viewModel.refreshSettings()
+                        })
+                    }
+                    "languages" -> {
+                        LanguagesFragment(prefs = prefs, onBack = {
+                            currentScreen = "main"
+                            viewModel.refreshSettings()
+                        })
+                    }
+                    "downloads" -> {
+                        DownloadsSettingsFragment(prefs = prefs, onBack = {
+                            currentScreen = "main"
+                            viewModel.refreshSettings()
+                        })
+                    }
                 }
             }
         }
@@ -1488,6 +1640,16 @@ fun SettingsOverlay(
                 }
             }
         }
+    }
+
+    if (showLocalClearDataDialog) {
+        DeleteBrowsingDataDialog(
+            onClear = { hist, cook, cach, rangeIndex ->
+                showLocalClearDataDialog = false
+                viewModel.clearBrowsingData(hist, cook, cach, rangeIndex)
+            },
+            onDismiss = { showLocalClearDataDialog = false }
+        )
     }
 }
 
