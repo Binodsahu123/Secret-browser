@@ -50,6 +50,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.PreferenceManager
+import androidx.activity.compose.BackHandler
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.data.Bookmark
 import com.example.data.HistoryItem
@@ -72,6 +73,12 @@ fun BrowserScreen(
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
     val coroutineScope = rememberCoroutineScope()
+
+    BackHandler(enabled = true) {
+        if (!viewModel.handleBackNavigation()) {
+            (context as? Activity)?.finish()
+        }
+    }
 
     val activeTab = remember(uiState.tabs, uiState.activeTabId) {
         uiState.tabs.find { it.id == uiState.activeTabId }
@@ -96,6 +103,7 @@ fun BrowserScreen(
     var showAboutDialog by remember { mutableStateOf(false) }
 
     val addressBarContent = @Composable {
+        var showMenu by remember { mutableStateOf(false) }
         Surface(
             color = if (isGlass) Color(0xD90A0E17) else MaterialTheme.colorScheme.surface,
             contentColor = if (isGlass) Color.White else MaterialTheme.colorScheme.onSurface,
@@ -107,33 +115,52 @@ fun BrowserScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                        .padding(horizontal = 4.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Back Navigation Button
+                    // 1. Back Navigation Button
                     IconButton(
                         onClick = { viewModel.goBack() },
                         enabled = activeTab?.canGoBack == true,
-                        modifier = Modifier.testTag("omnibox_back")
+                        modifier = Modifier.size(36.dp).testTag("omnibox_back")
                     ) {
                         Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            imageVector = Icons.Default.ChevronLeft,
                             contentDescription = "Back",
                             tint = if (isGlass) {
                                 if (activeTab?.canGoBack == true) Color.White else Color.White.copy(alpha = 0.3f)
                             } else {
-                                LocalContentColor.current
-                            }
+                                if (activeTab?.canGoBack == true) LocalContentColor.current else LocalContentColor.current.copy(alpha = 0.3f)
+                            },
+                            modifier = Modifier.size(24.dp)
                         )
                     }
 
-                    // URL input Bar
+                    // 2. Forward Navigation Button
+                    IconButton(
+                        onClick = { viewModel.goForward() },
+                        enabled = activeTab?.canGoForward == true,
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ChevronRight,
+                            contentDescription = "Forward",
+                            tint = if (isGlass) {
+                                if (activeTab?.canGoForward == true) Color.White else Color.White.copy(alpha = 0.3f)
+                            } else {
+                                if (activeTab?.canGoForward == true) LocalContentColor.current else LocalContentColor.current.copy(alpha = 0.3f)
+                            },
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+
+                    // 3. URL input Bar
                     Surface(
                         modifier = Modifier
                             .weight(1f)
-                            .height(44.dp)
-                            .padding(horizontal = 6.dp),
-                        shape = RoundedCornerShape(22.dp),
+                            .height(40.dp)
+                            .padding(horizontal = 4.dp),
+                        shape = RoundedCornerShape(20.dp),
                         color = if (isGlass) Color.White.copy(alpha = 0.10f) else MaterialTheme.colorScheme.surfaceVariant,
                         contentColor = if (isGlass) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
                         border = BorderStroke(
@@ -142,7 +169,7 @@ fun BrowserScreen(
                         )
                     ) {
                         Row(
-                            modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+                            modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             // Security Lock / Home Icon indicator
@@ -152,7 +179,7 @@ fun BrowserScreen(
                                         showSslDialog = true
                                     }
                                 },
-                                modifier = Modifier.size(24.dp)
+                                modifier = Modifier.size(20.dp)
                             ) {
                                 Icon(
                                     imageVector = if (activeTab?.url?.startsWith("https://") == true) Icons.Default.Lock else Icons.Default.Search,
@@ -164,15 +191,15 @@ fun BrowserScreen(
                                     } else {
                                         MaterialTheme.colorScheme.onSurfaceVariant
                                     },
-                                    modifier = Modifier.size(16.dp)
+                                    modifier = Modifier.size(14.dp)
                                 )
                             }
 
                             if (activeTab?.isDesktopMode == true) {
-                                Text("🖥", modifier = Modifier.padding(start = 4.dp), fontSize = 14.sp)
+                                Text("🖥", modifier = Modifier.padding(start = 2.dp), fontSize = 12.sp)
                             }
 
-                            Spacer(modifier = Modifier.width(8.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
 
                             // basic editable text field
                             BasicTextFieldWithoutLabel(
@@ -185,7 +212,7 @@ fun BrowserScreen(
                                 placeholder = "Search or enter address",
                                 textStyle = LocalTextStyle.current.copy(
                                     color = if (isGlass) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
-                                    fontSize = 14.sp
+                                    fontSize = 12.sp
                                 ),
                                 modifier = Modifier
                                     .weight(1f)
@@ -197,13 +224,13 @@ fun BrowserScreen(
                             if (activeTab?.readerModeAvailable == true) {
                                 IconButton(
                                     onClick = { viewModel.triggerReaderMode() },
-                                    modifier = Modifier.size(28.dp).testTag("reader_mode_trigger")
+                                    modifier = Modifier.size(24.dp).testTag("reader_mode_trigger")
                                 ) {
                                     Icon(
                                         imageVector = Icons.AutoMirrored.Filled.List,
                                         contentDescription = "Reader Mode",
                                         tint = if (isGlass) Color.White else MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(18.dp)
+                                        modifier = Modifier.size(16.dp)
                                     )
                                 }
                             }
@@ -212,13 +239,13 @@ fun BrowserScreen(
                             if (activeTab?.url != "orion://newtab") {
                                 IconButton(
                                     onClick = { viewModel.toggleBookmarkActive() },
-                                    modifier = Modifier.size(28.dp).testTag("bookmark_star_toggle")
+                                    modifier = Modifier.size(24.dp).testTag("bookmark_star_toggle")
                                 ) {
                                     Icon(
                                         imageVector = if (isBookmarked) Icons.Default.Star else Icons.Default.StarBorder,
                                         contentDescription = "Bookmark Page",
                                         tint = if (isBookmarked) Color(0xFFFFD700) else if (isGlass) Color.White.copy(alpha = 0.7f) else MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.size(18.dp)
+                                        modifier = Modifier.size(16.dp)
                                     )
                                 }
                             }
@@ -232,15 +259,278 @@ fun BrowserScreen(
                                         viewModel.reload()
                                     }
                                 },
-                                modifier = Modifier.size(28.dp)
+                                modifier = Modifier.size(24.dp)
                             ) {
                                 Icon(
                                     imageVector = if (activeTab?.isLoading == true) Icons.Default.Close else Icons.Default.Refresh,
                                     contentDescription = "Refresh",
                                     tint = if (isGlass) Color.White.copy(alpha = 0.8f) else MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(18.dp)
+                                    modifier = Modifier.size(16.dp)
                                 )
                             }
+                        }
+                    }
+
+                    // 4. Home Button
+                    if (uiState.showHomeButton) {
+                        IconButton(
+                            onClick = { viewModel.goToHomepage() },
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Home,
+                                contentDescription = "Go Home",
+                                tint = if (isGlass) Color.White else LocalContentColor.current,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                    }
+
+                    // 5. Tab Switcher with tab count badge
+                    Box(
+                        contentAlignment = Alignment.BottomEnd,
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clickable { viewModel.setTabSwitcherOpen(true) }
+                    ) {
+                        IconButton(
+                            onClick = { viewModel.setTabSwitcherOpen(true) },
+                            modifier = Modifier.size(36.dp).testTag("tab_switcher_btn")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Tab,
+                                contentDescription = "Tabs List",
+                                tint = if (isGlass) Color.White else LocalContentColor.current,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                        Surface(
+                            modifier = Modifier
+                                .padding(bottom = 2.dp, end = 2.dp)
+                                .size(14.dp),
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.primary
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Text(
+                                    text = uiState.tabs.size.toString(),
+                                    color = MaterialTheme.colorScheme.onPrimary,
+                                    fontSize = 8.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+
+                    // 6. Options Menu
+                    Box(modifier = Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+                        IconButton(
+                            onClick = { showMenu = true },
+                            modifier = Modifier.size(36.dp).testTag("menu_nav_btn")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.MoreVert,
+                                contentDescription = "Options Menu",
+                                tint = if (isGlass) Color.White else LocalContentColor.current,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+
+                        DropdownMenu(
+                            expanded = showMenu,
+                            onDismissRequest = { showMenu = false }
+                        ) {
+                            // First item: Quick row of status/actions
+                            Row(
+                                modifier = Modifier
+                                    .width(220.dp)
+                                    .padding(horizontal = 8.dp, vertical = 2.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                // Forward Arrow
+                                IconButton(
+                                    onClick = {
+                                        showMenu = false
+                                        viewModel.goForward()
+                                    },
+                                    enabled = activeTab?.canGoForward == true
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                                        contentDescription = "Forward"
+                                    )
+                                }
+
+                                // Bookmark Star Helper Flag
+                                val isPageBookmarked = isBookmarked
+                                IconButton(
+                                    onClick = {
+                                        showMenu = false
+                                        viewModel.toggleBookmarkActive()
+                                    }
+                                ) {
+                                    Icon(
+                                        imageVector = if (isPageBookmarked) Icons.Default.Star else Icons.Default.StarBorder,
+                                        contentDescription = "Bookmark",
+                                        tint = if (isPageBookmarked) Color(0xFFFFD700) else LocalContentColor.current
+                                    )
+                                }
+
+                                // Info/Shield Button
+                                IconButton(
+                                    onClick = {
+                                        showMenu = false
+                                        showSslDialog = true
+                                    }
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Info,
+                                        contentDescription = "Info"
+                                    )
+                                }
+                            }
+
+                            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+                            DropdownMenuItem(
+                                text = { Text("New tab") },
+                                leadingIcon = { Icon(Icons.Default.Add, contentDescription = null) },
+                                onClick = {
+                                    showMenu = false
+                                    viewModel.addNewTab()
+                                }
+                            )
+
+                            DropdownMenuItem(
+                                text = { Text("New incognito tab") },
+                                leadingIcon = { Icon(Icons.Default.VisibilityOff, contentDescription = null) },
+                                onClick = {
+                                    showMenu = false
+                                    viewModel.addNewTab(isIncognito = true)
+                                }
+                            )
+
+                            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+                            DropdownMenuItem(
+                                text = { Text("History") },
+                                leadingIcon = { Icon(Icons.Default.History, contentDescription = null) },
+                                onClick = {
+                                    showMenu = false
+                                    viewModel.setHistoryOpen(true)
+                                }
+                            )
+
+                            DropdownMenuItem(
+                                text = { Text("Bookmarks") },
+                                leadingIcon = { Icon(Icons.Default.Star, contentDescription = null) },
+                                onClick = {
+                                    showMenu = false
+                                    viewModel.setBookmarksOpen(true)
+                                }
+                            )
+
+                            DropdownMenuItem(
+                                text = { Text("Downloads") },
+                                leadingIcon = { Icon(Icons.Default.Download, contentDescription = null) },
+                                onClick = {
+                                    showMenu = false
+                                    viewModel.setDownloadsOpen(true)
+                                }
+                            )
+
+                            DropdownMenuItem(
+                                text = { Text("Recent tabs") },
+                                leadingIcon = { Icon(Icons.Default.Refresh, contentDescription = null) },
+                                onClick = {
+                                    showMenu = false
+                                    showRecentTabsDialog = true
+                                }
+                            )
+
+                            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+                            DropdownMenuItem(
+                                text = { Text("Find in page") },
+                                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                                onClick = {
+                                    showMenu = false
+                                    viewModel.toggleFindInPage(true)
+                                }
+                            )
+
+                            DropdownMenuItem(
+                                text = { Text("Add to Home screen") },
+                                leadingIcon = { Icon(Icons.Default.Launch, contentDescription = null) },
+                                onClick = {
+                                    showMenu = false
+                                    showAddShortcutDialog = true
+                                }
+                            )
+
+                            DropdownMenuItem(
+                                text = { Text("Desktop site") },
+                                leadingIcon = { Icon(Icons.Default.Devices, contentDescription = null) },
+                                trailingIcon = {
+                                    Checkbox(
+                                        checked = activeTab?.isDesktopMode == true,
+                                        onCheckedChange = { _ ->
+                                            showMenu = false
+                                            viewModel.toggleDesktopMode()
+                                        }
+                                    )
+                                },
+                                onClick = {
+                                    showMenu = false
+                                    viewModel.toggleDesktopMode()
+                                }
+                            )
+
+                            DropdownMenuItem(
+                                text = { Text("Share page") },
+                                leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) },
+                                onClick = {
+                                    showMenu = false
+                                    val url = activeTab?.url ?: "orion://newtab"
+                                    val title = activeTab?.title ?: "Browser Page"
+                                    val intent = Intent(Intent.ACTION_SEND).apply {
+                                        type = "text/plain"
+                                        putExtra(Intent.EXTRA_SUBJECT, title)
+                                        putExtra(Intent.EXTRA_TEXT, url)
+                                    }
+                                    context.startActivity(Intent.createChooser(intent, "Share Webpage"))
+                                }
+                            )
+
+                            DropdownMenuItem(
+                                text = { Text("Delete browsing data") },
+                                leadingIcon = { Icon(Icons.Default.DeleteForever, contentDescription = null) },
+                                onClick = {
+                                    showMenu = false
+                                    showClearDataDialog = true
+                                }
+                            )
+
+                            DropdownMenuItem(
+                                text = { Text("Help & feedback") },
+                                leadingIcon = { Icon(Icons.Default.Help, contentDescription = null) },
+                                onClick = {
+                                    showMenu = false
+                                    showHelpFeedbackDialog = true
+                                }
+                            )
+
+                            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+                            DropdownMenuItem(
+                                text = { Text("Settings") },
+                                leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                                onClick = {
+                                    showMenu = false
+                                    viewModel.setSettingsOpen(true)
+                                }
+                            )
                         }
                     }
                 }
@@ -500,7 +790,7 @@ fun BrowserScreen(
                 addressBarContent()
             }
 
-            if (!uiState.isTabSwitcherOpen && !uiState.readerModeActive) {
+            if (false && !uiState.isTabSwitcherOpen && !uiState.readerModeActive) {
                 Surface(
                     color = if (isGlass) Color(0xD90A0E17) else MaterialTheme.colorScheme.surface,
                     contentColor = if (isGlass) Color.White else MaterialTheme.colorScheme.onSurface,
@@ -870,6 +1160,17 @@ fun BrowserScreen(
                 },
                 onDelete = { viewModel.deleteHistoryItem(it) },
                 onClearAll = { viewModel.clearAllHistory() },
+                isGlass = isGlass
+            )
+        }
+
+        // Downloads list overlay dialog
+        if (uiState.isDownloadsOpen) {
+            val downloadsList by viewModel.downloads.collectAsState()
+            DownloadsOverlay(
+                downloads = downloadsList,
+                onDismiss = { viewModel.setDownloadsOpen(false) },
+                onDelete = { viewModel.deleteDownload(it) },
                 isGlass = isGlass
             )
         }
@@ -2790,4 +3091,174 @@ fun HelpFeedbackDialog(
             }
         }
     )
+}
+
+@Composable
+fun DownloadsOverlay(
+    downloads: List<com.example.data.DownloadItem>,
+    onDismiss: () -> Unit,
+    onDelete: (Long) -> Unit,
+    isGlass: Boolean = false
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(24.dp),
+            color = if (isGlass) Color(0xD90B1220) else MaterialTheme.colorScheme.surface,
+            contentColor = if (isGlass) Color.White else MaterialTheme.colorScheme.onSurface,
+            border = if (isGlass) BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)) else null,
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.75f)
+                .padding(vertical = 16.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(24.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(text = "Downloads", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    IconButton(onClick = onDismiss) {
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = null,
+                            tint = if (isGlass) Color.White else LocalContentColor.current
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                if (downloads.isEmpty()) {
+                    Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                        Text(
+                            text = "No downloads. Click download links to get files.",
+                            color = if (isGlass) Color.White.copy(alpha = 0.5f) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                            fontSize = 14.sp,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(downloads) { dl ->
+                            DownloadItemRow(
+                                download = dl,
+                                onDelete = { onDelete(dl.downloadId) },
+                                isGlass = isGlass
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun DownloadItemRow(
+    download: com.example.data.DownloadItem,
+    onDelete: () -> Unit,
+    isGlass: Boolean = false
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val file = remember(download.fileName) {
+        java.io.File(
+            android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS),
+            download.fileName
+        )
+    }
+    val fileExists = remember(file) { file.exists() }
+    val readableSize = remember(file) {
+        val size = if (file.exists()) file.length() else 0L
+        if (size > 0L) {
+            android.text.format.Formatter.formatFileSize(context, size)
+        } else {
+            "Unknown size"
+        }
+    }
+    val dateStr = remember(download.timestamp) {
+        val sdf = java.text.SimpleDateFormat("dd MMM yyyy, HH:mm", java.util.Locale.getDefault())
+        sdf.format(java.util.Date(download.timestamp))
+    }
+
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = if (isGlass) Color.White.copy(alpha = 0.06f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+        contentColor = if (isGlass) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable {
+                if (fileExists) {
+                    val uri = androidx.core.content.FileProvider.getUriForFile(
+                        context,
+                        "${context.packageName}.provider",
+                        file
+                    )
+                    val intent = Intent(Intent.ACTION_VIEW).apply {
+                        setDataAndType(uri, download.mimeType)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    try {
+                        context.startActivity(intent)
+                    } catch (e: Exception) {
+                        android.widget.Toast.makeText(context, "No app found to open this file", android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    android.widget.Toast.makeText(context, "File does not exist or was deleted from memory", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
+    ) {
+        Row(
+            modifier = Modifier
+                .padding(12.dp)
+                .fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = when {
+                    download.mimeType.startsWith("video/") -> Icons.Default.PlayCircle
+                    download.mimeType.startsWith("image/") -> Icons.Default.Image
+                    download.mimeType.startsWith("audio/") -> Icons.Default.MusicNote
+                    else -> Icons.Default.InsertDriveFile
+                },
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(36.dp)
+            )
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = download.fileName,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    color = if (isGlass) Color.White else MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = "$readableSize • $dateStr",
+                    fontSize = 11.sp,
+                    color = if (isGlass) Color.White.copy(alpha = 0.6f) else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            IconButton(onClick = onDelete) {
+                Icon(
+                    imageVector = Icons.Default.Delete,
+                    contentDescription = "Delete download task",
+                    tint = if (isGlass) Color.White.copy(alpha = 0.6f) else MaterialTheme.colorScheme.error,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
+    }
 }

@@ -1067,8 +1067,8 @@ fun BasicTextFieldWithoutLabel(
         if (value.isEmpty()) {
             Text(
                 text = placeholder,
-                color = Color.White.copy(alpha = 0.5f),
-                fontSize = 16.sp
+                color = textStyle.color.copy(alpha = 0.5f),
+                fontSize = textStyle.fontSize
             )
         }
         androidx.compose.foundation.text.BasicTextField(

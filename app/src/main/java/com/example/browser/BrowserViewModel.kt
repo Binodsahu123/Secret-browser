@@ -61,6 +61,7 @@ data class BrowserUiState(
     val isHistoryOpen: Boolean = false,
     val isBookmarksOpen: Boolean = false,
     val isTabSwitcherOpen: Boolean = false,
+    val isDownloadsOpen: Boolean = false,
     val isSearchFocused: Boolean = false,
     val currentInputUrl: String = "",
     val feedCategory: String = "For You",
@@ -127,6 +128,11 @@ class BrowserViewModel(
 
     // OkHttp 50MB disk cache
     private val okHttpClient: OkHttpClient
+
+    private val tabHistory = mutableListOf<String>()
+
+    val downloads: StateFlow<List<DownloadItem>> = repository.downloads
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val bookmarks: StateFlow<List<Bookmark>> = repository.bookmarks
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -256,6 +262,11 @@ class BrowserViewModel(
         val oldTabId = currentState.activeTabId
         if (oldTabId == tabId) return
 
+        tabHistory.remove(tabId)
+        if (currentState.tabs.any { it.id == oldTabId }) {
+            tabHistory.add(oldTabId)
+        }
+
         // 1. Capture screen of previous active WebView before switching away
         val prevWebView = webViewMap[oldTabId]
         if (prevWebView != null) {
@@ -294,6 +305,7 @@ class BrowserViewModel(
     }
 
     fun closeTab(tabId: String) {
+        tabHistory.remove(tabId)
         val currentState = _uiState.value
         val tabs = currentState.tabs
         if (tabs.size <= 1) {
@@ -452,6 +464,21 @@ class BrowserViewModel(
                                 canGoBack = view?.canGoBack() ?: false,
                                 canGoForward = view?.canGoForward() ?: false
                             )
+                        }
+
+                        val isDesktop = _uiState.value.tabs.find { it.id == tabId }?.isDesktopMode == true
+                        if (isDesktop && view != null) {
+                            view.evaluateJavascript("""
+                                var meta = document.querySelector('meta[name=viewport]');
+                                if(meta) {
+                                    meta.content = 'width=1280, initial-scale=0.25';
+                                } else {
+                                    var newMeta = document.createElement('meta');
+                                    newMeta.name = 'viewport';
+                                    newMeta.content = 'width=1280, initial-scale=0.25';
+                                    document.head.appendChild(newMeta);
+                                }
+                            """.trimIndent(), null)
                         }
 
                         if (url != null && url != "orion://newtab" && url != "orion://newtab-incognito" && !url.startsWith("orion://") && !isTabIncognito) {
@@ -1315,6 +1342,122 @@ class BrowserViewModel(
         _uiState.update { it.copy(isBookmarksOpen = isOpen) }
     }
 
+    fun setDownloadsOpen(isOpen: Boolean) {
+        _uiState.update { it.copy(isDownloadsOpen = isOpen) }
+    }
+
+    fun deleteDownload(downloadId: Long) {
+        viewModelScope.launch {
+            repository.deleteDownloadFromDb(downloadId)
+        }
+    }
+
+    fun hasTabHistory(): Boolean {
+        val currentTabIds = _uiState.value.tabs.map { it.id }
+        tabHistory.removeAll { it !in currentTabIds }
+        return tabHistory.isNotEmpty()
+    }
+
+    fun goToHomepage() {
+        val type = prefs.getString("homepage_type", "ntp")
+        val targetUrl = if (type == "custom") {
+            prefs.getString("homepage_custom_url", "https://www.google.com")
+        } else {
+            "orion://newtab"
+        }
+        navigateTo(targetUrl)
+    }
+
+    fun handleBackNavigation(): Boolean {
+        val currentState = _uiState.value
+        
+        // 1. If settings overlay is open
+        if (currentState.isSettingsOpen) {
+            return false // Let nested settings handle it
+        }
+        
+        // 2. If tab switcher is open
+        if (currentState.isTabSwitcherOpen) {
+            setTabSwitcherOpen(false)
+            return true
+        }
+
+        // 3. If downloads list is open
+        if (currentState.isDownloadsOpen) {
+            setDownloadsOpen(false)
+            return true
+        }
+
+        // 4. If bookmarks overlay is open
+        if (currentState.isBookmarksOpen) {
+            setBookmarksOpen(false)
+            return true
+        }
+
+        // 5. If history overlay is open
+        if (currentState.isHistoryOpen) {
+            setHistoryOpen(false)
+            return true
+        }
+
+        // 6. If find in page is active
+        if (currentState.findInPageActive) {
+            toggleFindInPage(false)
+            return true
+        }
+
+        // 7. If current web tab can go back in WebView history
+        val activeId = currentState.activeTabId
+        val webView = webViewMap[activeId]
+        if (webView != null && webView.canGoBack()) {
+            webView.goBack()
+            return true
+        }
+        
+        // 8. If we have a previously active tab in tab history, switch back to it
+        val currentTabIds = currentState.tabs.map { it.id }
+        tabHistory.removeAll { it !in currentTabIds }
+        if (tabHistory.isNotEmpty()) {
+            val previousTabId = tabHistory.removeAt(tabHistory.size - 1)
+            
+            val oldTabId = currentState.activeTabId
+            val prevWebView = webViewMap[oldTabId]
+            if (prevWebView != null) {
+                val bmp = captureWebViewScreenshot(prevWebView)
+                _uiState.update { state ->
+                    state.copy(
+                        tabs = state.tabs.map {
+                            if (it.id == oldTabId) it.copy(screenshot = bmp ?: it.screenshot) else it
+                        }
+                    )
+                }
+                prevWebView.onPause()
+            }
+            
+            _uiState.update { state ->
+                val updatedTabs = state.tabs.map {
+                    if (it.id == previousTabId) it.copy(lastActiveTime = System.currentTimeMillis()) else it
+                }
+                val activeTab = updatedTabs.find { it.id == previousTabId }
+                state.copy(
+                    tabs = updatedTabs,
+                    activeTabId = previousTabId,
+                    currentInputUrl = if (activeTab?.url == "orion://newtab") "" else (activeTab?.url ?: ""),
+                    isTabSwitcherOpen = false,
+                    readerModeActive = false,
+                    findInPageActive = false
+                )
+            }
+            
+            val activeWebView = webViewMap[previousTabId]
+            activeWebView?.onResume()
+            preloadAdjacentTabs()
+            return true
+        }
+        
+        return false // Let system do default back navigation
+    }
+
     fun setTabSwitcherOpen(isOpen: Boolean) {
         _uiState.update { state ->
             if (isOpen) {
@@ -1354,6 +1497,10 @@ class BrowserViewModel(
 
         updateTabState(activeId) {
             it.copy(isDesktopMode = isNowDesktop)
+        }
+
+        webView.post {
+            webView.reload()
         }
     }
 
