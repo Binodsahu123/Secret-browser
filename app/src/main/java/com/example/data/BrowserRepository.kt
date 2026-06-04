@@ -170,6 +170,14 @@ class BrowserRepository(private val db: BrowserDatabase) {
         }
     }
 
+    suspend fun searchBookmarks(query: String, limit: Int): List<Bookmark> {
+        return bookmarkDao.searchBookmarks(query, limit)
+    }
+
+    suspend fun searchHistory(query: String, limit: Int): List<HistoryItem> {
+        return historyDao.searchHistory(query, limit)
+    }
+
     private fun getDomainName(url: String): String {
         return try {
             val uri = URI(url)

@@ -19,6 +19,9 @@ interface BookmarkDao {
 
     @Query("DELETE FROM bookmarks WHERE url = :url")
     suspend fun deleteBookmarkByUrl(url: String)
+
+    @Query("SELECT * FROM bookmarks WHERE title LIKE '%' || :query || '%' OR url LIKE '%' || :query || '%' LIMIT :limit")
+    suspend fun searchBookmarks(query: String, limit: Int): List<Bookmark>
 }
 
 @Dao
@@ -46,6 +49,9 @@ interface HistoryDao {
 
     @Query("DELETE FROM history WHERE timestamp >= :timestamp")
     suspend fun deleteHistorySince(timestamp: Long)
+
+    @Query("SELECT * FROM history WHERE title LIKE '%' || :query || '%' OR url LIKE '%' || :query || '%' ORDER BY timestamp DESC LIMIT :limit")
+    suspend fun searchHistory(query: String, limit: Int): List<HistoryItem>
 }
 
 @Dao

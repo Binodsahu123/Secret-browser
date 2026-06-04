@@ -39,6 +39,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -69,13 +70,46 @@ fun BrowserScreen(
     val bookmarks by viewModel.bookmarks.collectAsState()
     val history by viewModel.history.collectAsState()
     val topSites by viewModel.topSites.collectAsState()
+    val fullscreenState by viewModel.fullscreenState.collectAsState()
 
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
+    val keyboardController = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
     val coroutineScope = rememberCoroutineScope()
 
+    val filePickerLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.GetMultipleContents()
+    ) { uris ->
+        if (uris != null && uris.isNotEmpty()) {
+            viewModel.fileChooserCallback?.onReceiveValue(uris.toTypedArray())
+        } else {
+            viewModel.fileChooserCallback?.onReceiveValue(null)
+        }
+        viewModel.fileChooserCallback = null
+        viewModel.resetFilePickerState()
+    }
+
+    LaunchedEffect(uiState.showFilePicker) {
+        if (uiState.showFilePicker) {
+            try {
+                filePickerLauncher.launch("*/*")
+            } catch (e: Exception) {
+                e.printStackTrace()
+                viewModel.fileChooserCallback?.onReceiveValue(null)
+                viewModel.fileChooserCallback = null
+                viewModel.resetFilePickerState()
+            }
+        }
+    }
+
     BackHandler(enabled = true) {
-        if (!viewModel.handleBackNavigation()) {
+        if (uiState.isSearchFocused) {
+            focusManager.clearFocus()
+            keyboardController?.hide()
+            viewModel.setSearchFocused(false)
+        } else if (!viewModel.handleBackNavigation(onShowExitToast = {
+            Toast.makeText(context, "Press back again to exit", Toast.LENGTH_SHORT).show()
+        })) {
             (context as? Activity)?.finish()
         }
     }
@@ -118,40 +152,58 @@ fun BrowserScreen(
                         .padding(horizontal = 4.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // 1. Back Navigation Button
-                    IconButton(
-                        onClick = { viewModel.goBack() },
-                        enabled = activeTab?.canGoBack == true,
-                        modifier = Modifier.size(36.dp).testTag("omnibox_back")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.ChevronLeft,
-                            contentDescription = "Back",
-                            tint = if (isGlass) {
-                                if (activeTab?.canGoBack == true) Color.White else Color.White.copy(alpha = 0.3f)
-                            } else {
-                                if (activeTab?.canGoBack == true) LocalContentColor.current else LocalContentColor.current.copy(alpha = 0.3f)
+                    // 1. Exit Search Back Arrow / Back Navigation Button
+                    if (uiState.isSearchFocused) {
+                        IconButton(
+                            onClick = {
+                                focusManager.clearFocus()
+                                keyboardController?.hide()
+                                viewModel.setSearchFocused(false)
                             },
-                            modifier = Modifier.size(24.dp)
-                        )
-                    }
+                            modifier = Modifier.size(36.dp).testTag("exit_search_btn")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Exit Search",
+                                tint = if (isGlass) Color.White else LocalContentColor.current,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                    } else {
+                        IconButton(
+                            onClick = { viewModel.goBack() },
+                            enabled = activeTab?.canGoBack == true,
+                            modifier = Modifier.size(36.dp).testTag("omnibox_back")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ChevronLeft,
+                                contentDescription = "Back",
+                                tint = if (isGlass) {
+                                    if (activeTab?.canGoBack == true) Color.White else Color.White.copy(alpha = 0.3f)
+                                } else {
+                                    if (activeTab?.canGoBack == true) LocalContentColor.current else LocalContentColor.current.copy(alpha = 0.3f)
+                                },
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
 
-                    // 2. Forward Navigation Button
-                    IconButton(
-                        onClick = { viewModel.goForward() },
-                        enabled = activeTab?.canGoForward == true,
-                        modifier = Modifier.size(36.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.ChevronRight,
-                            contentDescription = "Forward",
-                            tint = if (isGlass) {
-                                if (activeTab?.canGoForward == true) Color.White else Color.White.copy(alpha = 0.3f)
-                            } else {
-                                if (activeTab?.canGoForward == true) LocalContentColor.current else LocalContentColor.current.copy(alpha = 0.3f)
-                            },
-                            modifier = Modifier.size(24.dp)
-                        )
+                        // 2. Forward Navigation Button
+                        IconButton(
+                            onClick = { viewModel.goForward() },
+                            enabled = activeTab?.canGoForward == true,
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ChevronRight,
+                                contentDescription = "Forward",
+                                tint = if (isGlass) {
+                                    if (activeTab?.canGoForward == true) Color.White else Color.White.copy(alpha = 0.3f)
+                                } else {
+                                    if (activeTab?.canGoForward == true) LocalContentColor.current else LocalContentColor.current.copy(alpha = 0.3f)
+                                },
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
                     }
 
                     // 3. URL input Bar
@@ -175,16 +227,16 @@ fun BrowserScreen(
                             // Security Lock / Home Icon indicator
                             IconButton(
                                 onClick = {
-                                    if (activeTab?.url?.startsWith("https://") == true) {
+                                    if (!uiState.isSearchFocused && activeTab?.url?.startsWith("https://") == true) {
                                         showSslDialog = true
                                     }
                                 },
                                 modifier = Modifier.size(20.dp)
                             ) {
                                 Icon(
-                                    imageVector = if (activeTab?.url?.startsWith("https://") == true) Icons.Default.Lock else Icons.Default.Search,
-                                    contentDescription = "Security Status",
-                                    tint = if (activeTab?.url?.startsWith("https://") == true) {
+                                    imageVector = if (uiState.isSearchFocused) Icons.Default.Search else (if (activeTab?.url?.startsWith("https://") == true) Icons.Default.Lock else Icons.Default.Search),
+                                    contentDescription = "Status",
+                                    tint = if (!uiState.isSearchFocused && activeTab?.url?.startsWith("https://") == true) {
                                         Color(0xFF4CAF50)
                                     } else if (isGlass) {
                                         Color.White.copy(alpha = 0.7f)
@@ -195,7 +247,7 @@ fun BrowserScreen(
                                 )
                             }
 
-                            if (activeTab?.isDesktopMode == true) {
+                            if (!uiState.isSearchFocused && activeTab?.isDesktopMode == true) {
                                 Text("🖥", modifier = Modifier.padding(start = 2.dp), fontSize = 12.sp)
                             }
 
@@ -220,8 +272,23 @@ fun BrowserScreen(
                                     .testTag("url_input_bar")
                             )
 
+                            // Close/Clear 'X' button inside input when focused and has text
+                            if (uiState.isSearchFocused && uiState.currentInputUrl.isNotEmpty()) {
+                                IconButton(
+                                    onClick = { viewModel.setInputUrlAndQuery("") },
+                                    modifier = Modifier.size(24.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "Clear",
+                                        tint = if (isGlass) Color.White.copy(alpha = 0.8f) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+
                             // Reader Mode indicator icon (Only if available on load)
-                            if (activeTab?.readerModeAvailable == true) {
+                            if (!uiState.isSearchFocused && activeTab?.readerModeAvailable == true) {
                                 IconButton(
                                     onClick = { viewModel.triggerReaderMode() },
                                     modifier = Modifier.size(24.dp).testTag("reader_mode_trigger")
@@ -236,7 +303,7 @@ fun BrowserScreen(
                             }
 
                             // Bookmark star toggle button
-                            if (activeTab?.url != "orion://newtab") {
+                            if (!uiState.isSearchFocused && activeTab?.url != "orion://newtab" && activeTab?.url != "orion://newtab-incognito") {
                                 IconButton(
                                     onClick = { viewModel.toggleBookmarkActive() },
                                     modifier = Modifier.size(24.dp).testTag("bookmark_star_toggle")
@@ -251,90 +318,93 @@ fun BrowserScreen(
                             }
 
                             // Stop / Reload button
+                            if (!uiState.isSearchFocused) {
+                                IconButton(
+                                    onClick = {
+                                        if (activeTab?.isLoading == true) {
+                                            viewModel.getOrCreateWebView(activeTab.id, context).stopLoading()
+                                        } else {
+                                            viewModel.reload()
+                                        }
+                                    },
+                                    modifier = Modifier.size(24.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = if (activeTab?.isLoading == true) Icons.Default.Close else Icons.Default.Refresh,
+                                        contentDescription = "Refresh",
+                                        tint = if (isGlass) Color.White.copy(alpha = 0.8f) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    if (!uiState.isSearchFocused) {
+                        // 4. Home Button
+                        if (uiState.showHomeButton) {
                             IconButton(
-                                onClick = {
-                                    if (activeTab?.isLoading == true) {
-                                        viewModel.getOrCreateWebView(activeTab.id, context).stopLoading()
-                                    } else {
-                                        viewModel.reload()
-                                    }
-                                },
-                                modifier = Modifier.size(24.dp)
+                                onClick = { viewModel.goToHomepage() },
+                                modifier = Modifier.size(36.dp)
                             ) {
                                 Icon(
-                                    imageVector = if (activeTab?.isLoading == true) Icons.Default.Close else Icons.Default.Refresh,
-                                    contentDescription = "Refresh",
-                                    tint = if (isGlass) Color.White.copy(alpha = 0.8f) else MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(16.dp)
+                                    imageVector = Icons.Default.Home,
+                                    contentDescription = "Go Home",
+                                    tint = if (isGlass) Color.White else LocalContentColor.current,
+                                    modifier = Modifier.size(22.dp)
                                 )
                             }
                         }
-                    }
 
-                    // 4. Home Button
-                    if (uiState.showHomeButton) {
-                        IconButton(
-                            onClick = { viewModel.goToHomepage() },
-                            modifier = Modifier.size(36.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Home,
-                                contentDescription = "Go Home",
-                                tint = if (isGlass) Color.White else LocalContentColor.current,
-                                modifier = Modifier.size(22.dp)
-                            )
-                        }
-                    }
-
-                    // 5. Tab Switcher with tab count badge
-                    Box(
-                        contentAlignment = Alignment.BottomEnd,
-                        modifier = Modifier
-                            .size(36.dp)
-                            .clickable { viewModel.setTabSwitcherOpen(true) }
-                    ) {
-                        IconButton(
-                            onClick = { viewModel.setTabSwitcherOpen(true) },
-                            modifier = Modifier.size(36.dp).testTag("tab_switcher_btn")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Tab,
-                                contentDescription = "Tabs List",
-                                tint = if (isGlass) Color.White else LocalContentColor.current,
-                                modifier = Modifier.size(22.dp)
-                            )
-                        }
-                        Surface(
+                        // 5. Tab Switcher with tab count badge
+                        Box(
+                            contentAlignment = Alignment.BottomEnd,
                             modifier = Modifier
-                                .padding(bottom = 2.dp, end = 2.dp)
-                                .size(14.dp),
-                            shape = CircleShape,
-                            color = MaterialTheme.colorScheme.primary
+                                .size(36.dp)
+                                .clickable { viewModel.setTabSwitcherOpen(true) }
                         ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Text(
-                                    text = uiState.tabs.size.toString(),
-                                    color = MaterialTheme.colorScheme.onPrimary,
-                                    fontSize = 8.sp,
-                                    fontWeight = FontWeight.Bold
+                            IconButton(
+                                onClick = { viewModel.setTabSwitcherOpen(true) },
+                                modifier = Modifier.size(36.dp).testTag("tab_switcher_btn")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Tab,
+                                    contentDescription = "Tabs List",
+                                    tint = if (isGlass) Color.White else LocalContentColor.current,
+                                    modifier = Modifier.size(22.dp)
                                 )
                             }
+                            Surface(
+                                modifier = Modifier
+                                    .padding(bottom = 2.dp, end = 2.dp)
+                                    .size(14.dp),
+                                shape = CircleShape,
+                                color = MaterialTheme.colorScheme.primary
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text(
+                                        text = uiState.tabs.size.toString(),
+                                        color = MaterialTheme.colorScheme.onPrimary,
+                                        fontSize = 8.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
                         }
-                    }
 
-                    // 6. Options Menu
-                    Box(modifier = Modifier.size(36.dp), contentAlignment = Alignment.Center) {
-                        IconButton(
-                            onClick = { showMenu = true },
-                            modifier = Modifier.size(36.dp).testTag("menu_nav_btn")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.MoreVert,
-                                contentDescription = "Options Menu",
-                                tint = if (isGlass) Color.White else LocalContentColor.current,
-                                modifier = Modifier.size(22.dp)
-                            )
-                        }
+                        // 6. Options Menu
+                        Box(modifier = Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+                            IconButton(
+                                onClick = { showMenu = true },
+                                modifier = Modifier.size(36.dp).testTag("menu_nav_btn")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.MoreVert,
+                                    contentDescription = "Options Menu",
+                                    tint = if (isGlass) Color.White else LocalContentColor.current,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
 
                         DropdownMenu(
                             expanded = showMenu,
@@ -470,6 +540,34 @@ fun BrowserScreen(
                             )
 
                             DropdownMenuItem(
+                                text = { Text("Translate page") },
+                                leadingIcon = { Icon(Icons.Default.Translate, contentDescription = null) },
+                                onClick = {
+                                    showMenu = false
+                                    showTranslateDialog = true
+                                }
+                            )
+
+                            DropdownMenuItem(
+                                text = { Text("Listen to this page") },
+                                leadingIcon = { Icon(Icons.Default.VolumeUp, contentDescription = null) },
+                                onClick = {
+                                    showMenu = false
+                                    viewModel.startListeningToPageText()
+                                }
+                            )
+
+                            DropdownMenuItem(
+                                text = { Text("Show Reading mode") },
+                                leadingIcon = { Icon(Icons.Default.ChromeReaderMode, contentDescription = null) },
+                                enabled = activeTab?.readerModeAvailable == true,
+                                onClick = {
+                                    showMenu = false
+                                    viewModel.triggerReaderMode()
+                                }
+                            )
+
+                            DropdownMenuItem(
                                 text = { Text("Desktop site") },
                                 leadingIcon = { Icon(Icons.Default.Devices, contentDescription = null) },
                                 trailingIcon = {
@@ -533,6 +631,7 @@ fun BrowserScreen(
                             )
                         }
                     }
+                    }
                 }
 
                 // Web Loader linear progress indicator
@@ -555,9 +654,25 @@ fun BrowserScreen(
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
     ) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            // 1. Omnibox / Top Address Bar (Only when Tab Switcher & Reader Mode are inactive)
-            if (!uiState.isTabSwitcherOpen && !uiState.readerModeActive && uiState.addressBarPosition != "bottom") {
+        if (fullscreenState != null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black),
+                contentAlignment = Alignment.Center
+            ) {
+                AndroidView(
+                    factory = { fullscreenState!!.view },
+                    modifier = Modifier.fillMaxSize()
+                )
+                BackHandler(enabled = true) {
+                    viewModel.exitFullscreen()
+                }
+            }
+        }
+        Column(modifier = Modifier.fillMaxSize().imePadding()) {
+            // 1. Omnibox / Top Address Bar (Only when Tab Switcher & Reader Mode are inactive and toolbars are set to visible)
+            if (uiState.areToolbarsVisible && !uiState.isTabSwitcherOpen && !uiState.readerModeActive && uiState.addressBarPosition != "bottom") {
                 addressBarContent()
             }
 
@@ -586,7 +701,7 @@ fun BrowserScreen(
                         onUpdateFontSize = { viewModel.updateReaderFontSize(it) }
                     )
                 } else if (activeTab != null) {
-                    if (activeTab.url == "orion://newtab") {
+                    if (activeTab.url == "orion://newtab" || activeTab.url == "orion://newtab-incognito") {
                         NewTabScreen(
                             state = uiState,
                             topSites = topSites,
@@ -614,6 +729,24 @@ fun BrowserScreen(
                             modifier = Modifier.fillMaxSize().testTag("webview")
                         )
                     }
+                }
+
+                // Show the Search Focused Overlay on top of the web content or new tab screen
+                if (uiState.isSearchFocused) {
+                    SearchFocusedOverlay(
+                        state = uiState,
+                        activeTab = activeTab,
+                        topSites = topSites,
+                        onSearch = { url ->
+                            viewModel.navigateTo(url)
+                            focusManager.clearFocus()
+                            keyboardController?.hide()
+                        },
+                        onEdit = { url ->
+                            viewModel.setInputUrlAndQuery(url)
+                        },
+                        isGlass = isGlass
+                    )
                 }
             }
 
@@ -785,8 +918,20 @@ fun BrowserScreen(
                 }
             }
 
-            // 4. Default Bottom Nav bar Toolbar (Hidden during tab switcher & reader mode)
-            if (!uiState.isTabSwitcherOpen && !uiState.readerModeActive && uiState.addressBarPosition == "bottom") {
+            // Bottom Tab Strip layout (Chrome-like circular horizontal tab bar)
+            if (uiState.areToolbarsVisible && !uiState.isTabSwitcherOpen && !uiState.readerModeActive) {
+                BottomTabStripLayout(
+                    state = uiState,
+                    onTabSelect = { viewModel.selectTab(it) },
+                    onTabClose = { viewModel.closeTab(it) },
+                    onNewTab = { viewModel.addNewTab() },
+                    onOpenTabSwitcher = { viewModel.setTabSwitcherOpen(true) },
+                    isGlass = isGlass
+                )
+            }
+
+            // 4. Default Bottom Nav bar Toolbar (Hidden during tab switcher & reader mode and when not visible)
+            if (uiState.areToolbarsVisible && !uiState.isTabSwitcherOpen && !uiState.readerModeActive && uiState.addressBarPosition == "bottom") {
                 addressBarContent()
             }
 
@@ -831,7 +976,7 @@ fun BrowserScreen(
                             )
                         }
 
-                        IconButton(onClick = { viewModel.navigateTo("orion://newtab") }) {
+                        IconButton(onClick = { viewModel.goToHomepage() }) {
                             Icon(
                                 imageVector = Icons.Default.Home,
                                 contentDescription = "Go Home",
@@ -1033,6 +1178,25 @@ fun BrowserScreen(
                                 )
 
                                 DropdownMenuItem(
+                                    text = { Text("Listen to this page") },
+                                    leadingIcon = { Icon(Icons.Default.VolumeUp, contentDescription = null) },
+                                    onClick = {
+                                        showMenu = false
+                                        viewModel.startListeningToPageText()
+                                    }
+                                )
+
+                                DropdownMenuItem(
+                                    text = { Text("Show Reading mode") },
+                                    leadingIcon = { Icon(Icons.Default.ChromeReaderMode, contentDescription = null) },
+                                    enabled = activeTab?.readerModeAvailable == true,
+                                    onClick = {
+                                        showMenu = false
+                                        viewModel.triggerReaderMode()
+                                    }
+                                )
+
+                                DropdownMenuItem(
                                     text = { Text("Find in page") },
                                     leadingIcon = { Icon(Icons.Default.FindInPage, contentDescription = null) },
                                     onClick = {
@@ -1218,6 +1382,42 @@ fun BrowserScreen(
                     }
                 },
                 isPdfType = isPdf
+            )
+        }
+
+        if (uiState.contextMenuState.show) {
+            WebContextMenuBottomSheet(
+                state = uiState.contextMenuState,
+                onDismiss = { viewModel.dismissContextMenu() },
+                onOpenInNewTab = { url ->
+                    viewModel.addNewTab(url = url, isIncognito = false)
+                },
+                onOpenInNewTabGroup = { url ->
+                    viewModel.addNewTab(url = url, isIncognito = false)
+                    if (activeTab != null) {
+                        val activeGrp = activeTab.groupName
+                        val activeColor = activeTab.groupColor ?: 0xFF818CF8
+                        if (activeGrp != null) {
+                            val newActiveId = viewModel.uiState.value.activeTabId
+                            viewModel.moveTabToGroup(newActiveId, activeGrp, activeColor)
+                        }
+                    }
+                },
+                onOpenInIncognito = { url ->
+                    viewModel.addNewTab(url = url, isIncognito = true)
+                },
+                onDownloadLink = { url ->
+                    val userAgent = if (activeTab != null) {
+                        viewModel.getOrCreateWebView(activeTab.id, context).settings.userAgentString
+                    } else {
+                        "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+                    }
+                    val cleanFileName = viewModel.extractFileName(null, url, "application/octet-stream")
+                    viewModel.showDownloadConfirmation(url, cleanFileName, 0L, "application/octet-stream", userAgent)
+                },
+                onAddToReadingList = { url, title ->
+                    viewModel.addBookmarkExternally(url, title)
+                }
             )
         }
 
@@ -1600,7 +1800,7 @@ fun TabSwitcherLayout(
                                         .background(MaterialTheme.colorScheme.surfaceVariant),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    if (tab.url == "orion://newtab") {
+                                    if (tab.url == "orion://newtab" || tab.url == "orion://newtab-incognito") {
                                         Box(
                                             modifier = Modifier
                                                 .fillMaxSize()
@@ -1608,7 +1808,7 @@ fun TabSwitcherLayout(
                                             contentAlignment = Alignment.Center
                                         ) {
                                             Text(
-                                                text = "New Tab",
+                                                text = if (tab.isIncognito) "Private Tab" else "New Tab",
                                                 color = Color.White.copy(alpha = 0.6f),
                                                 fontSize = 12.sp,
                                                 fontWeight = FontWeight.Medium
@@ -3262,3 +3462,362 @@ fun DownloadItemRow(
         }
     }
 }
+
+@Composable
+fun SearchFocusedOverlay(
+    state: BrowserUiState,
+    activeTab: TabState?,
+    topSites: List<com.example.data.TopSite>,
+    onSearch: (String) -> Unit,
+    onEdit: (String) -> Unit,
+    isGlass: Boolean
+) {
+    val context = LocalContext.current
+    val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                color = if (isGlass) Color(0xF20A0E17) else MaterialTheme.colorScheme.background
+            )
+            .clickable(enabled = false) {} // block click propagation
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState()),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // First: Web Page Edit Card at the absolute top of the focused search screen
+            if (activeTab != null && activeTab.url != "orion://newtab" && activeTab.url != "orion://newtab-incognito") {
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (isGlass) Color.White.copy(alpha = 0.08f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                        contentColor = if (isGlass) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 16.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Globe Icon
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .background(
+                                    color = if (isGlass) Color.White.copy(alpha = 0.1f) else MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
+                                    shape = RoundedCornerShape(20.dp)
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Language,
+                                contentDescription = null,
+                                tint = if (isGlass) Color.White else MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(12.dp))
+
+                        // Title & Subtext URL
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = activeTab.title.ifEmpty { "Active Webpage" },
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                color = if (isGlass) Color.White else MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = activeTab.url,
+                                fontSize = 12.sp,
+                                color = if (isGlass) Color.White.copy(alpha = 0.6f) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(top = 2.dp)
+                            )
+                        }
+
+                        // Buttons for Share, Copy, Edit
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            // Share link
+                            IconButton(onClick = {
+                                val sendIntent = Intent().apply {
+                                    action = Intent.ACTION_SEND
+                                    putExtra(Intent.EXTRA_TEXT, activeTab.url)
+                                    type = "text/plain"
+                                }
+                                val shareIntent = Intent.createChooser(sendIntent, "Share address")
+                                context.startActivity(shareIntent)
+                            }) {
+                                Icon(
+                                    imageVector = Icons.Default.Share,
+                                    contentDescription = "Share",
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+
+                            // Copy Link
+                            IconButton(onClick = {
+                                clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(activeTab.url))
+                                Toast.makeText(context, "Link copied!", Toast.LENGTH_SHORT).show()
+                            }) {
+                                Icon(
+                                    imageVector = Icons.Default.ContentCopy,
+                                    contentDescription = "Copy",
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+
+                            // Edit Link
+                            IconButton(onClick = {
+                                onEdit(activeTab.url)
+                            }) {
+                                Icon(
+                                    imageVector = Icons.Default.Edit,
+                                    contentDescription = "Edit",
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Second: Search suggestions list under the Web Page edit card
+            if (state.searchSuggestions.isNotEmpty()) {
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (isGlass) Color.White.copy(alpha = 0.08f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                        contentColor = if (isGlass) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 16.dp)
+                ) {
+                    Column(modifier = Modifier.padding(vertical = 8.dp)) {
+                        state.searchSuggestions.forEach { suggestion ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        if (suggestion.type == SuggestionType.HISTORY || suggestion.type == SuggestionType.BOOKMARK) {
+                                            onSearch(suggestion.url)
+                                        } else {
+                                            onSearch(suggestion.title)
+                                        }
+                                    }
+                                    .padding(vertical = 10.dp, horizontal = 16.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                val icon = when (suggestion.type) {
+                                    SuggestionType.SEARCH -> Icons.Default.Search
+                                    SuggestionType.HISTORY -> Icons.Default.History
+                                    SuggestionType.BOOKMARK -> Icons.Default.Star
+                                }
+                                Icon(
+                                    imageVector = icon,
+                                    contentDescription = suggestion.type.name,
+                                    tint = if (isGlass) Color.White.copy(alpha = 0.6f) else MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+
+                                Spacer(modifier = Modifier.width(12.dp))
+
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = suggestion.title,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        color = if (isGlass) Color.White else MaterialTheme.colorScheme.onSurface
+                                    )
+                                    if (suggestion.type == SuggestionType.HISTORY || suggestion.type == SuggestionType.BOOKMARK) {
+                                        Text(
+                                            text = suggestion.url,
+                                            fontSize = 11.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            color = if (isGlass) Color.White.copy(alpha = 0.5f) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                            modifier = Modifier.padding(top = 2.dp)
+                                        )
+                                    }
+                                }
+
+                                if (suggestion.type == SuggestionType.SEARCH) {
+                                    IconButton(
+                                        onClick = { onEdit(suggestion.title) },
+                                        modifier = Modifier.size(32.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.ArrowBack,
+                                            contentDescription = "Refine search",
+                                            tint = if (isGlass) Color.White.copy(alpha = 0.6f) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.size(16.dp).graphicsLayer(rotationZ = 135f)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun BottomTabStripLayout(
+    state: BrowserUiState,
+    onTabSelect: (String) -> Unit,
+    onTabClose: (String) -> Unit,
+    onNewTab: () -> Unit,
+    onOpenTabSwitcher: () -> Unit,
+    isGlass: Boolean
+) {
+    Surface(
+        color = if (isGlass) Color(0xD90A0E17) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.95f),
+        contentColor = if (isGlass) Color.White else MaterialTheme.colorScheme.onSurface,
+        border = if (isGlass) BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)) else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+        tonalElevation = 6.dp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(64.dp)
+                .padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            // Left: Horizontal scrolling tab items
+            androidx.compose.foundation.lazy.LazyRow(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(end = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                items(state.tabs, key = { it.id }) { tab ->
+                    val isActive = tab.id == state.activeTabId
+                    Box(
+                        modifier = Modifier
+                            .size(52.dp)
+                    ) {
+                        // Circular tab favicon container
+                        Surface(
+                            onClick = { onTabSelect(tab.id) },
+                            shape = CircleShape,
+                            color = if (isActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+                            border = BorderStroke(
+                                width = if (isActive) 2.dp else 1.dp,
+                                color = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                            ),
+                            modifier = Modifier
+                                .align(Alignment.Center)
+                                .size(38.dp)
+                        ) {
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier.fillMaxSize()
+                            ) {
+                                if (tab.favicon != null) {
+                                    Image(
+                                        bitmap = tab.favicon.asImageBitmap(),
+                                        contentDescription = tab.title,
+                                        modifier = Modifier
+                                            .size(22.dp)
+                                            .clip(CircleShape)
+                                    )
+                                } else {
+                                    // Generate a letter monogram from title/url
+                                    val letter = remember(tab.title, tab.url) {
+                                        val display = if (tab.url.startsWith("orion://newtab")) {
+                                            if (tab.isIncognito) "I" else "N"
+                                        } else {
+                                            val host = try { android.net.Uri.parse(tab.url).host } catch (e: Exception) { null }
+                                            if (!host.isNullOrEmpty()) {
+                                                host.removePrefix("www.").firstOrNull()?.toString()
+                                            } else {
+                                                tab.title.firstOrNull()?.toString()
+                                            }
+                                        } ?: "O"
+                                        display.uppercase()
+                                    }
+                                    Text(
+                                        text = letter,
+                                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+                                        color = if (isActive) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+
+                        // Close button "X" on active tab
+                        if (isActive && state.tabs.size > 1) {
+                            Surface(
+                                shape = CircleShape,
+                                color = MaterialTheme.colorScheme.error,
+                                contentColor = Color.White,
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .padding(top = 2.dp, end = 2.dp)
+                                    .size(16.dp)
+                                    .clickable { onTabClose(tab.id) }
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "Close",
+                                        modifier = Modifier.size(10.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Middle: Plus sign to add new tab
+            IconButton(
+                onClick = onNewTab,
+                modifier = Modifier
+                    .padding(horizontal = 4.dp)
+                    .size(40.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Add,
+                    contentDescription = "New Tab",
+                    tint = if (isGlass) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            // Right: Caret Arrow icon to toggle/show tab switcher
+            IconButton(
+                onClick = onOpenTabSwitcher,
+                modifier = Modifier.size(40.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.KeyboardArrowUp,
+                    contentDescription = "Tab Switcher",
+                    tint = if (isGlass) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+

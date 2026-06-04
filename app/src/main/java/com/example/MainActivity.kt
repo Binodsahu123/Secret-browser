@@ -31,6 +31,8 @@ class MainActivity : ComponentActivity() {
 
         viewModel = ViewModelProvider(this, factory)[BrowserViewModel::class.java]
 
+        viewModel.handleIncomingIntent(intent)
+
         setContent {
             MyApplicationTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
@@ -40,6 +42,14 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
+        }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (::viewModel.isInitialized) {
+            viewModel.handleIncomingIntent(intent)
         }
     }
 

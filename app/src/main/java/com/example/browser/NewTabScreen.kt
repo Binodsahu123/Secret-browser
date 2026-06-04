@@ -354,7 +354,7 @@ fun NewTabScreen(
                         placeholder = "Search Google or type URL",
                         textStyle = LocalTextStyle.current.copy(
                             color = Color.White,
-                            fontSize = 16.sp
+                            fontSize = 14.sp
                         ),
                         modifier = Modifier.weight(1f)
                     )
@@ -1077,10 +1077,12 @@ fun BasicTextFieldWithoutLabel(
             textStyle = textStyle,
             singleLine = true,
             keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                imeAction = androidx.compose.ui.text.input.ImeAction.Done,
-                keyboardType = androidx.compose.ui.text.input.KeyboardType.Uri
+                imeAction = androidx.compose.ui.text.input.ImeAction.Search,
+                keyboardType = androidx.compose.ui.text.input.KeyboardType.Text
             ),
             keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                onSearch = { onDone() },
+                onGo = { onDone() },
                 onDone = { onDone() }
             ),
             cursorBrush = Brush.linearGradient(listOf(Color.White, Color.White)),

@@ -15,10 +15,21 @@ import androidx.lifecycle.viewModelScope
 import com.example.data.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
 import okhttp3.Cache
 import okhttp3.OkHttpClient
 import java.io.File
 import java.util.UUID
+
+enum class SuggestionType {
+    SEARCH, HISTORY, BOOKMARK
+}
+
+data class SearchSuggestion(
+    val type: SuggestionType,
+    val title: String,
+    val url: String = ""
+)
 
 data class TabState(
     val id: String,
@@ -39,7 +50,8 @@ data class TabState(
     val groupId: String? = null,
     val groupName: String? = null,
     val groupColor: Long? = null,
-    val blockedAdsCount: Int = 0
+    val blockedAdsCount: Int = 0,
+    val hasLoadedSuccessfully: Boolean = false
 )
 
 data class BrowserUiState(
@@ -89,7 +101,27 @@ data class BrowserUiState(
 
     // Download states
     val downloadConfirmState: DownloadConfirmState = DownloadConfirmState(),
-    val downloadProgressState: DownloadProgressState = DownloadProgressState()
+    val downloadProgressState: DownloadProgressState = DownloadProgressState(),
+
+    // Long-press Context Menu state
+    val contextMenuState: ContextMenuState = ContextMenuState(),
+
+    // Search suggestions dropdown list
+    val searchSuggestions: List<SearchSuggestion> = emptyList(),
+
+    // File picker trigger
+    val showFilePicker: Boolean = false,
+    
+    // Fullscreen auto-hide toolbars visible state
+    val areToolbarsVisible: Boolean = true
+)
+
+data class ContextMenuState(
+    val show: Boolean = false,
+    val url: String = "",
+    val isImage: Boolean = false,
+    val isImageLink: Boolean = false,
+    val imageUrl: String = ""
 )
 
 data class DownloadConfirmState(
@@ -123,6 +155,19 @@ class BrowserViewModel(
     // Map of active WebViews
     private val webViewMap = mutableMapOf<String, WebView>()
 
+    // Desktop Mode variables
+    private var isUASwitchPending = false
+    private var lastManualLoadUrl = ""
+    private val domainDesktopMap = HashMap<String, Boolean>()
+
+    // Search suggestions variables
+    private var suggestionFetchJob: kotlinx.coroutines.Job? = null
+    private val suggestionMemoryCache = object : java.util.LinkedHashMap<String, List<SearchSuggestion>>(10, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<SearchSuggestion>>?): Boolean {
+            return size > 10
+        }
+    }
+
     // Favicon LRU cache (max 50 entries)
     private val faviconCache = LruCache<String, Bitmap>(50)
 
@@ -130,6 +175,21 @@ class BrowserViewModel(
     private val okHttpClient: OkHttpClient
 
     private val tabHistory = mutableListOf<String>()
+
+    // File choosing callback
+    var fileChooserCallback: android.webkit.ValueCallback<Array<android.net.Uri>>? = null
+
+    // Back press twice to exit
+    private var lastBackPressTime = 0L
+
+    // Fullscreen state variables
+    private val _fullscreenState = MutableStateFlow<FullscreenState?>(null)
+    val fullscreenState: StateFlow<FullscreenState?> = _fullscreenState
+
+    data class FullscreenState(
+        val view: android.view.View,
+        val callback: android.webkit.WebChromeClient.CustomViewCallback
+    )
 
     val downloads: StateFlow<List<DownloadItem>> = repository.downloads
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -146,6 +206,19 @@ class BrowserViewModel(
     private var ttsEngine: android.speech.tts.TextToSpeech? = null
 
     init {
+        // Load saved desktop mode entries
+        try {
+            val sharedPrefs = application.getSharedPreferences("desktop_mode_sites", Context.MODE_PRIVATE)
+            sharedPrefs.all.forEach { (key, value) ->
+                if (key.startsWith("desktop_mode_") && value is Boolean) {
+                    val domain = key.substring("desktop_mode_".length)
+                    domainDesktopMap[domain] = value
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
         // Initialize AdBlocker
         com.example.engine.AdBlocker.init(application)
         
@@ -202,8 +275,8 @@ class BrowserViewModel(
             }.collect()
         }
 
-        // Add initial tab
-        addNewTab()
+        // Add initial tab or restore previous tabs
+        restoreTabsState()
         loadArticlesForCategory("For You", false)
         refreshSettings()
     }
@@ -221,16 +294,6 @@ class BrowserViewModel(
 
     // Tab Management
     fun addNewTab(url: String = "orion://newtab", isIncognito: Boolean = false) {
-        val currentTabs = _uiState.value.tabs
-        if (currentTabs.size >= 10) {
-            android.widget.Toast.makeText(
-                getApplication(),
-                "Tab limit of 10 reached. Please close other tabs to continue.",
-                android.widget.Toast.LENGTH_SHORT
-            ).show()
-            return
-        }
-
         val tabId = UUID.randomUUID().toString()
         val formatted = if (url == "orion://newtab" && isIncognito) "orion://newtab-incognito" else formatUrlOrSearch(url)
         val newTab = TabState(
@@ -248,13 +311,15 @@ class BrowserViewModel(
                 activeTabId = tabId,
                 currentInputUrl = if (formatted == "orion://newtab" || formatted == "orion://newtab-incognito") "" else formatted,
                 isTabSwitcherOpen = false,
-                readerModeActive = false
+                readerModeActive = false,
+                areToolbarsVisible = true
             )
         }
 
         // Lazy preloading of adjacent tabs
         cleanupOlderWebViews()
         preloadAdjacentTabs()
+        saveTabsState()
     }
 
     fun selectTab(tabId: String) {
@@ -267,21 +332,7 @@ class BrowserViewModel(
             tabHistory.add(oldTabId)
         }
 
-        // 1. Capture screen of previous active WebView before switching away
-        val prevWebView = webViewMap[oldTabId]
-        if (prevWebView != null) {
-            val bmp = captureWebViewScreenshot(prevWebView)
-            _uiState.update { state ->
-                state.copy(
-                    tabs = state.tabs.map {
-                        if (it.id == oldTabId) it.copy(screenshot = bmp ?: it.screenshot) else it
-                    }
-                )
-            }
-            prevWebView.onPause()
-        }
-
-        // 2. Select new tab
+        // 1. Select new tab IMMEDIATELY in state
         _uiState.update { state ->
             val updatedTabs = state.tabs.map {
                 if (it.id == tabId) it.copy(lastActiveTime = System.currentTimeMillis()) else it
@@ -293,13 +344,34 @@ class BrowserViewModel(
                 currentInputUrl = if (activeTab?.url == "orion://newtab") "" else (activeTab?.url ?: ""),
                 isTabSwitcherOpen = false,
                 readerModeActive = false,
-                findInPageActive = false
+                findInPageActive = false,
+                areToolbarsVisible = true
             )
         }
 
-        // 3. Resume the newly active tab WebView
+        // 2. Resume the newly active tab WebView IMMEDIATELY
         val activeWebView = webViewMap[tabId]
         activeWebView?.onResume()
+
+        // 3. Capture screen of previous active WebView and pause asynchronously
+        val prevWebView = webViewMap[oldTabId]
+        if (prevWebView != null) {
+            viewModelScope.launch(Dispatchers.Main) {
+                try {
+                    val bmp = captureWebViewScreenshot(prevWebView)
+                    _uiState.update { state ->
+                        state.copy(
+                            tabs = state.tabs.map {
+                                if (it.id == oldTabId) it.copy(screenshot = bmp ?: it.screenshot) else it
+                            }
+                        )
+                    }
+                    prevWebView.onPause()
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
 
         preloadAdjacentTabs()
     }
@@ -342,6 +414,7 @@ class BrowserViewModel(
         activeWebView?.onResume()
 
         preloadAdjacentTabs()
+        saveTabsState()
     }
 
     private fun destroyTabWebView(tabId: String) {
@@ -352,6 +425,102 @@ class BrowserViewModel(
             it.removeAllViews()
             it.destroy()
         }
+    }
+
+    fun handleIncomingIntent(intent: android.content.Intent?) {
+        if (intent == null) return
+        val url = intent.dataString ?: intent.getStringExtra("url")
+        if (!url.isNullOrEmpty()) {
+            val activeId = _uiState.value.activeTabId
+            val activeTab = _uiState.value.tabs.find { it.id == activeId }
+            if (activeTab != null && (activeTab.url == "orion://newtab" || activeTab.url == "orion://newtab-incognito")) {
+                navigateTo(url)
+            } else {
+                addNewTab(url = url)
+            }
+        }
+    }
+
+    fun saveTabsState() {
+        val currentState = _uiState.value
+        val tabs = currentState.tabs
+        if (tabs.isEmpty()) return
+        
+        try {
+            val jsonArray = org.json.JSONArray()
+            for (tab in tabs) {
+                if (tab.isIncognito) continue // Do not store incognito sessions
+                
+                val obj = org.json.JSONObject().apply {
+                    put("id", tab.id)
+                    put("url", tab.url)
+                    put("title", tab.title)
+                    put("isDesktopMode", tab.isDesktopMode)
+                }
+                jsonArray.put(obj)
+            }
+            
+            val prefs = getApplication<Application>().getSharedPreferences("orion_tab_state", Context.MODE_PRIVATE)
+            prefs.edit().apply {
+                putString("saved_tabs_list", jsonArray.toString())
+                putString("active_tab_id", currentState.activeTabId)
+                apply()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun restoreTabsState() {
+        try {
+            val prefs = getApplication<Application>().getSharedPreferences("orion_tab_state", Context.MODE_PRIVATE)
+            val savedListStr = prefs.getString("saved_tabs_list", null)
+            val activeTabId = prefs.getString("active_tab_id", "")
+            
+            if (!savedListStr.isNullOrEmpty()) {
+                val jsonArray = org.json.JSONArray(savedListStr)
+                val restoredTabs = mutableListOf<TabState>()
+                for (i in 0 until jsonArray.length()) {
+                    val obj = jsonArray.getJSONObject(i)
+                    val id = obj.optString("id", java.util.UUID.randomUUID().toString())
+                    val url = obj.optString("url", "orion://newtab")
+                    val title = obj.optString("title", "New Tab")
+                    val isDesktopMode = obj.optBoolean("isDesktopMode", false)
+                    
+                    restoredTabs.add(
+                        TabState(
+                            id = id,
+                            url = url,
+                            title = title,
+                            isDesktopMode = isDesktopMode,
+                            isIncognito = false
+                        )
+                    )
+                }
+                if (restoredTabs.isNotEmpty()) {
+                    val savedActiveId = prefs.getString("active_tab_id", "") ?: ""
+                    val finalActiveId = if (restoredTabs.any { it.id == savedActiveId }) savedActiveId else restoredTabs.first().id
+                    val activeTab = restoredTabs.find { it.id == finalActiveId }
+                    _uiState.update { state ->
+                        state.copy(
+                            tabs = restoredTabs,
+                            activeTabId = finalActiveId,
+                            currentInputUrl = if (activeTab?.url == "orion://newtab") "" else (activeTab?.url ?: "")
+                        )
+                    }
+                    return
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        
+        // Default startup tab
+        addNewTab()
+    }
+
+    fun resetFilePickerState() {
+        _uiState.update { it.copy(showFilePicker = false) }
     }
 
     // Lazily get or create the WebView for Composable use
@@ -368,8 +537,98 @@ class BrowserViewModel(
 
         val currentTab = _uiState.value.tabs.find { it.id == tabId }
 
-        val webView = WebView(context).apply {
+        val webView = object : WebView(context) {
+            private var startX = 0f
+            private var startY = 0f
+            private val swipeThreshold = 150f
+            private val yThreshold = 100f
+
+            override fun onWindowVisibilityChanged(visibility: Int) {
+                if (visibility == View.GONE || visibility == View.INVISIBLE) {
+                    super.onWindowVisibilityChanged(View.VISIBLE)
+                } else {
+                    super.onWindowVisibilityChanged(visibility)
+                }
+            }
+
+            private var startClickTime = 0L
+            private var startClickX = 0f
+            private var startClickY = 0f
+
+            override fun onScrollChanged(l: Int, t: Int, oldl: Int, oldt: Int) {
+                super.onScrollChanged(l, t, oldl, oldt)
+                val deltaY = t - oldt
+                if (Math.abs(deltaY) > 8) {
+                    if (deltaY > 0) {
+                        setToolbarsVisible(false)
+                    } else if (deltaY < 0) {
+                        setToolbarsVisible(true)
+                    }
+                }
+            }
+
+            override fun onTouchEvent(event: android.view.MotionEvent): Boolean {
+                when (event.action) {
+                    android.view.MotionEvent.ACTION_DOWN -> {
+                        startX = event.x
+                        startY = event.y
+                        startClickTime = System.currentTimeMillis()
+                        startClickX = event.x
+                        startClickY = event.y
+                    }
+                    android.view.MotionEvent.ACTION_UP -> {
+                        val diffX = event.x - startX
+                        val diffY = event.y - startY
+                        
+                        val clickDuration = System.currentTimeMillis() - startClickTime
+                        val clickDistX = event.x - startClickX
+                        val clickDistY = event.y - startClickY
+                        
+                        val isClick = clickDuration < 300 && Math.abs(clickDistX) < 15f && Math.abs(clickDistY) < 15f
+                        
+                        if (isClick) {
+                            toggleToolbarsVisible()
+                        } else if (Math.abs(diffX) > Math.abs(diffY) && Math.abs(diffX) > swipeThreshold && Math.abs(diffY) < yThreshold) {
+                            if (diffX > 0) {
+                                if (canGoBack()) {
+                                    goBack()
+                                    return true
+                                }
+                            } else {
+                                if (canGoForward()) {
+                                    goForward()
+                                    return true
+                                }
+                            }
+                        }
+                    }
+                }
+                return super.onTouchEvent(event)
+            }
+        }.apply {
             id = View.generateViewId()
+
+            setOnLongClickListener {
+                val result = hitTestResult
+                val type = result.type
+                val extra = result.extra
+                if (extra != null) {
+                    when (type) {
+                        android.webkit.WebView.HitTestResult.SRC_ANCHOR_TYPE,
+                        android.webkit.WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE -> {
+                            showContextMenu(url = extra, isImage = false, isImageLink = (type == android.webkit.WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE))
+                            true
+                        }
+                        android.webkit.WebView.HitTestResult.IMAGE_TYPE -> {
+                            showContextMenu(url = extra, isImage = true)
+                            true
+                        }
+                        else -> false
+                    }
+                } else {
+                    false
+                }
+            }
             layoutParams = android.view.ViewGroup.LayoutParams(
                 android.view.ViewGroup.LayoutParams.MATCH_PARENT,
                 android.view.ViewGroup.LayoutParams.MATCH_PARENT
@@ -414,30 +673,45 @@ class BrowserViewModel(
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                     try {
                         super.onPageStarted(view, url, favicon)
+                        isUASwitchPending = false
                         if (url != null && view != null && !url.startsWith("orion://")) {
                             val host = android.net.Uri.parse(url).host
                             if (!host.isNullOrEmpty()) {
-                                val isDesktop = DesktopModeManager.isDesktopMode(getApplication(), host)
-                                if (isDesktop) {
-                                    DesktopModeManager.applyMode(view, true)
-                                    updateTabState(tabId) { it.copy(isDesktopMode = true) }
+                                val isDesktop = domainDesktopMap[host] == true
+                                val currentTab = _uiState.value.tabs.find { it.id == tabId }
+                                val needsUpdate = (currentTab?.isDesktopMode != isDesktop)
+                                if (needsUpdate) {
+                                    updateTabState(tabId) { it.copy(isDesktopMode = isDesktop) }
+                                }
+                                view.settings.userAgentString = if (isDesktop) {
+                                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Safari/537.36"
+                                } else {
+                                    "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Mobile Safari/537.36"
                                 }
                             }
                         }
+                        val currentTabState = _uiState.value.tabs.find { it.id == tabId }
+                        val isNewTabState = currentTabState?.url == "orion://newtab" || currentTabState?.url == "orion://newtab-incognito"
+                        val finalUrl = if (url == "about:blank" && isNewTabState) {
+                            currentTabState?.url ?: ""
+                        } else {
+                            url ?: (currentTabState?.url ?: "")
+                        }
                         updateTabState(tabId) {
                             it.copy(
-                                url = url ?: it.url,
+                                url = finalUrl,
                                 isLoading = true,
                                 progress = 10,
                                 favicon = favicon ?: it.favicon,
                                 readerModeAvailable = false,
-                                blockedAdsCount = 0
+                                blockedAdsCount = 0,
+                                hasLoadedSuccessfully = false
                             )
                         }
                         if (_uiState.value.activeTabId == tabId) {
                             _uiState.update { 
                                 it.copy(
-                                    currentInputUrl = if (url == "orion://newtab" || url == "orion://newtab-incognito") "" else (url ?: "")
+                                    currentInputUrl = if (finalUrl == "orion://newtab" || finalUrl == "orion://newtab-incognito") "" else finalUrl
                                 ) 
                             }
                         }
@@ -449,22 +723,87 @@ class BrowserViewModel(
                 override fun onPageFinished(view: WebView?, url: String?) {
                     try {
                         super.onPageFinished(view, url)
+                        isUASwitchPending = false
+                        if (url != null) {
+                            val host = try { android.net.Uri.parse(url).host } catch (e: Exception) { null }
+                            if (!host.isNullOrEmpty()) {
+                                val isDesktopModeSaved = domainDesktopMap[host] == true
+                                val currentTab = _uiState.value.tabs.find { it.id == tabId }
+                                if (currentTab?.isDesktopMode != isDesktopModeSaved) {
+                                    updateTabState(tabId) { it.copy(isDesktopMode = isDesktopModeSaved) }
+                                }
+                            }
+                        }
+                        val currentTabState = _uiState.value.tabs.find { it.id == tabId }
+                        val isNewTabState = currentTabState?.url == "orion://newtab" || currentTabState?.url == "orion://newtab-incognito"
+                        val finalUrl = if (url == "about:blank" && isNewTabState) {
+                            currentTabState?.url ?: ""
+                        } else {
+                            url ?: (currentTabState?.url ?: "")
+                        }
                         val title = view?.title ?: ""
                         val isTabIncognito = _uiState.value.tabs.find { it.id == tabId }?.isIncognito == true
                         updateTabState(tabId) {
                             it.copy(
-                                url = url ?: it.url,
-                                title = if (url == "orion://newtab" || url == "orion://newtab-incognito") {
+                                url = finalUrl,
+                                title = if (finalUrl == "orion://newtab" || finalUrl == "orion://newtab-incognito") {
                                     if (isTabIncognito) "Incognito Tab" else "New Tab"
                                 } else {
-                                    title.ifBlank { url ?: "Loaded" }
+                                    title.ifBlank { finalUrl }
                                 },
                                 isLoading = false,
                                 progress = 100,
                                 canGoBack = view?.canGoBack() ?: false,
-                                canGoForward = view?.canGoForward() ?: false
+                                canGoForward = view?.canGoForward() ?: false,
+                                hasLoadedSuccessfully = true
                             )
                         }
+
+                        // Inject dynamic global scroll and click capture listener in JavaScript
+                        view?.evaluateJavascript("""
+                            (function() {
+                                if (window._orionListenersAdded) return;
+                                window._orionListenersAdded = true;
+                                var isVisible = true;
+                                
+                                document.addEventListener('scroll', function(e) {
+                                    var currentScrollY = 0;
+                                    var prevScroll = e.target._lastScroll || 0;
+                                    if (e.target === document || e.target === window || !e.target) {
+                                        currentScrollY = window.scrollY;
+                                    } else {
+                                        if (typeof e.target.scrollTop === 'number') {
+                                            currentScrollY = e.target.scrollTop;
+                                        } else {
+                                            return;
+                                        }
+                                    }
+                                    
+                                    var diff = currentScrollY - prevScroll;
+                                    e.target._lastScroll = currentScrollY;
+                                    
+                                    if (Math.abs(diff) > 25) {
+                                        if (diff > 0 && isVisible) {
+                                            isVisible = false;
+                                            try { OrionJS.setToolbarsVisible(false); } catch(e){}
+                                        } else if (diff < 0 && !isVisible) {
+                                            isVisible = true;
+                                            try { OrionJS.setToolbarsVisible(true); } catch(e){}
+                                        }
+                                    }
+                                }, { capture: true, passive: true });
+
+                                document.addEventListener('click', function(e) {
+                                    var target = e.target;
+                                    if (!target) return;
+                                    var tag = target.tagName ? target.tagName.toLowerCase() : '';
+                                    if (tag !== 'input' && tag !== 'textarea' && tag !== 'a' && tag !== 'button' && tag !== 'video' && 
+                                        !target.closest('button') && !target.closest('a') && !target.closest('input')) {
+                                        try { OrionJS.toggleToolbars(); } catch(e){}
+                                    }
+                                }, { capture: true, passive: true });
+                            })();
+                        """.trimIndent(), null)
 
                         val isDesktop = _uiState.value.tabs.find { it.id == tabId }?.isDesktopMode == true
                         if (isDesktop && view != null) {
@@ -528,7 +867,8 @@ class BrowserViewModel(
                 ) {
                     try {
                         val isMainFrame = request?.isForMainFrame ?: false
-                        if (isMainFrame) {
+                        val currentTab = _uiState.value.tabs.find { it.id == tabId }
+                        if (isMainFrame && currentTab?.hasLoadedSuccessfully != true) {
                             val failingUrl = request?.url?.toString() ?: ""
                             val description = error?.description?.toString() ?: "Connect failed"
                             val errorType = when {
@@ -576,6 +916,18 @@ class BrowserViewModel(
                 override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                     try {
                         val url = request?.url?.toString() ?: return false
+                        
+                        if (isUASwitchPending) {
+                            isUASwitchPending = false
+                            return false
+                        }
+                        
+                        val domainCheck = try { android.net.Uri.parse(url).host } catch (e: Exception) { null }
+                        val lastDomain = try { android.net.Uri.parse(lastManualLoadUrl).host } catch (e: Exception) { null }
+                        if (domainCheck != null && lastDomain != null && domainCheck == lastDomain) {
+                            return false
+                        }
+
                         if (url.startsWith("orion://retry")) {
                             val queryUrl = request.url.getQueryParameter("url")
                             if (!queryUrl.isNullOrBlank()) {
@@ -637,7 +989,10 @@ class BrowserViewModel(
                     super.onReceivedTitle(view, titleStr)
                     val currentUrl = view?.url ?: ""
                     updateTabState(tabId) {
-                        it.copy(title = if (currentUrl == "orion://newtab") "New Tab" else (titleStr ?: it.title).ifBlank { currentUrl })
+                        it.copy(title = if (currentUrl == "orion://newtab" || currentUrl == "orion://newtab-incognito") {
+                            val isTabIncognito = _uiState.value.tabs.find { it.id == tabId }?.isIncognito == true
+                            if (isTabIncognito) "Incognito Tab" else "New Tab"
+                        } else (titleStr ?: it.title).ifBlank { currentUrl })
                     }
                 }
 
@@ -650,6 +1005,85 @@ class BrowserViewModel(
                             it.copy(favicon = icon)
                         }
                     }
+                }
+
+                override fun onGeolocationPermissionsShowPrompt(
+                    origin: String?,
+                    callback: android.webkit.GeolocationPermissions.Callback?
+                ) {
+                    callback?.invoke(origin, true, false)
+                }
+
+                override fun onPermissionRequest(request: android.webkit.PermissionRequest?) {
+                    request?.grant(request.resources)
+                }
+
+                override fun onCreateWindow(
+                    view: WebView?,
+                    isDialog: Boolean,
+                    isUserGesture: Boolean,
+                    resultMsg: android.os.Message?
+                ): Boolean {
+                    val contextLocal = view!!.context
+                    val newWebView = WebView(contextLocal)
+                    
+                    val newTabId = java.util.UUID.randomUUID().toString()
+                    val isTabIncognito = _uiState.value.tabs.find { it.id == tabId }?.isIncognito == true
+                    
+                    applyWebViewSettings(
+                        newWebView,
+                        _uiState.value.isJavaScriptEnabled,
+                        _uiState.value.isHardwareAccelerationEnabled,
+                        false
+                    )
+                    
+                    val newTab = TabState(
+                        id = newTabId,
+                        url = "about:blank",
+                        title = "Loading...",
+                        isIncognito = isTabIncognito
+                    )
+                    
+                    webViewMap[newTabId] = newWebView
+                    
+                    _uiState.update { state ->
+                        state.copy(
+                            tabs = state.tabs + newTab,
+                            activeTabId = newTabId
+                        )
+                    }
+                    
+                    val transport = resultMsg?.obj as? WebView.WebViewTransport
+                    if (transport != null) {
+                        transport.webView = newWebView
+                        resultMsg.sendToTarget()
+                        return true
+                    }
+                    return false
+                }
+
+                override fun onShowFileChooser(
+                    webView: WebView?,
+                    filePathCallback: android.webkit.ValueCallback<Array<android.net.Uri>>?,
+                    fileChooserParams: FileChooserParams?
+                ): Boolean {
+                    fileChooserCallback?.onReceiveValue(null)
+                    fileChooserCallback = filePathCallback
+                    _uiState.update { it.copy(showFilePicker = true) }
+                    return true
+                }
+
+                override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
+                    super.onShowCustomView(view, callback)
+                    if (view != null && callback != null) {
+                        _fullscreenState.value = FullscreenState(view, callback)
+                    }
+                }
+
+                override fun onHideCustomView() {
+                    super.onHideCustomView()
+                    _fullscreenState.value?.callback?.onCustomViewHidden()
+                    _fullscreenState.value = null
                 }
             }
 
@@ -676,6 +1110,20 @@ class BrowserViewModel(
                         }
                     }
                 }
+
+                @JavascriptInterface
+                fun setToolbarsVisible(visible: Boolean) {
+                    viewModelScope.launch(Dispatchers.Main) {
+                        setToolbarsVisible(visible)
+                    }
+                }
+
+                @JavascriptInterface
+                fun toggleToolbars() {
+                    viewModelScope.launch(Dispatchers.Main) {
+                        toggleToolbarsVisible()
+                    }
+                }
             }, "OrionJS")
         }
 
@@ -688,7 +1136,7 @@ class BrowserViewModel(
 
         // If the URL is already present in TabState, load it initially
         val urlToLoad = currentTab?.url ?: "orion://newtab"
-        if (urlToLoad != "orion://newtab") {
+        if (urlToLoad != "orion://newtab" && urlToLoad != "orion://newtab-incognito") {
             safeLoadUrl(webView, urlToLoad)
         }
 
@@ -715,11 +1163,18 @@ class BrowserViewModel(
             loadsImagesAutomatically = true
             blockNetworkImage = false
             mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+            setGeolocationEnabled(true)
             userAgentString = if (isDesktop) {
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             } else {
                 "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
             }
+        }
+
+        try {
+            android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
 
         if (hwEnabled) {
@@ -730,12 +1185,17 @@ class BrowserViewModel(
     }
 
     private fun updateTabState(tabId: String, update: (TabState) -> TabState) {
+        val oldTab = _uiState.value.tabs.find { it.id == tabId }
         _uiState.update { state ->
             state.copy(
                 tabs = state.tabs.map {
                     if (it.id == tabId) update(it) else it
                 }
             )
+        }
+        val newTab = _uiState.value.tabs.find { it.id == tabId }
+        if (oldTab != null && newTab != null && (oldTab.url != newTab.url || oldTab.title != newTab.title || oldTab.isDesktopMode != newTab.isDesktopMode)) {
+            saveTabsState()
         }
     }
 
@@ -923,16 +1383,17 @@ class BrowserViewModel(
 
         _uiState.update {
             it.copy(
-                currentInputUrl = if (formatted == "orion://newtab") "" else formatted,
+                currentInputUrl = if (formatted == "orion://newtab" || formatted == "orion://newtab-incognito") "" else formatted,
                 readerModeActive = false,
                 isTabSwitcherOpen = false,
-                isSearchFocused = false
+                isSearchFocused = false,
+                areToolbarsVisible = true
             )
         }
 
         val webView = webViewMap[activeId]
         if (webView != null) {
-            if (formatted == "orion://newtab") {
+            if (formatted == "orion://newtab" || formatted == "orion://newtab-incognito") {
                 safeLoadUrl(webView, "about:blank")
             } else {
                 safeLoadUrl(webView, formatted)
@@ -1196,15 +1657,23 @@ class BrowserViewModel(
     // Dynamic checks
     fun clearWebViewCache(context: Context) {
         // Clear all web cache
-        CookieManager.getInstance().removeAllCookies(null)
-        val wv = WebView(context)
-        wv.clearCache(true)
+        try {
+            val wv = WebView(context)
+            wv.clearCache(true)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
         // Also clear OkHttp cache
         try {
             okHttpClient.cache?.evictAll()
         } catch (e: Exception) {
             e.printStackTrace()
         }
+    }
+
+    fun exitFullscreen() {
+        _fullscreenState.value?.callback?.onCustomViewHidden()
+        _fullscreenState.value = null
     }
 
     fun getMemoryCacheSizeInBytes(context: Context): Long {
@@ -1348,6 +1817,12 @@ class BrowserViewModel(
 
     fun deleteDownload(downloadId: Long) {
         viewModelScope.launch {
+            try {
+                val dm = getApplication<Application>().getSystemService(Context.DOWNLOAD_SERVICE) as android.app.DownloadManager
+                dm.remove(downloadId)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
             repository.deleteDownloadFromDb(downloadId)
         }
     }
@@ -1359,16 +1834,46 @@ class BrowserViewModel(
     }
 
     fun goToHomepage() {
+        val activeId = _uiState.value.activeTabId
+        val tab = _uiState.value.tabs.find { it.id == activeId }
+        val isIncognito = tab?.isIncognito == true
+
         val type = prefs.getString("homepage_type", "ntp")
         val targetUrl = if (type == "custom") {
             prefs.getString("homepage_custom_url", "https://www.google.com")
         } else {
-            "orion://newtab"
+            if (isIncognito) "orion://newtab-incognito" else "orion://newtab"
         }
         navigateTo(targetUrl)
     }
 
-    fun handleBackNavigation(): Boolean {
+    fun showContextMenu(url: String, isImage: Boolean, isImageLink: Boolean = false, imageUrl: String = "") {
+        _uiState.update {
+            it.copy(
+                contextMenuState = ContextMenuState(
+                    show = true,
+                    url = url,
+                    isImage = isImage,
+                    isImageLink = isImageLink,
+                    imageUrl = imageUrl
+                )
+            )
+        }
+    }
+
+    fun dismissContextMenu() {
+        _uiState.update {
+            it.copy(contextMenuState = ContextMenuState())
+        }
+    }
+
+    fun addBookmarkExternally(url: String, title: String) {
+        viewModelScope.launch {
+            repository.addBookmark(url, title)
+        }
+    }
+
+    fun handleBackNavigation(onShowExitToast: () -> Unit): Boolean {
         val currentState = _uiState.value
         
         // 1. If settings overlay is open
@@ -1421,19 +1926,8 @@ class BrowserViewModel(
             val previousTabId = tabHistory.removeAt(tabHistory.size - 1)
             
             val oldTabId = currentState.activeTabId
-            val prevWebView = webViewMap[oldTabId]
-            if (prevWebView != null) {
-                val bmp = captureWebViewScreenshot(prevWebView)
-                _uiState.update { state ->
-                    state.copy(
-                        tabs = state.tabs.map {
-                            if (it.id == oldTabId) it.copy(screenshot = bmp ?: it.screenshot) else it
-                        }
-                    )
-                }
-                prevWebView.onPause()
-            }
             
+            // 1. Switch back state instantly
             _uiState.update { state ->
                 val updatedTabs = state.tabs.map {
                     if (it.id == previousTabId) it.copy(lastActiveTime = System.currentTimeMillis()) else it
@@ -1449,9 +1943,38 @@ class BrowserViewModel(
                 )
             }
             
+            // 2. Resume newly active WebView instantly
             val activeWebView = webViewMap[previousTabId]
             activeWebView?.onResume()
+
+            // 3. Capture screen of previous active WebView and pause asynchronously
+            val prevWebView = webViewMap[oldTabId]
+            if (prevWebView != null) {
+                viewModelScope.launch(Dispatchers.Main) {
+                    try {
+                        val bmp = captureWebViewScreenshot(prevWebView)
+                        _uiState.update { state ->
+                            state.copy(
+                                tabs = state.tabs.map {
+                                    if (it.id == oldTabId) it.copy(screenshot = bmp ?: it.screenshot) else it
+                                }
+                            )
+                        }
+                        prevWebView.onPause()
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+            }
+            
             preloadAdjacentTabs()
+            return true
+        }
+        
+        val now = System.currentTimeMillis()
+        if (now - lastBackPressTime > 2000) {
+            lastBackPressTime = now
+            onShowExitToast()
             return true
         }
         
@@ -1479,10 +2002,110 @@ class BrowserViewModel(
 
     fun setInputUrlAndQuery(input: String) {
         _uiState.update { it.copy(currentInputUrl = input) }
+        
+        suggestionFetchJob?.cancel()
+        if (input.trim().isEmpty()) {
+            _uiState.update { it.copy(searchSuggestions = emptyList()) }
+            return
+        }
+
+        suggestionFetchJob = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            kotlinx.coroutines.delay(200)
+
+            // Memory Cache check
+            val cached = suggestionMemoryCache[input]
+            if (cached != null) {
+                _uiState.update { it.copy(searchSuggestions = cached) }
+                return@launch
+            }
+
+            // Local History
+            val historyResults = repository.searchHistory(input, 3).map {
+                SearchSuggestion(SuggestionType.HISTORY, it.title, it.url)
+            }
+
+            // Local Bookmarks
+            val bookmarkResults = repository.searchBookmarks(input, 2).map {
+                SearchSuggestion(SuggestionType.BOOKMARK, it.title, it.url)
+            }
+
+            // Search engine API fetch
+            val engine = getSelectedSearchEngine()
+            val apiUrl = getSuggestionApiUrl(engine, input)
+            val searchResults = if (!apiUrl.isNullOrEmpty()) {
+                fetchSearchSuggestions(apiUrl, engine, input)
+            } else {
+                emptyList()
+            }
+
+            val merged = (historyResults + bookmarkResults + searchResults).take(9)
+            suggestionMemoryCache[input] = merged
+            _uiState.update { it.copy(searchSuggestions = merged) }
+        }
+    }
+
+    private fun getSuggestionApiUrl(engineName: String, query: String): String? {
+        val encoded = try { java.net.URLEncoder.encode(query, "UTF-8") } catch (e: Exception) { query }
+        return when (engineName) {
+            "Google" -> "https://suggestqueries.google.com/complete/search?client=firefox&q=$encoded"
+            "Bing" -> "https://api.bing.com/osjson.aspx?query=$encoded"
+            "DuckDuckGo" -> "https://duckduckgo.com/ac/?q=$encoded"
+            "Yahoo" -> "https://ff.search.yahoo.com/gossip?output=fxjson&command=$encoded"
+            else -> null
+        }
+    }
+
+    private fun fetchSearchSuggestions(url: String, engineName: String, query: String): List<SearchSuggestion> {
+        val request = okhttp3.Request.Builder().url(url).build()
+        try {
+            okHttpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return emptyList()
+                val bodyString = response.body?.string() ?: return emptyList()
+
+                if (engineName == "DuckDuckGo") {
+                    val jsonArray = org.json.JSONArray(bodyString)
+                    val suggestions = mutableListOf<SearchSuggestion>()
+                    for (i in 0 until jsonArray.length()) {
+                        val obj = jsonArray.getJSONObject(i)
+                        val phrase = obj.optString("phrase")
+                        if (!phrase.isNullOrEmpty()) {
+                            suggestions.add(SearchSuggestion(SuggestionType.SEARCH, phrase))
+                        }
+                    }
+                    return suggestions.take(5)
+                } else {
+                    val jsonArray = org.json.JSONArray(bodyString)
+                    if (jsonArray.length() > 1) {
+                        val innerArray = jsonArray.getJSONArray(1)
+                        val suggestions = mutableListOf<SearchSuggestion>()
+                        for (i in 0 until innerArray.length()) {
+                            val value = innerArray.optString(i)
+                            if (!value.isNullOrEmpty()) {
+                                suggestions.add(SearchSuggestion(SuggestionType.SEARCH, value))
+                            }
+                        }
+                        return suggestions.take(5)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return emptyList()
     }
 
     fun setSearchFocused(focused: Boolean) {
         _uiState.update { it.copy(isSearchFocused = focused) }
+    }
+
+    fun setToolbarsVisible(visible: Boolean) {
+        if (_uiState.value.areToolbarsVisible != visible) {
+            _uiState.update { it.copy(areToolbarsVisible = visible) }
+        }
+    }
+
+    fun toggleToolbarsVisible() {
+        _uiState.update { it.copy(areToolbarsVisible = !_uiState.value.areToolbarsVisible) }
     }
 
     fun toggleDesktopMode() {
@@ -1490,18 +2113,32 @@ class BrowserViewModel(
         if (activeId.isEmpty()) return
         val currentTab = _uiState.value.tabs.find { it.id == activeId } ?: return
         val webView = webViewMap[activeId] ?: return
-        val currentUrl = currentTab.url
-        if (currentUrl.isEmpty() || currentUrl.startsWith("orion://")) return
+        val currentUrl = webView.url ?: currentTab.url
+        if (currentUrl.isEmpty() || currentUrl.startsWith("orion://") || currentUrl.startsWith("about:")) return
 
-        val isNowDesktop = DesktopModeManager.toggleDesktopMode(getApplication(), webView, currentUrl)
+        val domain = Uri.parse(currentUrl).host ?: return
+        val currentMode = domainDesktopMap[domain] ?: false
+        val newMode = !currentMode
+        domainDesktopMap[domain] = newMode
+
+        // Save to SharedPreferences
+        val sharedPrefs = getApplication<Application>().getSharedPreferences("desktop_mode_sites", Context.MODE_PRIVATE)
+        sharedPrefs.edit().putBoolean("desktop_mode_$domain", newMode).apply()
+
+        isUASwitchPending = true
+        lastManualLoadUrl = currentUrl
+
+        webView.settings.userAgentString = if (newMode) {
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Safari/537.36"
+        } else {
+            "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Mobile Safari/537.36"
+        }
 
         updateTabState(activeId) {
-            it.copy(isDesktopMode = isNowDesktop)
+            it.copy(isDesktopMode = newMode)
         }
 
-        webView.post {
-            webView.reload()
-        }
+        webView.reload()
     }
 
     private var feedJob: kotlinx.coroutines.Job? = null
