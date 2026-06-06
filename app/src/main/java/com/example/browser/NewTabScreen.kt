@@ -15,6 +15,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -239,12 +240,21 @@ fun NewTabScreen(
                             .padding(horizontal = 16.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Search,
-                            contentDescription = "Search private",
-                            tint = Color(0xFFC4C7C5),
-                            modifier = Modifier.size(20.dp)
-                        )
+                        IconButton(
+                            onClick = {
+                                if (searchInput.isNotBlank()) {
+                                    onSearch(searchInput)
+                                }
+                            },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Search,
+                                contentDescription = "Search private",
+                                tint = Color(0xFFC4C7C5),
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
                         
                         Spacer(modifier = Modifier.width(12.dp))
                         
@@ -263,6 +273,20 @@ fun NewTabScreen(
                             ),
                             modifier = Modifier.weight(1f)
                         )
+
+                        if (searchInput.isNotBlank()) {
+                            IconButton(
+                                onClick = { onSearch(searchInput) },
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                                    contentDescription = "Submit search",
+                                    tint = Color(0xFFC4C7C5),
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
                     }
                 }
                 Spacer(modifier = Modifier.height(48.dp))
@@ -334,12 +358,21 @@ fun NewTabScreen(
                         .padding(horizontal = 16.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Search,
-                        contentDescription = "Search icon",
-                        tint = Color.White.copy(alpha = 0.7f),
-                        modifier = Modifier.size(24.dp)
-                    )
+                    IconButton(
+                        onClick = {
+                            if (searchInput.isNotBlank()) {
+                                onSearch(searchInput)
+                            }
+                        },
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Search,
+                            contentDescription = "Search icon",
+                            tint = Color.White.copy(alpha = 0.7f),
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
 
                     Spacer(modifier = Modifier.width(12.dp))
 
@@ -358,6 +391,20 @@ fun NewTabScreen(
                         ),
                         modifier = Modifier.weight(1f)
                     )
+
+                    if (searchInput.isNotBlank()) {
+                        IconButton(
+                            onClick = { onSearch(searchInput) },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                                contentDescription = "Submit search",
+                                tint = Color.White.copy(alpha = 0.7f),
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                    }
                 }
             }
 
@@ -851,21 +898,48 @@ fun TopSiteItem(
                     .clip(CircleShape),
                 contentAlignment = Alignment.Center
             ) {
-                val initial = site.title.trim().take(1).uppercase(Locale.getDefault())
-                val colors = listOf(Color(0xFFE91E63), Color(0xFF9C27B0), Color(0xFF673AB7), Color(0xFF3F51B5), Color(0xFF2196F3), Color(0xFF009688), Color(0xFF4CAF50), Color(0xFFFF9800))
-                val colorIndex = Math.abs(site.url.hashCode()) % colors.size
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(colors[colorIndex]),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = initial.ifBlank { "?" },
-                        color = Color.White,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold
+                var isImageError by remember { mutableStateOf(false) }
+                val host = remember(site.url) {
+                    try {
+                        val uri = android.net.Uri.parse(site.url)
+                        uri.host ?: ""
+                    } catch (e: Exception) {
+                        ""
+                    }
+                }
+                val faviconUrl = if (host.isNotEmpty()) {
+                    "https://www.google.com/s2/favicons?domain=$host&sz=128"
+                } else {
+                    ""
+                }
+
+                if (faviconUrl.isNotEmpty() && !isImageError) {
+                    AsyncImage(
+                        model = faviconUrl,
+                        contentDescription = null,
+                        modifier = Modifier.fillMaxSize().padding(6.dp),
+                        contentScale = ContentScale.Fit,
+                        onError = {
+                            isImageError = true
+                        }
                     )
+                } else {
+                    val initial = site.title.trim().take(1).uppercase(Locale.getDefault())
+                    val colors = listOf(Color(0xFFE91E63), Color(0xFF9C27B0), Color(0xFF673AB7), Color(0xFF3F51B5), Color(0xFF2196F3), Color(0xFF009688), Color(0xFF4CAF50), Color(0xFFFF9800))
+                    val colorIndex = Math.abs(site.url.hashCode()) % colors.size
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(colors[colorIndex]),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = initial.ifBlank { "?" },
+                            color = Color.White,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
             }
 
@@ -1085,7 +1159,7 @@ fun BasicTextFieldWithoutLabel(
                 onGo = { onDone() },
                 onDone = { onDone() }
             ),
-            cursorBrush = Brush.linearGradient(listOf(Color.White, Color.White)),
+            cursorBrush = androidx.compose.ui.graphics.SolidColor(textStyle.color),
             modifier = Modifier.fillMaxWidth()
         )
     }

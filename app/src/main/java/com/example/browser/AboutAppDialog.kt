@@ -147,7 +147,7 @@ fun AboutAppDialog(
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
                                 Text("Engine:", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                                Text("WebKit Swift Core v4.1", fontSize = 13.sp)
+                                Text("Blink (Chromium)", fontSize = 13.sp)
                             }
                         }
                     }

@@ -23,6 +23,10 @@ class BrowserRepository(private val db: BrowserDatabase) {
         downloadDao.updateDownloadStatus(downloadId, status)
     }
 
+    suspend fun updateDownloadFileNameInDb(downloadId: Long, fileName: String) {
+        downloadDao.updateDownloadFileName(downloadId, fileName)
+    }
+
     suspend fun deleteDownloadFromDb(downloadId: Long) {
         downloadDao.deleteDownload(downloadId)
     }
@@ -145,13 +149,13 @@ class BrowserRepository(private val db: BrowserDatabase) {
             if (combined.size < 8) {
                 val defaultSites = listOf(
                     TopSite(url = "https://www.google.com", title = "Google", isCustom = false),
+                    TopSite(url = "https://chromewebstore.google.com", title = "Chrome Web Store", isCustom = false),
+                    TopSite(url = "https://x.com", title = "X", isCustom = false),
+                    TopSite(url = "https://www.youtube.com", title = "YouTube", isCustom = false),
                     TopSite(url = "https://www.wikipedia.org", title = "Wikipedia", isCustom = false),
                     TopSite(url = "https://github.com", title = "GitHub", isCustom = false),
                     TopSite(url = "https://stackoverflow.com", title = "StackOverflow", isCustom = false),
-                    TopSite(url = "https://www.reddit.com", title = "Reddit", isCustom = false),
-                    TopSite(url = "https://www.youtube.com", title = "YouTube", isCustom = false),
-                    TopSite(url = "https://news.google.com", title = "Google News", isCustom = false),
-                    TopSite(url = "https://www.bbc.com", title = "BBC", isCustom = false)
+                    TopSite(url = "https://www.reddit.com", title = "Reddit", isCustom = false)
                 )
                 val filled = combined.toMutableList()
                 for (defaultSite in defaultSites) {

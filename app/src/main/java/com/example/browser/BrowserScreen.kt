@@ -10,9 +10,11 @@ import android.widget.Toast
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -71,6 +73,7 @@ fun BrowserScreen(
     val history by viewModel.history.collectAsState()
     val topSites by viewModel.topSites.collectAsState()
     val fullscreenState by viewModel.fullscreenState.collectAsState()
+    val notificationRequestOrigin by viewModel.notificationRequestOrigin.collectAsState()
 
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
@@ -102,8 +105,26 @@ fun BrowserScreen(
         }
     }
 
+    var showSslDialog by remember { mutableStateOf(false) }
+    var showTranslateDialog by remember { mutableStateOf(false) }
+    var showRecentTabsDialog by remember { mutableStateOf(false) }
+    var showClearDataDialog by remember { mutableStateOf(false) }
+    var showHelpFeedbackDialog by remember { mutableStateOf(false) }
+    var showAddShortcutDialog by remember { mutableStateOf(false) }
+    var showGroupTabDialog by remember { mutableStateOf(false) }
+    var showAboutDialog by remember { mutableStateOf(false) }
+    var showExtensionsDialog by remember { mutableStateOf(false) }
+    var showActiveExtensionsSheet by remember { mutableStateOf(false) }
+    var selectedExtensionIdForPopup by remember { mutableStateOf<String?>(null) }
+
     BackHandler(enabled = true) {
-        if (uiState.isSearchFocused) {
+        if (showExtensionsDialog) {
+            showExtensionsDialog = false
+        } else if (showActiveExtensionsSheet) {
+            showActiveExtensionsSheet = false
+        } else if (selectedExtensionIdForPopup != null) {
+            selectedExtensionIdForPopup = null
+        } else if (uiState.isSearchFocused) {
             focusManager.clearFocus()
             keyboardController?.hide()
             viewModel.setSearchFocused(false)
@@ -127,14 +148,16 @@ fun BrowserScreen(
         uiState.newTabWallpaper == "Frosted Glass"
     }
 
-    var showSslDialog by remember { mutableStateOf(false) }
-    var showTranslateDialog by remember { mutableStateOf(false) }
-    var showRecentTabsDialog by remember { mutableStateOf(false) }
-    var showClearDataDialog by remember { mutableStateOf(false) }
-    var showHelpFeedbackDialog by remember { mutableStateOf(false) }
-    var showAddShortcutDialog by remember { mutableStateOf(false) }
-    var showGroupTabDialog by remember { mutableStateOf(false) }
-    var showAboutDialog by remember { mutableStateOf(false) }
+    val webStoreExtensionId = remember(activeTab?.url) {
+        val url = activeTab?.url ?: ""
+        if (url.contains("chromewebstore.google.com/detail/") || url.contains("chrome.google.com/webstore/detail/")) {
+            val cleanUrl = url.substringBefore("?").substringBefore("#")
+            val id = cleanUrl.substringAfterLast("/")
+            if (id.length == 32 && id.all { it in 'a'..'z' }) id else null
+        } else {
+            null
+        }
+    }
 
     val addressBarContent = @Composable {
         var showMenu by remember { mutableStateOf(false) }
@@ -356,6 +379,19 @@ fun BrowserScreen(
                             }
                         }
 
+                        // 4.5 Extensions Button (Puzzle Icon)
+                        IconButton(
+                            onClick = { showActiveExtensionsSheet = true },
+                            modifier = Modifier.size(36.dp).testTag("extensions_puzzle_btn")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Extension,
+                                contentDescription = "Active Extensions",
+                                tint = if (isGlass) Color.White else LocalContentColor.current,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+
                         // 5. Tab Switcher with tab count badge
                         Box(
                             contentAlignment = Alignment.BottomEnd,
@@ -540,13 +576,52 @@ fun BrowserScreen(
                             )
 
                             DropdownMenuItem(
-                                text = { Text("Translate page") },
+                                text = { Text("Translate...") },
                                 leadingIcon = { Icon(Icons.Default.Translate, contentDescription = null) },
                                 onClick = {
                                     showMenu = false
-                                    showTranslateDialog = true
+                                    viewModel.triggerTranslationSelection()
                                 }
                             )
+
+                            DropdownMenuItem(
+                                text = { Text("Extensions Management") },
+                                leadingIcon = { Icon(Icons.Default.Extension, contentDescription = null) },
+                                onClick = {
+                                        showMenu = false
+                                        showExtensionsDialog = true
+                                }
+                            )
+
+                            // List enabled extensions
+                            getFullExtensionsList(viewModel).forEach { ext ->
+                                val isInstalled = isExtensionInstalled(viewModel, ext.id)
+                                val isEnabled = viewModel.isExtensionEnabled(ext.id)
+                                if (isInstalled && isEnabled) {
+                                    DropdownMenuItem(
+                                        text = { Text("  • ${ext.name}") },
+                                        leadingIcon = { 
+                                            Icon(
+                                                imageVector = when (ext.id) {
+                                                    "ext_metamask" -> Icons.Default.Wallet
+                                                    "ext_grok_4" -> Icons.Default.SmartToy
+                                                    "ext_grok_automation" -> Icons.Default.ElectricBolt
+                                                    "ext_dark_reader" -> Icons.Default.Brightness4
+                                                    "ext_adblock" -> Icons.Default.Shield
+                                                    else -> Icons.Default.Extension
+                                                }, 
+                                                contentDescription = null,
+                                                tint = Color(0xFF6366F1),
+                                                modifier = Modifier.size(18.dp)
+                                            ) 
+                                        },
+                                        onClick = {
+                                            showMenu = false
+                                            selectedExtensionIdForPopup = ext.id
+                                        }
+                                    )
+                                }
+                            }
 
                             DropdownMenuItem(
                                 text = { Text("Listen to this page") },
@@ -672,9 +747,19 @@ fun BrowserScreen(
         }
         Column(modifier = Modifier.fillMaxSize().imePadding()) {
             // 1. Omnibox / Top Address Bar (Only when Tab Switcher & Reader Mode are inactive and toolbars are set to visible)
-            if (uiState.areToolbarsVisible && !uiState.isTabSwitcherOpen && !uiState.readerModeActive && uiState.addressBarPosition != "bottom") {
+            androidx.compose.animation.AnimatedVisibility(
+                visible = uiState.areToolbarsVisible && !uiState.isTabSwitcherOpen && !uiState.readerModeActive && uiState.addressBarPosition != "bottom",
+                enter = androidx.compose.animation.expandVertically(
+                    animationSpec = androidx.compose.animation.core.tween(durationMillis = 200, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+                ) + androidx.compose.animation.fadeIn(animationSpec = androidx.compose.animation.core.tween(200)),
+                exit = androidx.compose.animation.shrinkVertically(
+                    animationSpec = androidx.compose.animation.core.tween(durationMillis = 200, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+                ) + androidx.compose.animation.fadeOut(animationSpec = androidx.compose.animation.core.tween(200))
+            ) {
                 addressBarContent()
             }
+
+            TranslateBarLayout(viewModel = viewModel)
 
             // 2. Active Web Contents / New Tab Home Screen Frame
             Box(
@@ -687,7 +772,7 @@ fun BrowserScreen(
                         state = uiState,
                         onTabSelect = { viewModel.selectTab(it) },
                         onTabClose = { viewModel.closeTab(it) },
-                        onNewTab = { viewModel.addNewTab() },
+                        onNewTab = { isIncognito -> viewModel.addNewTab(isIncognito = isIncognito) },
                         onReopenClosedTab = { viewModel.reopenClosedTab(it) },
                         onMergeTabs = { ids, name, color ->
                             ids.forEach { viewModel.moveTabToGroup(it, name, color) }
@@ -712,20 +797,27 @@ fun BrowserScreen(
                             onCategorySelected = { viewModel.changeFeedCategory(it) },
                             onRefresh = { viewModel.refreshArticles() }
                         )
-                    } else if (activeTab.isWebViewDestroyed) {
-                        // Recreate WebView lazily on layout entry
-                        val view = viewModel.getOrCreateWebView(activeTab.id, context)
-                        view.loadUrl(activeTab.url)
-                        AndroidView(
-                            factory = { view },
-                            modifier = Modifier.fillMaxSize().testTag("webview")
-                        )
                     } else {
                         AndroidView(
                             factory = { ctx ->
-                                viewModel.getOrCreateWebView(activeTab.id, ctx)
+                                android.widget.FrameLayout(ctx).apply {
+                                    layoutParams = android.view.ViewGroup.LayoutParams(
+                                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                                        android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                                    )
+                                }
                             },
-                            update = { /* handled internally */ },
+                            update = { frameLayout ->
+                                val view = viewModel.getOrCreateWebView(activeTab.id, frameLayout.context)
+                                if (activeTab.isWebViewDestroyed) {
+                                    view.loadUrl(activeTab.url)
+                                }
+                                if (view.parent != frameLayout) {
+                                    (view.parent as? android.view.ViewGroup)?.removeView(view)
+                                    frameLayout.removeAllViews()
+                                    frameLayout.addView(view)
+                                }
+                            },
                             modifier = Modifier.fillMaxSize().testTag("webview")
                         )
                     }
@@ -919,7 +1011,15 @@ fun BrowserScreen(
             }
 
             // Bottom Tab Strip layout (Chrome-like circular horizontal tab bar)
-            if (uiState.areToolbarsVisible && !uiState.isTabSwitcherOpen && !uiState.readerModeActive) {
+            androidx.compose.animation.AnimatedVisibility(
+                visible = uiState.areToolbarsVisible && !uiState.isTabSwitcherOpen && !uiState.readerModeActive,
+                enter = androidx.compose.animation.expandVertically(
+                    animationSpec = androidx.compose.animation.core.tween(durationMillis = 200, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+                ) + androidx.compose.animation.fadeIn(animationSpec = androidx.compose.animation.core.tween(200)),
+                exit = androidx.compose.animation.shrinkVertically(
+                    animationSpec = androidx.compose.animation.core.tween(durationMillis = 200, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+                ) + androidx.compose.animation.fadeOut(animationSpec = androidx.compose.animation.core.tween(200))
+            ) {
                 BottomTabStripLayout(
                     state = uiState,
                     onTabSelect = { viewModel.selectTab(it) },
@@ -931,7 +1031,15 @@ fun BrowserScreen(
             }
 
             // 4. Default Bottom Nav bar Toolbar (Hidden during tab switcher & reader mode and when not visible)
-            if (uiState.areToolbarsVisible && !uiState.isTabSwitcherOpen && !uiState.readerModeActive && uiState.addressBarPosition == "bottom") {
+            androidx.compose.animation.AnimatedVisibility(
+                visible = uiState.areToolbarsVisible && !uiState.isTabSwitcherOpen && !uiState.readerModeActive && uiState.addressBarPosition == "bottom",
+                enter = androidx.compose.animation.expandVertically(
+                    animationSpec = androidx.compose.animation.core.tween(durationMillis = 200, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+                ) + androidx.compose.animation.fadeIn(animationSpec = androidx.compose.animation.core.tween(200)),
+                exit = androidx.compose.animation.shrinkVertically(
+                    animationSpec = androidx.compose.animation.core.tween(durationMillis = 200, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+                ) + androidx.compose.animation.fadeOut(animationSpec = androidx.compose.animation.core.tween(200))
+            ) {
                 addressBarContent()
             }
 
@@ -980,6 +1088,18 @@ fun BrowserScreen(
                             Icon(
                                 imageVector = Icons.Default.Home,
                                 contentDescription = "Go Home",
+                                tint = if (isGlass) Color.White else LocalContentColor.current
+                            )
+                        }
+
+                        // Extensions Button (Puzzle Icon)
+                        IconButton(
+                            onClick = { showActiveExtensionsSheet = true },
+                            modifier = Modifier.testTag("extensions_puzzle_btn")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Extension,
+                                contentDescription = "Active Extensions",
                                 tint = if (isGlass) Color.White else LocalContentColor.current
                             )
                         }
@@ -1169,13 +1289,52 @@ fun BrowserScreen(
                                 )
 
                                 DropdownMenuItem(
-                                    text = { Text("Translate page") },
+                                    text = { Text("Translate...") },
                                     leadingIcon = { Icon(Icons.Default.Translate, contentDescription = null) },
                                     onClick = {
                                         showMenu = false
-                                        showTranslateDialog = true
+                                        viewModel.triggerTranslationSelection()
                                     }
                                 )
+
+                                DropdownMenuItem(
+                                    text = { Text("Extensions Management") },
+                                    leadingIcon = { Icon(Icons.Default.Extension, contentDescription = null) },
+                                    onClick = {
+                                        showMenu = false
+                                        showExtensionsDialog = true
+                                    }
+                                )
+
+                                // List enabled extensions
+                                getFullExtensionsList(viewModel).forEach { ext ->
+                                    val isInstalled = isExtensionInstalled(viewModel, ext.id)
+                                    val isEnabled = viewModel.isExtensionEnabled(ext.id)
+                                    if (isInstalled && isEnabled) {
+                                        DropdownMenuItem(
+                                            text = { Text("  • ${ext.name}") },
+                                            leadingIcon = { 
+                                                Icon(
+                                                    imageVector = when (ext.id) {
+                                                        "ext_metamask" -> Icons.Default.Wallet
+                                                        "ext_grok_4" -> Icons.Default.SmartToy
+                                                        "ext_grok_automation" -> Icons.Default.ElectricBolt
+                                                        "ext_dark_reader" -> Icons.Default.Brightness4
+                                                        "ext_adblock" -> Icons.Default.Shield
+                                                        else -> Icons.Default.Extension
+                                                    }, 
+                                                    contentDescription = null,
+                                                    tint = Color(0xFF6366F1),
+                                                    modifier = Modifier.size(18.dp)
+                                                ) 
+                                            },
+                                            onClick = {
+                                                showMenu = false
+                                                selectedExtensionIdForPopup = ext.id
+                                            }
+                                        )
+                                    }
+                                }
 
                                 DropdownMenuItem(
                                     text = { Text("Listen to this page") },
@@ -1285,6 +1444,25 @@ fun BrowserScreen(
 
         // --- dialog overlays ---
 
+        // TTS Control Panel overlay (placed at the bottom of the screen)
+        if (uiState.isTtsActive && !uiState.isTabSwitcherOpen) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(bottom = if (uiState.addressBarPosition == "bottom") 118.dp else 56.dp), // stays clear of address / tab bars
+                contentAlignment = Alignment.BottomCenter
+            ) {
+                TtsControlPanel(
+                    state = uiState,
+                    onPlayPause = { viewModel.toggleTtsPlayback() },
+                    onStop = { viewModel.stopTtsPlayback() },
+                    onSkipPrevious = { viewModel.playPreviousTtsSegment() },
+                    onSkipNext = { viewModel.playNextTtsSegment() },
+                    onSpeedChange = { viewModel.setTtsSpeechRate(it) }
+                )
+            }
+        }
+
         // A. Settings panel overlay screen
         if (uiState.isSettingsOpen) {
             SettingsOverlay(
@@ -1324,6 +1502,9 @@ fun BrowserScreen(
                 },
                 onDelete = { viewModel.deleteHistoryItem(it) },
                 onClearAll = { viewModel.clearAllHistory() },
+                onClearBrowsingData = { hist, cook, cach, rangeIndex ->
+                    viewModel.clearBrowsingData(hist, cook, cach, rangeIndex)
+                },
                 isGlass = isGlass
             )
         }
@@ -1334,9 +1515,101 @@ fun BrowserScreen(
             DownloadsOverlay(
                 downloads = downloadsList,
                 onDismiss = { viewModel.setDownloadsOpen(false) },
-                onDelete = { viewModel.deleteDownload(it) },
+                onOpenFile = { path, name, mime ->
+                    viewModel.openLocalFile(path, name, mime)
+                },
+                viewModel = viewModel,
                 isGlass = isGlass
             )
+        }
+
+        // In-app File and Media Player overlay
+        uiState.activeViewerFile?.let { activeFile ->
+            FileViewerOverlay(
+                activeFile = activeFile,
+                viewModel = viewModel,
+                onClose = { viewModel.closeLocalFile() }
+            )
+        }
+
+        // Chrome Extensions overlay Dialog
+        if (showExtensionsDialog) {
+            ExtensionsOverlay(
+                viewModel = viewModel,
+                onDismiss = { showExtensionsDialog = false },
+                isGlass = isGlass
+            )
+        }
+
+        // Extensions Quick Hub sheet (puzzle icon popup)
+        if (showActiveExtensionsSheet) {
+            ActiveExtensionsDialog(
+                viewModel = viewModel,
+                onDismissRequest = { showActiveExtensionsSheet = false },
+                onOpenExtensionPopup = { extId ->
+                    selectedExtensionIdForPopup = extId
+                },
+                onManageExtensions = {
+                    showExtensionsDialog = true
+                }
+            )
+        }
+
+        // Direct extension popup bottom sheet loader
+        if (selectedExtensionIdForPopup != null) {
+            ExtensionPopupBottomSheet(
+                viewModel = viewModel,
+                extensionId = selectedExtensionIdForPopup!!,
+                onDismiss = { selectedExtensionIdForPopup = null }
+            )
+        }
+
+        // Floating Install Button for Chrome Web Store details pages
+        if (webStoreExtensionId != null && !uiState.isTabSwitcherOpen) {
+            var isInstalling by remember { mutableStateOf(false) }
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .navigationBarsPadding()
+                    .padding(bottom = 100.dp),
+                contentAlignment = Alignment.BottomCenter
+            ) {
+                Button(
+                    onClick = {
+                        isInstalling = true
+                        viewModel.downloadChromeExtension(context, webStoreExtensionId) { success, message ->
+                            isInstalling = false
+                            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                        }
+                    },
+                    enabled = !isInstalling,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF6366F1),
+                        contentColor = Color.White
+                    ),
+                    elevation = ButtonDefaults.buttonElevation(defaultElevation = 8.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.padding(16.dp).height(50.dp)
+                ) {
+                    if (isInstalling) {
+                        CircularProgressIndicator(
+                            color = Color.White,
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Installing Extension...", fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.Extension,
+                            contentDescription = "Install Extension",
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Add to Orion Browser", fontSize = 14.sp, fontWeight = FontWeight.ExtraBold)
+                    }
+                }
+            }
         }
 
         // D. SSL Certificate Connection Info Overlay
@@ -1451,8 +1724,7 @@ fun BrowserScreen(
                 onTranslate = { langCode ->
                     showTranslateDialog = false
                     try {
-                        val encodedUrl = java.net.URLEncoder.encode(activeTab.url, "UTF-8")
-                        viewModel.navigateTo("https://translate.google.com/translate?sl=auto&tl=$langCode&u=$encodedUrl")
+                        viewModel.translateActivePage(langCode)
                     } catch (e: Exception) {
                         Toast.makeText(context, "Translation error: ${e.message}", Toast.LENGTH_SHORT).show()
                     }
@@ -1479,6 +1751,30 @@ fun BrowserScreen(
                     viewModel.clearBrowsingData(hist, cook, cach, rangeIndex)
                 },
                 onDismiss = { showClearDataDialog = false }
+            )
+        }
+
+        notificationRequestOrigin?.let { origin ->
+            AlertDialog(
+                onDismissRequest = { viewModel.handleNotificationPermissionResponse(origin, false) },
+                icon = { Icon(Icons.Default.Notifications, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                title = { Text("https://$origin", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
+                text = { Text("This website wants to send you alerts and real-time push notifications. You can disable this later in Site Settings.", fontSize = 13.sp) },
+                confirmButton = {
+                    Button(
+                        onClick = { viewModel.handleNotificationPermissionResponse(origin, true) }
+                    ) {
+                        Text("Allow", fontWeight = FontWeight.Bold)
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = { viewModel.handleNotificationPermissionResponse(origin, false) }
+                    ) {
+                        Text("Block")
+                    }
+                },
+                shape = RoundedCornerShape(20.dp)
             )
         }
 
@@ -1543,7 +1839,7 @@ fun TabSwitcherLayout(
     state: BrowserUiState,
     onTabSelect: (String) -> Unit,
     onTabClose: (String) -> Unit,
-    onNewTab: () -> Unit,
+    onNewTab: (Boolean) -> Unit,
     onReopenClosedTab: (TabState) -> Unit,
     onMergeTabs: (List<String>, String, Long) -> Unit,
     onCloseSwitcher: () -> Unit
@@ -1553,11 +1849,19 @@ fun TabSwitcherLayout(
     var isSelectionMode by remember { mutableStateOf(false) }
     val selectedTabIds = remember { mutableStateListOf<String>() }
 
-    val filteredTabs = remember(state.tabs, searchQuery) {
+    val activeTabInstance = remember(state.tabs, state.activeTabId) {
+        state.tabs.find { it.id == state.activeTabId }
+    }
+    var isShowingIncognitoFilter by remember { 
+        mutableStateOf(activeTabInstance?.isIncognito ?: false) 
+    }
+
+    val filteredTabs = remember(state.tabs, searchQuery, isShowingIncognitoFilter) {
+        val base = state.tabs.filter { it.isIncognito == isShowingIncognitoFilter }
         if (searchQuery.isBlank()) {
-            state.tabs
+            base
         } else {
-            state.tabs.filter {
+            base.filter {
                 it.title.contains(searchQuery, ignoreCase = true) ||
                         it.url.contains(searchQuery, ignoreCase = true)
             }
@@ -1657,7 +1961,7 @@ fun TabSwitcherLayout(
         floatingActionButton = {
             if (!isSelectionMode) {
                 FloatingActionButton(
-                    onClick = onNewTab,
+                    onClick = { onNewTab(isShowingIncognitoFilter) },
                     containerColor = MaterialTheme.colorScheme.primary,
                     contentColor = MaterialTheme.colorScheme.onPrimary,
                     modifier = Modifier.testTag("new_tab_fab")
@@ -1673,6 +1977,50 @@ fun TabSwitcherLayout(
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
         ) {
+            // Normal and Incognito Tabs Categories Row (Like Chrome)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Normal Tabs Chip
+                val normalCount = state.tabs.count { !it.isIncognito }
+                FilterChip(
+                    selected = !isShowingIncognitoFilter,
+                    onClick = { isShowingIncognitoFilter = false },
+                    label = { Text("Normal ($normalCount)") },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Default.Tab,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                )
+
+                // Incognito Tabs Chip
+                val incognitoCount = state.tabs.count { it.isIncognito }
+                FilterChip(
+                    selected = isShowingIncognitoFilter,
+                    onClick = { isShowingIncognitoFilter = true },
+                    label = { Text("Incognito ($incognitoCount)") },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Default.Security,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                        selectedLabelColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                        selectedLeadingIconColor = MaterialTheme.colorScheme.onTertiaryContainer
+                    )
+                )
+            }
+
             // Tab cards grid
             LazyVerticalGrid(
                 columns = GridCells.Fixed(2),
@@ -2630,60 +2978,57 @@ fun BookmarksOverlay(
     onDelete: (Bookmark) -> Unit,
     isGlass: Boolean = false
 ) {
-    Dialog(onDismissRequest = onDismiss) {
-        Surface(
-            shape = RoundedCornerShape(24.dp),
-            color = if (isGlass) Color(0xD90B1220) else MaterialTheme.colorScheme.surface,
-            contentColor = if (isGlass) Color.White else MaterialTheme.colorScheme.onSurface,
-            border = if (isGlass) BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)) else null,
+    Surface(
+        color = if (isGlass) Color(0xFF0B1220) else MaterialTheme.colorScheme.background,
+        contentColor = if (isGlass) Color.White else MaterialTheme.colorScheme.onBackground,
+        modifier = Modifier.fillMaxSize()
+    ) {
+        Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .fillMaxHeight(0.75f)
-                .padding(vertical = 16.dp)
+                .fillMaxSize()
+                .statusBarsPadding()
+                .padding(24.dp)
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(24.dp)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(text = "Saved Bookmarks", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = onDismiss) {
                         Icon(
-                            Icons.Default.Close,
-                            contentDescription = null,
+                            Icons.Default.ArrowBack,
+                            contentDescription = "Back",
                             tint = if (isGlass) Color.White else LocalContentColor.current
                         )
                     }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(text = "Saved Bookmarks", fontSize = 20.sp, fontWeight = FontWeight.Bold)
                 }
+            }
 
-                Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
-                if (bookmarks.isEmpty()) {
-                    Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        Text(
-                            text = "No saved bookmarks yet.",
-                            color = if (isGlass) Color.White.copy(alpha = 0.5f) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                            fontSize = 14.sp
+            if (bookmarks.isEmpty()) {
+                Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    Text(
+                        text = "No saved bookmarks yet.",
+                        color = if (isGlass) Color.White.copy(alpha = 0.5f) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                        fontSize = 14.sp
+                    )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(bookmarks) { bm ->
+                        BookmarkItemRow(
+                            bookmark = bm,
+                            onClick = { onNavigate(bm.url) },
+                            onDelete = { onDelete(bm) },
+                            isGlass = isGlass
                         )
-                    }
-                } else {
-                    LazyColumn(
-                        modifier = Modifier.weight(1f).fillMaxWidth(),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        items(bookmarks) { bm ->
-                            BookmarkItemRow(
-                                bookmark = bm,
-                                onClick = { onNavigate(bm.url) },
-                                onDelete = { onDelete(bm) },
-                                isGlass = isGlass
-                            )
-                        }
                     }
                 }
             }
@@ -2743,6 +3088,7 @@ fun BookmarkItemRow(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun HistoryOverlay(
     history: List<HistoryItem>,
@@ -2750,66 +3096,224 @@ fun HistoryOverlay(
     onNavigate: (String) -> Unit,
     onDelete: (Int) -> Unit,
     onClearAll: () -> Unit,
+    onClearBrowsingData: (Boolean, Boolean, Boolean, Int) -> Unit,
     isGlass: Boolean = false
 ) {
-    Dialog(onDismissRequest = onDismiss) {
-        Surface(
-            shape = RoundedCornerShape(24.dp),
-            color = if (isGlass) Color(0xD90B1220) else MaterialTheme.colorScheme.surface,
-            contentColor = if (isGlass) Color.White else MaterialTheme.colorScheme.onSurface,
-            border = if (isGlass) BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)) else null,
+    var searchQuery by remember { mutableStateOf("") }
+    val selectedIds = remember { mutableStateListOf<Int>() }
+    var showLocalClearDataDialog by remember { mutableStateOf(false) }
+
+    val filteredHistory = remember(history, searchQuery) {
+        history.filter {
+            it.title.contains(searchQuery, ignoreCase = true) ||
+                    it.url.contains(searchQuery, ignoreCase = true)
+        }
+    }
+
+    val groupedByDate = remember(filteredHistory) {
+        filteredHistory.groupBy { timestamp ->
+            val isToday = android.text.format.DateUtils.isToday(timestamp.timestamp)
+            if (isToday) {
+                "Today"
+            } else {
+                val isYesterday = android.text.format.DateUtils.isToday(timestamp.timestamp + 24 * 3600 * 1000L)
+                if (isYesterday) {
+                    "Yesterday"
+                } else {
+                    val format = java.text.SimpleDateFormat("EEEE, MMMM d, yyyy", java.util.Locale.getDefault())
+                    format.format(java.util.Date(timestamp.timestamp))
+                }
+            }
+        }
+    }
+
+    Surface(
+        color = if (isGlass) Color(0xFF0B1220) else MaterialTheme.colorScheme.background,
+        contentColor = if (isGlass) Color.White else MaterialTheme.colorScheme.onBackground,
+        modifier = Modifier.fillMaxSize()
+    ) {
+        Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .fillMaxHeight(0.75f)
-                .padding(vertical = 16.dp)
+                .fillMaxSize()
+                .statusBarsPadding()
+                .padding(16.dp)
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(24.dp)
+            // Header Top Bar
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(text = "Viewing History", fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                    Row {
-                        if (history.isNotEmpty()) {
-                            TextButton(onClick = onClearAll) {
-                                Text("Clear", color = MaterialTheme.colorScheme.error)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        onClick = {
+                            if (selectedIds.isNotEmpty()) {
+                                selectedIds.clear()
+                            } else {
+                                onDismiss()
                             }
                         }
-                        IconButton(onClick = onDismiss) {
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ArrowBack,
+                            contentDescription = "Back",
+                            tint = if (isGlass) Color.White else LocalContentColor.current
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = if (selectedIds.isNotEmpty()) "${selectedIds.size} Selected" else "History",
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Row {
+                    if (selectedIds.isNotEmpty()) {
+                        IconButton(
+                            onClick = {
+                                selectedIds.forEach { id -> onDelete(id) }
+                                selectedIds.clear()
+                            }
+                        ) {
                             Icon(
-                                Icons.Default.Close,
-                                contentDescription = null,
-                                tint = if (isGlass) Color.White else LocalContentColor.current
+                                imageVector = Icons.Default.Delete,
+                                contentDescription = "Delete Selected",
+                                tint = MaterialTheme.colorScheme.error
                             )
+                        }
+                    } else {
+                        if (history.isNotEmpty()) {
+                            TextButton(onClick = onClearAll) {
+                                Text("Clear All", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
+                            }
                         }
                     }
                 }
+            }
 
-                Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
-                if (history.isEmpty()) {
-                    Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+            // Search history search-bar (Like Chrome)
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp),
+                placeholder = { Text("Search history", fontSize = 14.sp) },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Default.Search,
+                        contentDescription = "Search"
+                    )
+                },
+                trailingIcon = {
+                    if (searchQuery.isNotEmpty()) {
+                        IconButton(onClick = { searchQuery = "" }) {
+                            Icon(imageVector = Icons.Default.Close, contentDescription = "Clear search")
+                        }
+                    }
+                },
+                singleLine = true,
+                shape = RoundedCornerShape(24.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
+                    unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f),
+                    focusedContainerColor = if (isGlass) Color.White.copy(alpha = 0.05f) else Color.Transparent,
+                    unfocusedContainerColor = if (isGlass) Color.White.copy(alpha = 0.03f) else Color.Transparent
+                )
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // "Clear/Delete Browsing Data..." clickable banner
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp)
+                    .clickable { showLocalClearDataDialog = true },
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
+                ),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.15f))
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.DeleteSweep,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
                         Text(
-                            text = "No history recorded yet.",
-                            color = if (isGlass) Color.White.copy(alpha = 0.5f) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                            fontSize = 14.sp
+                            text = "Clear browsing data...",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
                         )
                     }
-                } else {
-                    LazyColumn(
-                        modifier = Modifier.weight(1f).fillMaxWidth(),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        items(history) { hm ->
+                    Icon(
+                        imageVector = Icons.Default.ChevronRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            if (filteredHistory.isEmpty()) {
+                Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    Text(
+                        text = if (searchQuery.isEmpty()) "No history recorded yet." else "No matching results found.",
+                        color = if (isGlass) Color.White.copy(alpha = 0.5f) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                        fontSize = 14.sp
+                    )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    groupedByDate.forEach { (dateStr, items) ->
+                        item {
+                            Text(
+                                text = dateStr,
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(start = 6.dp, top = 8.dp, bottom = 4.dp)
+                            )
+                        }
+                        items(items) { hm ->
+                            val isSelected = selectedIds.contains(hm.id)
                             HistoryItemRow(
                                 historyItem = hm,
-                                onClick = { onNavigate(hm.url) },
+                                onClick = {
+                                    if (selectedIds.isNotEmpty()) {
+                                        if (isSelected) selectedIds.remove(hm.id) else selectedIds.add(hm.id)
+                                    } else {
+                                        onNavigate(hm.url)
+                                    }
+                                },
+                                onLongClick = {
+                                    if (!selectedIds.contains(hm.id)) {
+                                        selectedIds.add(hm.id)
+                                    }
+                                },
                                 onDelete = { onDelete(hm.id) },
+                                isSelectionMode = selectedIds.isNotEmpty(),
+                                isSelected = isSelected,
                                 isGlass = isGlass
                             )
                         }
@@ -2818,35 +3322,76 @@ fun HistoryOverlay(
             }
         }
     }
+
+    if (showLocalClearDataDialog) {
+        DeleteBrowsingDataDialog(
+            onClear = { hist, cook, cach, rangeIndex ->
+                showLocalClearDataDialog = false
+                onClearBrowsingData(hist, cook, cach, rangeIndex)
+            },
+            onDismiss = { showLocalClearDataDialog = false }
+        )
+    }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun HistoryItemRow(
     historyItem: HistoryItem,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
     onDelete: () -> Unit,
+    isSelectionMode: Boolean,
+    isSelected: Boolean,
     isGlass: Boolean = false
 ) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick),
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            ),
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (isGlass) Color.White.copy(alpha = 0.05f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+            containerColor = if (isSelected) {
+                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
+            } else if (isGlass) {
+                Color.White.copy(alpha = 0.05f)
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+            }
         ),
-        border = if (isGlass) BorderStroke(1.dp, Color.White.copy(alpha = 0.05f)) else null
+        border = if (isSelected) {
+            BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary)
+        } else if (isGlass) {
+            BorderStroke(1.dp, Color.White.copy(alpha = 0.05f))
+        } else null
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+            verticalAlignment = Alignment.CenterVertically
         ) {
+            if (isSelectionMode) {
+                Checkbox(
+                    checked = isSelected,
+                    onCheckedChange = { onClick() },
+                    modifier = Modifier.padding(end = 8.dp)
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Default.History,
+                    contentDescription = null,
+                    tint = if (isGlass) Color.White.copy(alpha = 0.6f) else MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
+                    modifier = Modifier.padding(end = 12.dp)
+                )
+            }
+
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = historyItem.title,
+                    text = historyItem.title.ifBlank { "Visited Site" },
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1,
@@ -2861,12 +3406,15 @@ fun HistoryItemRow(
                     overflow = TextOverflow.Ellipsis
                 )
             }
-            IconButton(onClick = onDelete) {
-                Icon(
-                    imageVector = Icons.Default.Delete,
-                    contentDescription = "Delete history",
-                    tint = if (isGlass) Color.White.copy(alpha = 0.8f) else LocalContentColor.current
-                )
+
+            if (!isSelectionMode) {
+                IconButton(onClick = onDelete) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Delete history item",
+                        tint = if (isGlass) Color.White.copy(alpha = 0.6f) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    )
+                }
             }
         }
     }
@@ -3104,26 +3652,113 @@ fun TranslateDialog(
     onTranslate: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
-    val languages = listOf(
-        "Hindi" to "hi",
-        "Spanish" to "es",
-        "French" to "fr",
-        "German" to "de",
-        "English" to "en",
-        "Japanese" to "ja"
-    )
+    val languages = remember {
+        listOf(
+            "Hindi (हिन्दी)" to "hi",
+            "Spanish (Español)" to "es",
+            "French (Français)" to "fr",
+            "German (Deutsch)" to "de",
+            "English" to "en",
+            "Japanese (日本語)" to "ja",
+            "Arabic (العربية)" to "ar",
+            "bengali (বাংলা)" to "bn",
+            "Portuguese (Português)" to "pt",
+            "Russian (Русский)" to "ru",
+            "Chinese Simplified (简体中文)" to "zh-CN",
+            "Chinese Traditional (繁體中文)" to "zh-TW",
+            "Italian (Italiano)" to "it",
+            "Korean (한국어)" to "ko",
+            "Urdu (اردو)" to "ur",
+            "Turkish (Türkçe)" to "tr",
+            "Vietnamese (Tiếng Việt)" to "vi",
+            "Polish (Polski)" to "pl",
+            "Ukrainian (Українська)" to "uk",
+            "Telugu (తెలుగు)" to "te",
+            "Marathi (मराठी)" to "mr",
+            "Tamil (தமிழ்)" to "ta",
+            "Gujarati (ગુજરાતી)" to "gu",
+            "Kannada (ಕನ್ನಡ)" to "kn",
+            "Malayalam (മലയാളം)" to "ml",
+            "Punjabi (ਪੰਜਾਬੀ)" to "pa",
+            "Thai (ไทย)" to "th",
+            "Dutch (Nederlands)" to "nl",
+            "Swedish (Svenska)" to "sv",
+            "Norwegian (Norsk)" to "no",
+            "Finnish (Suomi)" to "fi",
+            "Danish (Dansk)" to "da",
+            "Greek (Ελληνικά)" to "el",
+            "Indonesian (Bahasa Indonesia)" to "id",
+            "Malay (Bahasa Melayu)" to "ms"
+        ).sortedBy { it.first }
+    }
+
+    var searchQuery by remember { mutableStateOf("") }
+    val filteredLanguages = remember(searchQuery) {
+        if (searchQuery.isBlank()) {
+            languages
+        } else {
+            languages.filter { it.first.contains(searchQuery, ignoreCase = true) || it.second.contains(searchQuery, ignoreCase = true) }
+        }
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Translate Webpage") },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Translate,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Google Web Translate", style = MaterialTheme.typography.titleLarge)
+            }
+        },
         text = {
-            Column {
-                Text("Select the target language to translate the current page:", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    text = "Translate current web page dynamically. Choose from any native browser languages:",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    placeholder = { Text("Search language...") },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = MaterialTheme.colorScheme.primary
+                    )
+                )
+
                 Spacer(modifier = Modifier.height(10.dp))
-                LazyColumn(modifier = Modifier.height(180.dp)) {
-                    items(languages) { (langName, code) ->
+                
+                LazyColumn(modifier = Modifier.height(240.dp)) {
+                    items(filteredLanguages) { (langName, code) ->
                         ListItem(
-                            headlineContent = { Text(langName) },
-                            modifier = Modifier.clickable { onTranslate(code) }
+                            headlineContent = { 
+                                Text(
+                                    text = langName, 
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.SemiBold
+                                ) 
+                            },
+                            supportingContent = {
+                                Text(
+                                    text = "Code: $code",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { onTranslate(code) }
                         )
                     }
                 }
@@ -3131,9 +3766,154 @@ fun TranslateDialog(
         },
         confirmButton = {},
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onDismiss) { Text("Dismiss") }
         }
     )
+}
+
+@Composable
+fun TtsControlPanel(
+    state: BrowserUiState,
+    onPlayPause: () -> Unit,
+    onStop: () -> Unit,
+    onSkipPrevious: () -> Unit,
+    onSkipNext: () -> Unit,
+    onSpeedChange: (Float) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.95f)
+        ),
+        elevation = CardDefaults.cardElevation(8.dp),
+        shape = MaterialTheme.shapes.large
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp)
+        ) {
+            // Header: Title, sentence count, and Close Button
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.VolumeUp,
+                        contentDescription = "Read aloud",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Listening to Page (${state.currentTtsIndex + 1}/${state.totalTtsSegments})",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                IconButton(onClick = onStop, modifier = Modifier.size(28.dp)) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Stop Aloud Reader",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Current Sentence Excerpt Text Preview (Highly requested for Chrome read aloud!)
+            if (state.currentTtsText.isNotBlank()) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.5f),
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = state.currentTtsText,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 2,
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+
+            // Controls Row (Previous, Play/Pause, Next, Speech Rate speed, Close)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Speed selection cycle
+                val speeds = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
+                val currentSpeed = state.ttsSpeed
+                val nextIdx = (speeds.indexOf(currentSpeed) + 1).let { if (it >= speeds.size) 0 else it }
+                val nextSpeed = speeds[nextIdx]
+                
+                TextButton(
+                    onClick = { onSpeedChange(nextSpeed) },
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        text = "${currentSpeed}x",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+
+                // Previous sentence button
+                IconButton(
+                    onClick = onSkipPrevious,
+                    enabled = state.currentTtsIndex > 0
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.SkipPrevious,
+                        contentDescription = "Previous Sentence",
+                        tint = if (state.currentTtsIndex > 0) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+                    )
+                }
+
+                // Play / Pause glowing circle button
+                IconButton(
+                    onClick = onPlayPause,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary)
+                ) {
+                    Icon(
+                        imageVector = if (state.isTtsPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        contentDescription = if (state.isTtsPlaying) "Pause" else "Play",
+                        tint = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.size(28.dp)
+                    )
+                }
+
+                // Next sentence button
+                IconButton(
+                    onClick = onSkipNext,
+                    enabled = state.currentTtsIndex + 1 < state.totalTtsSegments
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.SkipNext,
+                        contentDescription = "Next Sentence",
+                        tint = if (state.currentTtsIndex + 1 < state.totalTtsSegments) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+                    )
+                }
+
+                // Dummy to balance Row
+                Spacer(modifier = Modifier.width(36.dp))
+            }
+        }
+    }
 }
 
 @Composable
@@ -3293,64 +4073,253 @@ fun HelpFeedbackDialog(
     )
 }
 
+fun getStorageInfo(context: android.content.Context): Pair<String, String> {
+    return try {
+        val path = android.os.Environment.getDataDirectory()
+        val stat = android.os.StatFs(path.path)
+        val blockSize = stat.blockSizeLong
+        val totalBlocks = stat.blockCountLong
+        val availableBlocks = stat.availableBlocksLong
+        
+        val totalBytes = totalBlocks * blockSize
+        val availableBytes = availableBlocks * blockSize
+        val usedBytes = totalBytes - availableBytes
+        
+        val usedStr = android.text.format.Formatter.formatShortFileSize(context, usedBytes)
+        val totalStr = android.text.format.Formatter.formatShortFileSize(context, totalBytes)
+        Pair(usedStr, totalStr)
+    } catch (e: Exception) {
+        Pair("389.99 MB", "115.87 GB")
+    }
+}
+
+fun getGroupedDateString(timestamp: Long): String {
+    val now = java.util.Calendar.getInstance()
+    val time = java.util.Calendar.getInstance().apply { timeInMillis = timestamp }
+    
+    val isToday = now.get(java.util.Calendar.YEAR) == time.get(java.util.Calendar.YEAR) &&
+                  now.get(java.util.Calendar.DAY_OF_YEAR) == time.get(java.util.Calendar.DAY_OF_YEAR)
+                  
+    now.add(java.util.Calendar.DAY_OF_YEAR, -1)
+    val isYesterday = now.get(java.util.Calendar.YEAR) == time.get(java.util.Calendar.YEAR) &&
+                      now.get(java.util.Calendar.DAY_OF_YEAR) == time.get(java.util.Calendar.DAY_OF_YEAR)
+                      
+    return when {
+        isToday -> "Today - " + java.text.SimpleDateFormat("d MMM yyyy", java.util.Locale.getDefault()).format(java.util.Date(timestamp))
+        isYesterday -> "Yesterday - " + java.text.SimpleDateFormat("d MMM yyyy", java.util.Locale.getDefault()).format(java.util.Date(timestamp))
+        else -> java.text.SimpleDateFormat("d MMM yyyy", java.util.Locale.getDefault()).format(java.util.Date(timestamp))
+    }
+}
+
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun DownloadsOverlay(
     downloads: List<com.example.data.DownloadItem>,
     onDismiss: () -> Unit,
-    onDelete: (Long) -> Unit,
+    onOpenFile: (String, String, String) -> Unit,
+    viewModel: BrowserViewModel,
     isGlass: Boolean = false
 ) {
-    Dialog(onDismissRequest = onDismiss) {
-        Surface(
-            shape = RoundedCornerShape(24.dp),
-            color = if (isGlass) Color(0xD90B1220) else MaterialTheme.colorScheme.surface,
-            contentColor = if (isGlass) Color.White else MaterialTheme.colorScheme.onSurface,
-            border = if (isGlass) BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)) else null,
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var selectedIds by remember { mutableStateOf(setOf<Long>()) }
+    val storageInfo = remember { getStorageInfo(context) }
+    
+    val groupedAndSorted = remember(downloads) {
+        downloads.groupBy { getGroupedDateString(it.timestamp) }
+    }
+
+    Surface(
+        color = if (isGlass) Color(0xFF0B1220) else MaterialTheme.colorScheme.background,
+        contentColor = if (isGlass) Color.White else MaterialTheme.colorScheme.onBackground,
+        modifier = Modifier.fillMaxSize()
+    ) {
+        Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .fillMaxHeight(0.75f)
-                .padding(vertical = 16.dp)
+                .fillMaxSize()
+                .statusBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 12.dp)
         ) {
-            Column(
+            // Header Row
+            Row(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .padding(24.dp)
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(text = "Downloads", fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                    IconButton(onClick = onDismiss) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        onClick = {
+                            if (selectedIds.isNotEmpty()) {
+                                selectedIds = emptySet()
+                            } else {
+                                onDismiss()
+                            }
+                        }
+                    ) {
                         Icon(
-                            Icons.Default.Close,
-                            contentDescription = null,
+                            Icons.Default.ArrowBack,
+                            contentDescription = "Back",
                             tint = if (isGlass) Color.White else LocalContentColor.current
                         )
                     }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = if (selectedIds.isNotEmpty()) "${selectedIds.size} selected" else "Downloads",
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                // In selection mode, show dynamic delete & share actions in header
+                if (selectedIds.isNotEmpty()) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Multi-Share
+                        IconButton(
+                            onClick = {
+                                val selectedDownloads = downloads.filter { it.downloadId in selectedIds }
+                                val uris = ArrayList<android.net.Uri>()
+                                selectedDownloads.forEach { dl ->
+                                    val file = java.io.File(
+                                        android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS),
+                                        dl.fileName
+                                    )
+                                    if (file.exists()) {
+                                        try {
+                                            val uri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
+                                            uris.add(uri)
+                                        } catch (e: Exception) { e.printStackTrace() }
+                                    }
+                                }
+                                if (uris.isNotEmpty()) {
+                                    val shareIntent = Intent().apply {
+                                        action = Intent.ACTION_SEND_MULTIPLE
+                                        putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+                                        type = "*/*"
+                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    }
+                                    context.startActivity(Intent.createChooser(shareIntent, "Share selected files"))
+                                } else {
+                                    android.widget.Toast.makeText(context, "Cannot share: selected files missing on memory", android.widget.Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Share,
+                                contentDescription = "Share selected",
+                                tint = if (isGlass) Color.White else MaterialTheme.colorScheme.primary
+                            )
+                        }
 
-                if (downloads.isEmpty()) {
-                    Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        Text(
-                            text = "No downloads. Click download links to get files.",
-                            color = if (isGlass) Color.White.copy(alpha = 0.5f) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                            fontSize = 14.sp,
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                        )
+                        // Multi-Delete
+                        IconButton(
+                            onClick = {
+                                viewModel.deleteDownloads(selectedIds)
+                                selectedIds = emptySet()
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Delete,
+                                contentDescription = "Delete selected",
+                                tint = if (isGlass) Color.White else MaterialTheme.colorScheme.error
+                            )
+                        }
                     }
-                } else {
-                    LazyColumn(
-                        modifier = Modifier.weight(1f).fillMaxWidth(),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        items(downloads) { dl ->
+                }
+            }
+
+            // Storage Details
+            Card(
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (isGlass) Color.White.copy(alpha = 0.05f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.SdCard,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Using ${storageInfo.first} of ${storageInfo.second}",
+                        fontSize = 13.sp,
+                        color = if (isGlass) Color.White.copy(alpha = 0.8f) else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            if (downloads.isEmpty()) {
+                Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    Text(
+                        text = "No downloads. Click download links to get files.",
+                        color = if (isGlass) Color.White.copy(alpha = 0.5f) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                        fontSize = 14.sp,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    groupedAndSorted.forEach { (dateGroup, items) ->
+                        item {
+                            Text(
+                                text = dateGroup,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isGlass) Color.White.copy(alpha = 0.6f) else MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(top = 10.dp, bottom = 4.dp)
+                            )
+                        }
+                        items(items) { dl ->
                             DownloadItemRow(
                                 download = dl,
-                                onDelete = { onDelete(dl.downloadId) },
+                                isSelected = dl.downloadId in selectedIds,
+                                isInSelectionMode = selectedIds.isNotEmpty(),
+                                onClick = {
+                                    if (selectedIds.isNotEmpty()) {
+                                        selectedIds = if (dl.downloadId in selectedIds) {
+                                            selectedIds - dl.downloadId
+                                        } else {
+                                            selectedIds + dl.downloadId
+                                        }
+                                    } else {
+                                        val file = java.io.File(
+                                            android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS),
+                                            dl.fileName
+                                        )
+                                        if (file.exists()) {
+                                            onOpenFile(file.absolutePath, dl.fileName, dl.mimeType)
+                                        } else {
+                                            android.widget.Toast.makeText(context, "File does not exist or was deleted", android.widget.Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                },
+                                onLongClick = {
+                                    if (selectedIds.isEmpty()) {
+                                        selectedIds = setOf(dl.downloadId)
+                                    }
+                                },
+                                onDelete = {
+                                    viewModel.deleteDownload(dl.downloadId)
+                                },
+                                onRename = { newName ->
+                                    viewModel.renameDownloadFile(dl.downloadId, dl.fileName, newName)
+                                },
                                 isGlass = isGlass
                             )
                         }
@@ -3361,10 +4330,16 @@ fun DownloadsOverlay(
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun DownloadItemRow(
     download: com.example.data.DownloadItem,
+    isSelected: Boolean,
+    isInSelectionMode: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
     onDelete: () -> Unit,
+    onRename: (String) -> Boolean,
     isGlass: Boolean = false
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -3383,37 +4358,64 @@ fun DownloadItemRow(
             "Unknown size"
         }
     }
-    val dateStr = remember(download.timestamp) {
-        val sdf = java.text.SimpleDateFormat("dd MMM yyyy, HH:mm", java.util.Locale.getDefault())
-        sdf.format(java.util.Date(download.timestamp))
+    
+    var showMenu by remember { mutableStateOf(false) }
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var newFileName by remember { mutableStateOf(download.fileName) }
+
+    if (showRenameDialog) {
+        AlertDialog(
+            onDismissRequest = { showRenameDialog = false },
+            title = { Text("Rename") },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = newFileName,
+                        onValueChange = { newFileName = it },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (newFileName.isNotBlank()) {
+                            val success = onRename(newFileName)
+                            if (success) {
+                                showRenameDialog = false
+                            } else {
+                                android.widget.Toast.makeText(context, "Rename failed", android.widget.Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                ) {
+                    Text("OK")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRenameDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 
     Surface(
         shape = RoundedCornerShape(12.dp),
-        color = if (isGlass) Color.White.copy(alpha = 0.06f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+        color = if (isInSelectionMode && isSelected) {
+            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
+        } else if (isGlass) {
+            Color.White.copy(alpha = 0.06f)
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+        },
         contentColor = if (isGlass) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier
             .fillMaxWidth()
-            .clickable {
-                if (fileExists) {
-                    val uri = androidx.core.content.FileProvider.getUriForFile(
-                        context,
-                        "${context.packageName}.provider",
-                        file
-                    )
-                    val intent = Intent(Intent.ACTION_VIEW).apply {
-                        setDataAndType(uri, download.mimeType)
-                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    }
-                    try {
-                        context.startActivity(intent)
-                    } catch (e: Exception) {
-                        android.widget.Toast.makeText(context, "No app found to open this file", android.widget.Toast.LENGTH_SHORT).show()
-                    }
-                } else {
-                    android.widget.Toast.makeText(context, "File does not exist or was deleted from memory", android.widget.Toast.LENGTH_SHORT).show()
-                }
-            }
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
     ) {
         Row(
             modifier = Modifier
@@ -3421,6 +4423,33 @@ fun DownloadItemRow(
                 .fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            // Checkmark column in selection mode
+            if (isInSelectionMode) {
+                if (isSelected) {
+                    Box(
+                        modifier = Modifier
+                            .size(24.dp)
+                            .background(MaterialTheme.colorScheme.primary, CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Check,
+                            contentDescription = "Selected",
+                            tint = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .size(24.dp)
+                            .border(1.5.dp, (if (isGlass) Color.White.copy(alpha = 0.4f) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)), CircleShape)
+                    )
+                }
+                Spacer(modifier = Modifier.width(12.dp))
+            }
+
+            // File type indicator/icon
             Icon(
                 imageVector = when {
                     download.mimeType.startsWith("video/") -> Icons.Default.PlayCircle
@@ -3435,6 +4464,7 @@ fun DownloadItemRow(
 
             Spacer(modifier = Modifier.width(12.dp))
 
+            // File info
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = download.fileName,
@@ -3445,19 +4475,72 @@ fun DownloadItemRow(
                     color = if (isGlass) Color.White else MaterialTheme.colorScheme.onSurface
                 )
                 Text(
-                    text = "$readableSize • $dateStr",
+                    text = if (fileExists) readableSize else "File missing • $readableSize",
                     fontSize = 11.sp,
-                    color = if (isGlass) Color.White.copy(alpha = 0.6f) else MaterialTheme.colorScheme.onSurfaceVariant
+                    color = if (fileExists) {
+                        (if (isGlass) Color.White.copy(alpha = 0.6f) else MaterialTheme.colorScheme.onSurfaceVariant)
+                    } else {
+                        MaterialTheme.colorScheme.error
+                    }
                 )
             }
 
-            IconButton(onClick = onDelete) {
-                Icon(
-                    imageVector = Icons.Default.Delete,
-                    contentDescription = "Delete download task",
-                    tint = if (isGlass) Color.White.copy(alpha = 0.6f) else MaterialTheme.colorScheme.error,
-                    modifier = Modifier.size(20.dp)
-                )
+            // More Options Dropdown button
+            if (!isInSelectionMode) {
+                Box {
+                    IconButton(onClick = { showMenu = true }) {
+                        Icon(
+                            imageVector = Icons.Default.MoreVert,
+                            contentDescription = "File Options",
+                            tint = if (isGlass) Color.White.copy(alpha = 0.6f) else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    DropdownMenu(
+                        expanded = showMenu,
+                        onDismissRequest = { showMenu = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Share") },
+                            leadingIcon = { Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                            onClick = {
+                                showMenu = false
+                                if (fileExists) {
+                                    val uri = androidx.core.content.FileProvider.getUriForFile(
+                                        context,
+                                        "${context.packageName}.provider",
+                                        file
+                                    )
+                                    val intent = Intent(Intent.ACTION_SEND).apply {
+                                        type = download.mimeType
+                                        putExtra(Intent.EXTRA_STREAM, uri)
+                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    }
+                                    context.startActivity(Intent.createChooser(intent, "Share file"))
+                                } else {
+                                    android.widget.Toast.makeText(context, "Cannot share: file missing on memory", android.widget.Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Rename") },
+                            leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                            onClick = {
+                                showMenu = false
+                                newFileName = download.fileName
+                                showRenameDialog = true
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Delete") },
+                            leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                            onClick = {
+                                showMenu = false
+                                onDelete()
+                            }
+                        )
+                    }
+                }
             }
         }
     }
@@ -3818,6 +4901,206 @@ fun BottomTabStripLayout(
                 )
             }
         }
+    }
+}
+
+@Composable
+fun TranslateBarLayout(viewModel: BrowserViewModel) {
+    val uiState by viewModel.uiState.collectAsState()
+    var showMoreMenu by remember { mutableStateOf(false) }
+    var showMoreLanguages by remember { mutableStateOf(false) }
+    var neverEnglish by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+
+    androidx.compose.animation.AnimatedVisibility(
+        visible = uiState.showTranslateBar && !uiState.isTabSwitcherOpen && !uiState.readerModeActive,
+        enter = androidx.compose.animation.expandVertically() + androidx.compose.animation.fadeIn(),
+        exit = androidx.compose.animation.shrinkVertically() + androidx.compose.animation.fadeOut()
+    ) {
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            tonalElevation = 6.dp,
+            shadowElevation = 4.dp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+            shape = RoundedCornerShape(14.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                // Left Part: Logo and Text
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Translate,
+                            contentDescription = "Translate",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        if (uiState.isPageTranslated) {
+                            Text(
+                                text = "Page translated",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = "Detected language to ${uiState.translateTargetLang}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        } else {
+                            Text(
+                                text = "Translate page?",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = "English to ${uiState.translateTargetLang}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+
+                // Right Part: Actions
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    // Settings Gear Button
+                    Box {
+                        IconButton(
+                            onClick = { showMoreMenu = true },
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Settings,
+                                contentDescription = "Translation Options",
+                                modifier = Modifier.size(20.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        DropdownMenu(
+                            expanded = showMoreMenu,
+                            onDismissRequest = { showMoreMenu = false }
+                        ) {
+                            DropdownMenuItem(
+                                leadingIcon = { Icon(Icons.Default.Language, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                                text = { Text("More languages", fontSize = 13.sp) },
+                                onClick = {
+                                    showMoreMenu = false
+                                    showMoreLanguages = true
+                                }
+                            )
+                            val isAutoEnabled = viewModel.isExtensionEnabled("ext_auto_translate")
+                            DropdownMenuItem(
+                                leadingIcon = { 
+                                    if (isAutoEnabled) {
+                                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    } else {
+                                        Spacer(modifier = Modifier.size(16.dp))
+                                    }
+                                },
+                                text = { Text("Always translate pages in English", fontSize = 13.sp) },
+                                onClick = {
+                                    showMoreMenu = false
+                                    viewModel.setExtensionEnabled("ext_auto_translate", !isAutoEnabled)
+                                    Toast.makeText(context, if (!isAutoEnabled) "Always translate enabled" else "Always translate disabled", Toast.LENGTH_SHORT).show()
+                                }
+                            )
+                            DropdownMenuItem(
+                                leadingIcon = { 
+                                    if (neverEnglish) {
+                                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    } else {
+                                        Spacer(modifier = Modifier.size(16.dp))
+                                    }
+                                },
+                                text = { Text("Never translate pages in English", fontSize = 13.sp) },
+                                onClick = {
+                                    showMoreMenu = false
+                                    neverEnglish = !neverEnglish
+                                    Toast.makeText(context, if (neverEnglish) "Never translate English pages saved" else "Preference cleared", Toast.LENGTH_SHORT).show()
+                                }
+                            )
+                            DropdownMenuItem(
+                                leadingIcon = { Spacer(modifier = Modifier.size(16.dp)) },
+                                text = { Text("Never translate this site", fontSize = 13.sp) },
+                                onClick = {
+                                    showMoreMenu = false
+                                    Toast.makeText(context, "Never translate preference saved for this site", Toast.LENGTH_SHORT).show()
+                                    viewModel.dismissTranslateBar()
+                                }
+                            )
+                            DropdownMenuItem(
+                                leadingIcon = { Spacer(modifier = Modifier.size(16.dp)) },
+                                text = { Text("Page is not in English?", fontSize = 13.sp) },
+                                onClick = {
+                                    showMoreMenu = false
+                                    showMoreLanguages = true
+                                }
+                            )
+                        }
+                    }
+
+                    // Translate or Undo Button
+                    if (uiState.isPageTranslated) {
+                        TextButton(
+                            onClick = { viewModel.undoTranslation() },
+                            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.primary),
+                            modifier = Modifier.height(36.dp)
+                        ) {
+                            Text("Undo", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        }
+                    } else {
+                        TextButton(
+                            onClick = { viewModel.translateActivePage(uiState.translateTargetLangCode) },
+                            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.primary),
+                            modifier = Modifier.height(36.dp)
+                        ) {
+                            Text("Translate", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (showMoreLanguages) {
+        TranslateDialog(
+            onTranslate = { langCode ->
+                showMoreLanguages = false
+                viewModel.translateActivePage(langCode)
+            },
+            onDismiss = { showMoreLanguages = false }
+        )
     }
 }
 

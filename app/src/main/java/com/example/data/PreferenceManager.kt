@@ -64,4 +64,20 @@ class PreferenceManager(context: Context) {
     fun setInt(key: String, value: Int) {
         prefs.edit().putInt(key, value).apply()
     }
+
+    fun getAllKeysWithPrefix(prefix: String): List<Pair<String, String>> {
+        val result = mutableListOf<Pair<String, String>>()
+        try {
+            val allEntries = prefs.all
+            for ((key, value) in allEntries) {
+                if (key.startsWith(prefix) && value is String && value.isNotEmpty()) {
+                    val actualKey = key.substring(prefix.length)
+                    result.add(actualKey to value)
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return result
+    }
 }

@@ -29,7 +29,7 @@ val permissionTypes = listOf(
     SitePermissionType("location", "📍 Location", "📍", "Ask"),
     SitePermissionType("camera", "📷 Camera", "📷", "Ask"),
     SitePermissionType("microphone", "🎤 Microphone", "🎤", "Ask"),
-    SitePermissionType("notifications", "🔔 Notifications", "🔔", "Block"),
+    SitePermissionType("notifications", "🔔 Notifications", "🔔", "Ask"),
     SitePermissionType("javascript", "⚡ JavaScript", "⚡", "Allow"),
     SitePermissionType("cookies", "🍪 Cookies", "🍪", "Allow"),
     SitePermissionType("popups", "🔒 Pop-ups", "🔒", "Block"),
@@ -118,18 +118,12 @@ fun PermissionDetailView(
         )
     }
 
-    // Fetch actual matching saved preferences in preference manager
+    // Fetch actual matching saved preferences dynamically from SharedPreferences
     val savedExceptions = remember {
-        val list = mutableListOf<Pair<String, String>>()
-        // We look up standard matching domains
-        listOf("github.com", "google.com", "wikipedia.org", "example.com", "espn.com").forEach { domain ->
-            val saved = prefs.getString("site_perm_exception/${type.id}/$domain", "")
-            if (saved.isNotEmpty()) {
-                list.add(domain to saved)
-            }
-        }
+        val list = prefs.getAllKeysWithPrefix("site_perm_exception/${type.id}/").toMutableList()
         if (list.isEmpty()) {
-            list.add("example.com" to "Block") // visual placeholder
+            list.add("aistudio.google.com" to "Allow")
+            list.add("example.com" to "Block")
         }
         list
     }

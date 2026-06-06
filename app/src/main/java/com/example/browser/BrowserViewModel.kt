@@ -51,7 +51,8 @@ data class TabState(
     val groupName: String? = null,
     val groupColor: Long? = null,
     val blockedAdsCount: Int = 0,
-    val hasLoadedSuccessfully: Boolean = false
+    val hasLoadedSuccessfully: Boolean = false,
+    val parentTabId: String? = null
 )
 
 data class BrowserUiState(
@@ -68,6 +69,8 @@ data class BrowserUiState(
     val readerModeTitle: String = "",
     val readerModeAuthor: String? = null,
     val readerModeContent: String = "",
+    val readerModeDate: String? = null,
+    val readerModeDomain: String? = null,
     val readerFontSize: Int = 16,
     val isSettingsOpen: Boolean = false,
     val isHistoryOpen: Boolean = false,
@@ -91,6 +94,9 @@ data class BrowserUiState(
     val isTtsActive: Boolean = false,
     val isTtsPlaying: Boolean = false,
     val ttsSpeed: Float = 1.0f,
+    val currentTtsText: String = "",
+    val currentTtsIndex: Int = 0,
+    val totalTtsSegments: Int = 0,
     
     // Recently closed tabs tracking
     val recentlyClosedTabs: List<TabState> = emptyList(),
@@ -113,7 +119,24 @@ data class BrowserUiState(
     val showFilePicker: Boolean = false,
     
     // Fullscreen auto-hide toolbars visible state
-    val areToolbarsVisible: Boolean = true
+    val areToolbarsVisible: Boolean = true,
+    
+    // Active local file tracker (for Video, Music, PDF, Zip viewer)
+    val activeViewerFile: ActiveViewerFile? = null,
+
+    // Google Translate State
+    val showTranslateBar: Boolean = false,
+    val isPageTranslated: Boolean = false,
+    val translateTargetLang: String = "Hindi",
+    val translateTargetLangCode: String = "hi",
+    val originalTranslationUrl: String = "",
+    val autoTranslateEnabled: Boolean = false
+)
+
+data class ActiveViewerFile(
+    val filePath: String,
+    val fileName: String,
+    val mimeType: String
 )
 
 data class ContextMenuState(
@@ -146,11 +169,17 @@ data class DownloadProgressState(
 class BrowserViewModel(
     application: Application,
     private val repository: BrowserRepository,
-    private val prefs: PreferenceManager
-) : AndroidViewModel(application) {
+    val prefs: PreferenceManager
+) : AndroidViewModel(application), com.example.extensionengine.BrowserDelegate {
+
+    val extensionManager = com.example.extensionengine.ExtensionManager(application, this)
 
     private val _uiState = MutableStateFlow(BrowserUiState())
     val uiState: StateFlow<BrowserUiState> = _uiState.asStateFlow()
+
+    // Notification permission request variables
+    private val _notificationRequestOrigin = MutableStateFlow<String?>(null)
+    val notificationRequestOrigin: StateFlow<String?> = _notificationRequestOrigin
 
     // Map of active WebViews
     private val webViewMap = mutableMapOf<String, WebView>()
@@ -204,6 +233,9 @@ class BrowserViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private var ttsEngine: android.speech.tts.TextToSpeech? = null
+    private var ttsSegments = listOf<String>()
+    private var currentTtsSegmentIndex = 0
+    private val sslDomainsToIgnore = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
     init {
         // Load saved desktop mode entries
@@ -293,7 +325,7 @@ class BrowserViewModel(
     }
 
     // Tab Management
-    fun addNewTab(url: String = "orion://newtab", isIncognito: Boolean = false) {
+    fun addNewTab(url: String = "orion://newtab", isIncognito: Boolean = false, parentTabId: String? = null) {
         val tabId = UUID.randomUUID().toString()
         val formatted = if (url == "orion://newtab" && isIncognito) "orion://newtab-incognito" else formatUrlOrSearch(url)
         val newTab = TabState(
@@ -301,7 +333,8 @@ class BrowserViewModel(
             url = formatted,
             title = if (isIncognito) "Incognito Tab" else if (formatted == "orion://newtab") "New Tab" else "Loading...",
             lastActiveTime = System.currentTimeMillis(),
-            isIncognito = isIncognito
+            isIncognito = isIncognito,
+            parentTabId = parentTabId
         )
 
         _uiState.update { state ->
@@ -325,7 +358,17 @@ class BrowserViewModel(
     fun selectTab(tabId: String) {
         val currentState = _uiState.value
         val oldTabId = currentState.activeTabId
-        if (oldTabId == tabId) return
+        if (oldTabId == tabId) {
+            _uiState.update { state ->
+                state.copy(
+                    isTabSwitcherOpen = false,
+                    readerModeActive = false,
+                    findInPageActive = false,
+                    areToolbarsVisible = true
+                )
+            }
+            return
+        }
 
         tabHistory.remove(tabId)
         if (currentState.tabs.any { it.id == oldTabId }) {
@@ -429,6 +472,103 @@ class BrowserViewModel(
 
     fun handleIncomingIntent(intent: android.content.Intent?) {
         if (intent == null) return
+        val action = intent.action
+        val type = intent.type
+        val context = getApplication<Application>()
+
+        val notificationUrl = intent.getStringExtra("NOTIFICATION_URL")
+        if (!notificationUrl.isNullOrEmpty()) {
+            addNewTab(url = notificationUrl)
+            return
+        }
+
+        if (action == android.content.Intent.ACTION_SEND && type == "text/plain") {
+            val sharedText = intent.getStringExtra(android.content.Intent.EXTRA_TEXT) ?: ""
+            // Extract HTTP/HTTPS link
+            val urlRegex = Regex("https?://[a-zA-Z0-9.\\-_/\\?&+=~%]+")
+            val match = urlRegex.find(sharedText)
+            val extractedUrl = match?.value ?: ""
+            if (extractedUrl.isNotEmpty()) {
+                addNewTab(url = extractedUrl)
+            }
+            return
+        }
+
+        if (action == android.content.Intent.ACTION_VIEW) {
+            val dataUri = intent.data
+            if (dataUri != null) {
+                var mime = type ?: context.contentResolver.getType(dataUri) ?: ""
+                var name = "External File"
+                
+                // Query name from ContentResolver
+                try {
+                    context.contentResolver.query(dataUri, null, null, null, null)?.use { cursor ->
+                        val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                        if (nameIndex != -1 && cursor.moveToFirst()) {
+                            name = cursor.getString(nameIndex)
+                        }
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+
+                // Deduce mime type from file extension if empty
+                if (mime.isEmpty()) {
+                    val ext = name.substringAfterLast(".").lowercase()
+                    mime = when (ext) {
+                        "mp4", "mkv", "3gp", "avi", "webm" -> "video/*"
+                        "mp3", "wav", "ogg", "aac", "m4a", "flac" -> "audio/*"
+                        "pdf" -> "application/pdf"
+                        "html", "htm" -> "text/html"
+                        else -> "*/*"
+                    }
+                }
+
+                // HTML files can be launched directly inside the WebView!
+                if (mime.contains("html", ignoreCase = true)) {
+                    try {
+                        val input = context.contentResolver.openInputStream(dataUri)
+                        val text = input?.bufferedReader()?.use { it.readText() } ?: ""
+                        addNewTab(url = "data:text/html;charset=utf-8," + android.net.Uri.encode(text))
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        addNewTab(url = dataUri.toString())
+                    }
+                    return
+                }
+
+                // Copy to local app cache for consistent background playback and permission safety
+                viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    try {
+                        val cacheDir = java.io.File(context.cacheDir, "external_view")
+                        if (!cacheDir.exists()) cacheDir.mkdirs()
+                        val cacheFile = java.io.File(cacheDir, name)
+                        
+                        context.contentResolver.openInputStream(dataUri)?.use { input ->
+                            cacheFile.outputStream().use { output ->
+                                input.copyTo(output)
+                            }
+                        }
+
+                        if (cacheFile.exists()) {
+                            _uiState.update {
+                                it.copy(
+                                    activeViewerFile = ActiveViewerFile(
+                                        filePath = cacheFile.absolutePath,
+                                        fileName = name,
+                                        mimeType = mime
+                                    )
+                                )
+                            }
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+                return
+            }
+        }
+
         val url = intent.dataString ?: intent.getStringExtra("url")
         if (!url.isNullOrEmpty()) {
             val activeId = _uiState.value.activeTabId
@@ -456,6 +596,7 @@ class BrowserViewModel(
                     put("url", tab.url)
                     put("title", tab.title)
                     put("isDesktopMode", tab.isDesktopMode)
+                    put("parentTabId", tab.parentTabId)
                 }
                 jsonArray.put(obj)
             }
@@ -486,6 +627,7 @@ class BrowserViewModel(
                     val url = obj.optString("url", "orion://newtab")
                     val title = obj.optString("title", "New Tab")
                     val isDesktopMode = obj.optBoolean("isDesktopMode", false)
+                    val parentTabId = if (obj.has("parentTabId")) obj.optString("parentTabId") else null
                     
                     restoredTabs.add(
                         TabState(
@@ -493,7 +635,8 @@ class BrowserViewModel(
                             url = url,
                             title = title,
                             isDesktopMode = isDesktopMode,
-                            isIncognito = false
+                            isIncognito = false,
+                            parentTabId = if (parentTabId.isNullOrEmpty()) null else parentTabId
                         )
                     )
                 }
@@ -551,18 +694,29 @@ class BrowserViewModel(
                 }
             }
 
-            private var startClickTime = 0L
-            private var startClickX = 0f
-            private var startClickY = 0f
+            private var accumulatedNativeScroll = 0
 
             override fun onScrollChanged(l: Int, t: Int, oldl: Int, oldt: Int) {
                 super.onScrollChanged(l, t, oldl, oldt)
-                val deltaY = t - oldt
-                if (Math.abs(deltaY) > 8) {
-                    if (deltaY > 0) {
+                val currentY = t
+                val diff = currentY - oldt
+                
+                if ((diff > 0 && accumulatedNativeScroll < 0) || (diff < 0 && accumulatedNativeScroll > 0)) {
+                    accumulatedNativeScroll = 0
+                }
+                
+                accumulatedNativeScroll += diff
+                
+                if (currentY <= 15) {
+                    setToolbarsVisible(true)
+                    accumulatedNativeScroll = 0
+                } else {
+                    if (accumulatedNativeScroll > 100) {
                         setToolbarsVisible(false)
-                    } else if (deltaY < 0) {
+                        accumulatedNativeScroll = 0
+                    } else if (accumulatedNativeScroll < -60) {
                         setToolbarsVisible(true)
+                        accumulatedNativeScroll = 0
                     }
                 }
             }
@@ -572,23 +726,12 @@ class BrowserViewModel(
                     android.view.MotionEvent.ACTION_DOWN -> {
                         startX = event.x
                         startY = event.y
-                        startClickTime = System.currentTimeMillis()
-                        startClickX = event.x
-                        startClickY = event.y
                     }
                     android.view.MotionEvent.ACTION_UP -> {
                         val diffX = event.x - startX
                         val diffY = event.y - startY
                         
-                        val clickDuration = System.currentTimeMillis() - startClickTime
-                        val clickDistX = event.x - startClickX
-                        val clickDistY = event.y - startClickY
-                        
-                        val isClick = clickDuration < 300 && Math.abs(clickDistX) < 15f && Math.abs(clickDistY) < 15f
-                        
-                        if (isClick) {
-                            toggleToolbarsVisible()
-                        } else if (Math.abs(diffX) > Math.abs(diffY) && Math.abs(diffX) > swipeThreshold && Math.abs(diffY) < yThreshold) {
+                        if (Math.abs(diffX) > Math.abs(diffY) && Math.abs(diffX) > swipeThreshold && Math.abs(diffY) < yThreshold) {
                             if (diffX > 0) {
                                 if (canGoBack()) {
                                     goBack()
@@ -639,6 +782,7 @@ class BrowserViewModel(
                 _uiState.value.isHardwareAccelerationEnabled,
                 currentTab?.isDesktopMode ?: false
             )
+            extensionManager.setupWebView(this)
 
             setDownloadListener { url, userAgent, contentDisposition, mimetype, contentLength ->
                 try {
@@ -683,19 +827,41 @@ class BrowserViewModel(
                                 if (needsUpdate) {
                                     updateTabState(tabId) { it.copy(isDesktopMode = isDesktop) }
                                 }
-                                view.settings.userAgentString = if (isDesktop) {
+                                view.settings.userAgentString = if (isDesktop || url.contains("chromewebstore.google.com") || url.contains("chrome.google.com/webstore")) {
                                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Safari/537.36"
                                 } else {
                                     "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Mobile Safari/537.36"
                                 }
+
+                                // Direct mobile domain enforcement
+                                if (!isDesktop && !url.contains("translate.google.com") && !url.contains("chromewebstore.google.com") && !url.contains("chrome.google.com/webstore")) {
+                                    val redirectedUrl = enforceMobileUrl(url)
+                                    if (redirectedUrl != url) {
+                                        view.post {
+                                            try {
+                                                view.loadUrl(redirectedUrl)
+                                            } catch (e: Exception) {
+                                                e.printStackTrace()
+                                            }
+                                        }
+                                        return
+                                    }
+                                }
                             }
                         }
                         val currentTabState = _uiState.value.tabs.find { it.id == tabId }
-                        val isNewTabState = currentTabState?.url == "orion://newtab" || currentTabState?.url == "orion://newtab-incognito"
-                        val finalUrl = if (url == "about:blank" && isNewTabState) {
-                            currentTabState?.url ?: ""
+                        val isTabIncognito = currentTabState?.isIncognito == true
+                        val currentUrl = currentTabState?.url ?: ""
+                        val finalUrl = if (url == "about:blank") {
+                            if (currentUrl == "about:blank" || currentUrl.isEmpty() || currentUrl.startsWith("orion://newtab")) {
+                                if (isTabIncognito) "orion://newtab-incognito" else "orion://newtab"
+                            } else {
+                                currentUrl
+                            }
+                        } else if (url == "orion://newtab" || url == "orion://newtab-incognito") {
+                            url
                         } else {
-                            url ?: (currentTabState?.url ?: "")
+                            url ?: (if (currentUrl.isNotEmpty()) currentUrl else if (isTabIncognito) "orion://newtab-incognito" else "orion://newtab")
                         }
                         updateTabState(tabId) {
                             it.copy(
@@ -723,6 +889,12 @@ class BrowserViewModel(
                 override fun onPageFinished(view: WebView?, url: String?) {
                     try {
                         super.onPageFinished(view, url)
+                        // Persist cookies to disk instantly
+                        try {
+                            android.webkit.CookieManager.getInstance().flush()
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
                         isUASwitchPending = false
                         if (url != null) {
                             val host = try { android.net.Uri.parse(url).host } catch (e: Exception) { null }
@@ -735,14 +907,20 @@ class BrowserViewModel(
                             }
                         }
                         val currentTabState = _uiState.value.tabs.find { it.id == tabId }
-                        val isNewTabState = currentTabState?.url == "orion://newtab" || currentTabState?.url == "orion://newtab-incognito"
-                        val finalUrl = if (url == "about:blank" && isNewTabState) {
-                            currentTabState?.url ?: ""
+                        val isTabIncognito = currentTabState?.isIncognito == true
+                        val currentUrl = currentTabState?.url ?: ""
+                        val finalUrl = if (url == "about:blank") {
+                            if (currentUrl == "about:blank" || currentUrl.isEmpty() || currentUrl.startsWith("orion://newtab")) {
+                                if (isTabIncognito) "orion://newtab-incognito" else "orion://newtab"
+                            } else {
+                                currentUrl
+                            }
+                        } else if (url == "orion://newtab" || url == "orion://newtab-incognito") {
+                            url
                         } else {
-                            url ?: (currentTabState?.url ?: "")
+                            url ?: (if (currentUrl.isNotEmpty()) currentUrl else if (isTabIncognito) "orion://newtab-incognito" else "orion://newtab")
                         }
                         val title = view?.title ?: ""
-                        val isTabIncognito = _uiState.value.tabs.find { it.id == tabId }?.isIncognito == true
                         updateTabState(tabId) {
                             it.copy(
                                 url = finalUrl,
@@ -759,51 +937,7 @@ class BrowserViewModel(
                             )
                         }
 
-                        // Inject dynamic global scroll and click capture listener in JavaScript
-                        view?.evaluateJavascript("""
-                            (function() {
-                                if (window._orionListenersAdded) return;
-                                window._orionListenersAdded = true;
-                                var isVisible = true;
-                                
-                                document.addEventListener('scroll', function(e) {
-                                    var currentScrollY = 0;
-                                    var prevScroll = e.target._lastScroll || 0;
-                                    if (e.target === document || e.target === window || !e.target) {
-                                        currentScrollY = window.scrollY;
-                                    } else {
-                                        if (typeof e.target.scrollTop === 'number') {
-                                            currentScrollY = e.target.scrollTop;
-                                        } else {
-                                            return;
-                                        }
-                                    }
-                                    
-                                    var diff = currentScrollY - prevScroll;
-                                    e.target._lastScroll = currentScrollY;
-                                    
-                                    if (Math.abs(diff) > 25) {
-                                        if (diff > 0 && isVisible) {
-                                            isVisible = false;
-                                            try { OrionJS.setToolbarsVisible(false); } catch(e){}
-                                        } else if (diff < 0 && !isVisible) {
-                                            isVisible = true;
-                                            try { OrionJS.setToolbarsVisible(true); } catch(e){}
-                                        }
-                                    }
-                                }, { capture: true, passive: true });
 
-                                document.addEventListener('click', function(e) {
-                                    var target = e.target;
-                                    if (!target) return;
-                                    var tag = target.tagName ? target.tagName.toLowerCase() : '';
-                                    if (tag !== 'input' && tag !== 'textarea' && tag !== 'a' && tag !== 'button' && tag !== 'video' && 
-                                        !target.closest('button') && !target.closest('a') && !target.closest('input')) {
-                                        try { OrionJS.toggleToolbars(); } catch(e){}
-                                    }
-                                }, { capture: true, passive: true });
-                            })();
-                        """.trimIndent(), null)
 
                         val isDesktop = _uiState.value.tabs.find { it.id == tabId }?.isDesktopMode == true
                         if (isDesktop && view != null) {
@@ -818,6 +952,195 @@ class BrowserViewModel(
                                     document.head.appendChild(newMeta);
                                 }
                             """.trimIndent(), null)
+                        }
+
+                        // Inject Simulated Chrome/User extensions upon page load complete
+                        if (view != null && url != null && !url.startsWith("orion://") && url != "about:blank") {
+                            // A. Dark Reader Extension
+                            if (prefs.getBoolean("ext_dark_reader", false)) {
+                                val brightness = prefs.getInt("ext_dark_reader_brightness", 90)
+                                val contrast = prefs.getInt("ext_dark_reader_contrast", 100)
+                                val sepia = prefs.getInt("ext_dark_reader_sepia", 0)
+                                val grayscale = prefs.getInt("ext_dark_reader_grayscale", 0)
+                                val filterString = "invert(90%) hue-rotate(180deg) brightness($brightness%) contrast($contrast%) sepia($sepia%) grayscale($grayscale%)"
+                                val jsDark = """
+                                    (function() {
+                                        var css = 'html { filter: $filterString !important; background: #121212 !important; } img, video, iframe, canvas, [style*="background-image"] { filter: invert(100%) hue-rotate(180deg) !important; }';
+                                        var style = document.getElementById('dark-reader-ext');
+                                        if (!style) {
+                                            style = document.createElement('style');
+                                            style.id = 'dark-reader-ext';
+                                            style.type = 'text/css';
+                                            style.appendChild(document.createTextNode(css));
+                                            document.head.appendChild(style);
+                                        }
+                                    })()
+                                """.trimIndent()
+                                view.evaluateJavascript(jsDark, null)
+                            }
+                            
+                            // B. Auto Translate to Hindi Extension
+                            if (prefs.getBoolean("ext_auto_translate", false)) {
+                                val jsTranslate = """
+                                    (function() {
+                                        var existingCombo = document.querySelector('select.goog-te-combo');
+                                        if (existingCombo) {
+                                            existingCombo.value = 'hi';
+                                            existingCombo.dispatchEvent(new Event('change'));
+                                            return;
+                                        }
+                                        var container = document.createElement('div');
+                                        container.id = 'google_translate_element';
+                                        container.style.display = 'none';
+                                        document.body.appendChild(container);
+                                        
+                                        window.googleTranslateElementInit = function() {
+                                            new google.translate.TranslateElement({
+                                                pageLanguage: 'auto',
+                                                layout: google.translate.TranslateElement.InlineLayout.SIMPLE,
+                                                autoDisplay: false
+                                            }, 'google_translate_element');
+                                            
+                                            var checkInterval = setInterval(function() {
+                                                var combo = document.querySelector('select.goog-te-combo');
+                                                if (combo) {
+                                                    clearInterval(checkInterval);
+                                                    combo.value = 'hi';
+                                                    combo.dispatchEvent(new Event('change'));
+                                                }
+                                            }, 150);
+                                        };
+                                        
+                                        var tag = document.createElement('script');
+                                        tag.type = 'text/javascript';
+                                        tag.src = 'https://translate.google.com/translate_a/element.js?cb=googleTranslateElementInit';
+                                        document.body.appendChild(tag);
+                                    })()
+                                """.trimIndent()
+                                view.evaluateJavascript(jsTranslate, null)
+                            }
+
+                            // C. Custom Script Extension
+                            if (prefs.getBoolean("ext_custom_script_enabled", false)) {
+                                val customScript = prefs.getString("ext_custom_script_code", "")
+                                if (customScript.isNotEmpty()) {
+                                    view.evaluateJavascript("(function() { $customScript })()", null)
+                                }
+                            }
+
+                            // D. Uploaded Zip Extension Script
+                            if (prefs.getBoolean("ext_uploaded_script_enabled", false)) {
+                                val uploadedScript = prefs.getString("ext_uploaded_script_code", "")
+                                if (uploadedScript.isNotEmpty()) {
+                                    view.evaluateJavascript("(function() { $uploadedScript })()", null)
+                                }
+                            }
+
+                            // Chrome Web Store 'Add to Chrome' click-interception hook
+                            if (url.contains("chromewebstore.google.com") || url.contains("chrome.google.com/webstore")) {
+                                val webStoreHookJs = """
+                                    (function() {
+                                        function extractExtensionId() {
+                                            var path = window.location.pathname;
+                                            if (path.includes("/detail/")) {
+                                                var parts = path.split("/");
+                                                var idCandidate = parts[parts.length - 1];
+                                                if (idCandidate && idCandidate.length === 32 && /^[a-z]+$/.test(idCandidate)) {
+                                                    return idCandidate;
+                                                }
+                                            }
+                                            return null;
+                                        }
+
+                                        function hookAddToChromeButtons() {
+                                            var buttons = document.querySelectorAll('button');
+                                            buttons.forEach(function(btn) {
+                                                var text = btn.innerText || btn.textContent || "";
+                                                var ariaLabel = btn.getAttribute("aria-label") || "";
+                                                var isTarget = /Add to Chrome|Add to Orion|Add to Brave|Add to Desktop/i.test(text) || 
+                                                               /Add to Chrome|Add to Orion|Add to Brave|Add to Desktop/i.test(ariaLabel);
+                                                               
+                                                if (isTarget && !btn.hasAttribute("data-orion-hooked")) {
+                                                    btn.setAttribute("data-orion-hooked", "true");
+                                                    btn.style.border = "4px solid #6366F1";
+                                                    btn.addEventListener('click', function(e) {
+                                                        e.preventDefault();
+                                                        e.stopPropagation();
+                                                        var extId = extractExtensionId();
+                                                        if (extId) {
+                                                            try {
+                                                                OrionJS.installWebStoreExtension(extId);
+                                                            } catch(err) {
+                                                                console.error("OrionJS webstore install integration failed", err);
+                                                            }
+                                                        } else {
+                                                            alert("Could not detect extension ID from the page URL.");
+                                                        }
+                                                    }, true);
+                                                }
+                                            });
+                                        }
+
+                                        setInterval(hookAddToChromeButtons, 500);
+                                        hookAddToChromeButtons();
+                                    })();
+                                """.trimIndent()
+                                view.evaluateJavascript(webStoreHookJs, null)
+                            }
+
+                            // E. True MV2 & MV3 Content Scripts and Bridges
+                            extensionManager.injectContentScripts(view, url)
+
+                            // F. Web Notification Polyfill Injection
+                            val notifJs = """
+                                (function() {
+                                    if (!window.Notification) {
+                                        window.Notification = function(title, options) {
+                                            this.title = title;
+                                            this.body = (options && options.body) ? options.body : "";
+                                            try {
+                                                OrionJS.showWebNotification(window.location.host, this.title, this.body);
+                                            } catch(e){}
+                                        };
+                                        window.Notification.permission = "default";
+                                        window.Notification.requestPermission = function(callback) {
+                                            return new Promise(function(resolve, reject) {
+                                                try {
+                                                    OrionJS.requestNotificationPermission(window.location.host);
+                                                } catch(e){}
+                                                resolve("granted");
+                                            });
+                                        };
+                                    }
+                                })()
+                            """.trimIndent()
+                            view.evaluateJavascript(notifJs, null)
+                        }
+
+                        // Translate engine hook
+                        if (url != null && !url.contains("translate.google.com") && !url.startsWith("orion://") && url != "about:blank") {
+                            val autoTranslate = prefs.getBoolean("ext_auto_translate", false)
+                            if (autoTranslate) {
+                                val targetLangCode = _uiState.value.translateTargetLangCode
+                                val targetLangName = _uiState.value.translateTargetLang
+                                executeGoogleTranslation(targetLangCode, targetLangName)
+                            } else {
+                                // Clear translation flags for this new normal page load
+                                _uiState.update { 
+                                    it.copy(
+                                        isPageTranslated = false,
+                                        showTranslateBar = false,
+                                        originalTranslationUrl = url
+                                    ) 
+                                }
+                            }
+                        } else if (url != null && url.contains("translate.google.com")) {
+                            _uiState.update { 
+                                it.copy(
+                                    isPageTranslated = true,
+                                    showTranslateBar = true
+                                ) 
+                            }
                         }
 
                         if (url != null && url != "orion://newtab" && url != "orion://newtab-incognito" && !url.startsWith("orion://") && !isTabIncognito) {
@@ -870,13 +1193,31 @@ class BrowserViewModel(
                         val currentTab = _uiState.value.tabs.find { it.id == tabId }
                         if (isMainFrame && currentTab?.hasLoadedSuccessfully != true) {
                             val failingUrl = request?.url?.toString() ?: ""
-                            val description = error?.description?.toString() ?: "Connect failed"
-                            val errorType = when {
-                                description.contains("disconnected", true) || description.contains("offline", true) || error?.errorCode == ERROR_CONNECT -> "offline"
-                                error?.errorCode == ERROR_TIMEOUT -> "timeout"
-                                else -> "offline"
+                            val description = error?.description?.toString() ?: ""
+                            val errorCode = error?.errorCode ?: 0
+                            
+                            // Check if the device is actually offline
+                            val isConnected = try {
+                                val cm = getApplication<android.app.Application>().getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+                                val activeNetwork = cm.activeNetwork
+                                if (activeNetwork == null) {
+                                    false
+                                } else {
+                                    val capabilities = cm.getNetworkCapabilities(activeNetwork)
+                                    capabilities?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) ?: false
+                                }
+                            } catch (e: Exception) {
+                                true // default to online to avoid false positives
                             }
-                            loadErrorHtml(view, errorType, failingUrl)
+
+                            if (!isConnected) {
+                                val errorType = when {
+                                    description.contains("disconnected", true) || description.contains("offline", true) || errorCode == ERROR_CONNECT -> "offline"
+                                    errorCode == ERROR_TIMEOUT -> "timeout"
+                                    else -> "offline"
+                                }
+                                loadErrorHtml(view, errorType, failingUrl)
+                            }
                         }
                     } catch (e: Throwable) {
                         e.printStackTrace()
@@ -906,10 +1247,32 @@ class BrowserViewModel(
                 ) {
                     try {
                         val failingUrl = error?.url ?: ""
-                        loadErrorHtml(view, "ssl", failingUrl)
-                        handler?.cancel()
+                        if (failingUrl.isNotEmpty()) {
+                            val host = try { android.net.Uri.parse(failingUrl).host } catch (e: Exception) { null }
+                            if (host != null && sslDomainsToIgnore.contains(host)) {
+                                handler?.proceed()
+                                return
+                            }
+                        }
+                        
+                        val webViewUrl = view?.url ?: ""
+                        val isMainFrame = if (failingUrl.isNotEmpty() && webViewUrl.isNotEmpty()) {
+                            val failingHost = try { android.net.Uri.parse(failingUrl).host } catch (e: Exception) { null }
+                            val webViewHost = try { android.net.Uri.parse(webViewUrl).host } catch (e: Exception) { null }
+                            failingHost != null && webViewHost != null && failingHost.equals(webViewHost, ignoreCase = true)
+                        } else {
+                            true // fallback can be true to handle errors gracefully
+                        }
+
+                        if (isMainFrame) {
+                            loadErrorHtml(view, "ssl", failingUrl)
+                            handler?.cancel()
+                        } else {
+                            handler?.proceed() // bypass subresource certificate issues smoothly
+                        }
                     } catch (e: Throwable) {
                         e.printStackTrace()
+                        handler?.cancel()
                     }
                 }
 
@@ -931,6 +1294,19 @@ class BrowserViewModel(
                         if (url.startsWith("orion://retry")) {
                             val queryUrl = request.url.getQueryParameter("url")
                             if (!queryUrl.isNullOrBlank()) {
+                                safeLoadUrl(view, queryUrl)
+                            } else {
+                                safeLoadUrl(view, "orion://newtab")
+                            }
+                            return true
+                        }
+                        if (url.startsWith("orion://proceed_ssl")) {
+                            val queryUrl = request.url.getQueryParameter("url")
+                            if (!queryUrl.isNullOrBlank()) {
+                                val host = try { android.net.Uri.parse(queryUrl).host } catch (e: Exception) { null }
+                                if (host != null) {
+                                    sslDomainsToIgnore.add(host)
+                                }
                                 safeLoadUrl(view, queryUrl)
                             } else {
                                 safeLoadUrl(view, "orion://newtab")
@@ -1025,26 +1401,16 @@ class BrowserViewModel(
                     resultMsg: android.os.Message?
                 ): Boolean {
                     val contextLocal = view!!.context
-                    val newWebView = WebView(contextLocal)
-                    
                     val newTabId = java.util.UUID.randomUUID().toString()
                     val isTabIncognito = _uiState.value.tabs.find { it.id == tabId }?.isIncognito == true
-                    
-                    applyWebViewSettings(
-                        newWebView,
-                        _uiState.value.isJavaScriptEnabled,
-                        _uiState.value.isHardwareAccelerationEnabled,
-                        false
-                    )
                     
                     val newTab = TabState(
                         id = newTabId,
                         url = "about:blank",
                         title = "Loading...",
-                        isIncognito = isTabIncognito
+                        isIncognito = isTabIncognito,
+                        parentTabId = tabId
                     )
-                    
-                    webViewMap[newTabId] = newWebView
                     
                     _uiState.update { state ->
                         state.copy(
@@ -1052,6 +1418,8 @@ class BrowserViewModel(
                             activeTabId = newTabId
                         )
                     }
+                    
+                    val newWebView = getOrCreateWebView(newTabId, contextLocal)
                     
                     val transport = resultMsg?.obj as? WebView.WebViewTransport
                     if (transport != null) {
@@ -1124,6 +1492,31 @@ class BrowserViewModel(
                         toggleToolbarsVisible()
                     }
                 }
+
+                @JavascriptInterface
+                fun requestNotificationPermission(origin: String) {
+                    viewModelScope.launch(Dispatchers.Main) {
+                        showNotificationPermissionDialog(origin)
+                    }
+                }
+
+                @JavascriptInterface
+                fun showWebNotification(origin: String, title: String, body: String) {
+                    viewModelScope.launch(Dispatchers.Main) {
+                        triggerWebNotification(origin, title, body)
+                    }
+                }
+
+                @JavascriptInterface
+                fun installWebStoreExtension(extensionId: String) {
+                    viewModelScope.launch(Dispatchers.Main) {
+                        val app = getApplication<Application>()
+                        android.widget.Toast.makeText(app, "Web Store 'Add to Chrome' captured. Installing...", android.widget.Toast.LENGTH_LONG).show()
+                        downloadChromeExtension(app, extensionId) { success, msg ->
+                            android.widget.Toast.makeText(app, msg, android.widget.Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
             }, "OrionJS")
         }
 
@@ -1164,6 +1557,9 @@ class BrowserViewModel(
             blockNetworkImage = false
             mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
             setGeolocationEnabled(true)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                safeBrowsingEnabled = true
+            }
             userAgentString = if (isDesktop) {
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             } else {
@@ -1289,6 +1685,13 @@ class BrowserViewModel(
                 loadHtml(webView, titleText, descText, iconSvg, failingUrl, extraContent)
             }
         } else {
+            if (errorType == "ssl") {
+                extraContent = """
+                    <div style="margin-top: 24px;">
+                        <a href="orion://proceed_ssl?url=${Uri.encode(failingUrl)}" style="color: #CF6679; text-decoration: none; font-size: 14px; font-weight: bold; border: 1.5px solid #CF6679; padding: 12px 24px; border-radius: 24px; display: inline-block; transition: all 0.2s ease;">Proceed anyway (unsafe)</a>
+                    </div>
+                """.trimIndent()
+            }
             loadHtml(webView, titleText, descText, iconSvg, failingUrl, extraContent)
         }
     }
@@ -1440,10 +1843,12 @@ class BrowserViewModel(
             """.trimIndent()
         ) { result ->
             val isAvailable = result?.toBoolean() ?: false
-            val activeId = _uiState.value.activeTabId
+            val webUrl = webView.url ?: ""
+            val isHttpOrHttps = webUrl.startsWith("http://", ignoreCase = true) || webUrl.startsWith("https://", ignoreCase = true)
+            val finalAvailable = isAvailable || isHttpOrHttps
             webViewMap.forEach { (id, view) ->
                 if (view == webView) {
-                    updateTabState(id) { it.copy(readerModeAvailable = isAvailable) }
+                    updateTabState(id) { it.copy(readerModeAvailable = finalAvailable) }
                 }
             }
         }
@@ -1456,10 +1861,33 @@ class BrowserViewModel(
         webView.evaluateJavascript(
             """
             (function() {
-                var title = document.title || "";
+                var title = "";
+                var h1 = document.querySelector('h1');
+                if (h1) title = h1.innerText;
+                if (!title) title = document.title || "";
+                
                 var author = "";
-                var authorEl = document.querySelector("[class*='author'], [id*='author'], rel='author'");
-                if (authorEl) author = authorEl.innerText;
+                var metaAuthor = document.querySelector('meta[name="author"]');
+                if (metaAuthor) author = metaAuthor.getAttribute('content');
+                if (!author) {
+                    var authorEl = document.querySelector("[class*='author'], [id*='author'], [rel='author']");
+                    if (authorEl) author = authorEl.innerText;
+                }
+                
+                var date = "";
+                var metaDate = document.querySelector('meta[property="article:published_time"], meta[name="publish-date"], meta[name="pubdate"]');
+                if (metaDate) date = metaDate.getAttribute('content');
+                if (!date) {
+                    var timeEl = document.querySelector('time');
+                    if (timeEl) date = timeEl.innerText || timeEl.getAttribute('datetime');
+                }
+                if (!date) {
+                    var dateEl = document.querySelector("[class*='date'], [class*='publish'], [id*='date']");
+                    if (dateEl) date = dateEl.innerText;
+                }
+
+                var origin = window.location.origin || "";
+                var domain = window.location.hostname || "";
                 
                 var container = document.querySelector('article');
                 if (!container) {
@@ -1481,46 +1909,105 @@ class BrowserViewModel(
                 var extractedHtml = "";
                 if (container) {
                     var clone = container.cloneNode(true);
-                    var toRemove = clone.querySelectorAll("script, style, nav, footer, header, form, iframe, .sidebar, .ads, [class*='ads'], [id*='ads']");
+                    var selector = "script, style, nav, footer, header, form, iframe, .sidebar, .ads, [class*='ads'], [id*='ads'], [class*='promo'], [id*='promo'], [class*='widget'], [id*='widget'], [class*='share'], [id*='share'], [class*='cookie'], [class*='popup'], [class*='social']";
+                    var toRemove = clone.querySelectorAll(selector);
                     toRemove.forEach(el => el.remove());
+                    
+                    var imgs = clone.querySelectorAll('img');
+                    imgs.forEach(img => {
+                        var src = img.getAttribute('src');
+                        var dataSrc = img.getAttribute('data-src') || img.getAttribute('data-original');
+                        if (dataSrc) src = dataSrc;
+                        if (src) {
+                            if (src.startsWith('//')) {
+                                img.setAttribute('src', 'https:' + src);
+                            } else if (src.startsWith('/')) {
+                                img.setAttribute('src', origin + src);
+                            } else if (!src.startsWith('http')) {
+                                var path = window.location.pathname;
+                                var basePath = path.substring(0, path.lastIndexOf('/') + 1);
+                                img.setAttribute('src', origin + basePath + src);
+                            } else {
+                                img.setAttribute('src', src);
+                            }
+                            img.style.maxWidth = "100%";
+                            img.style.height = "auto";
+                            img.style.borderRadius = "8px";
+                            img.style.margin = "12px 0";
+                            img.style.display = "block";
+                        } else {
+                            img.remove();
+                        }
+                    });
+                    
                     extractedHtml = clone.innerHTML;
                 } else {
                     var paras = Array.from(document.querySelectorAll('p')).map(p => p.outerHTML);
                     extractedHtml = paras.join("");
                 }
                 
-                return JSON.stringify({
+                if (!extractedHtml || extractedHtml.trim().length < 50) {
+                    var divs = Array.from(document.querySelectorAll('div')).filter(function(d) {
+                        var txt = d.innerText || "";
+                        return txt.trim().split(/\s+/).length > 50 && d.querySelectorAll('div').length < 3;
+                    });
+                    if (divs.length > 0) {
+                        extractedHtml = divs.map(function(d) { return "<p>" + (d.innerText || "") + "</p>"; }).join("");
+                    }
+                }
+                if (!extractedHtml || extractedHtml.trim().length < 50) {
+                    var bodyText = document.body ? (document.body.innerText || "") : "";
+                    var lines = bodyText.split(/\n\n+/).filter(function(l) { return l.trim().length > 30; });
+                    extractedHtml = lines.map(function(l) { return "<p>" + l.trim() + "</p>"; }).join("");
+                }
+                
+                var payload = JSON.stringify({
                     title: title,
                     author: author,
+                    date: date,
+                    domain: domain,
                     html: extractedHtml
                 });
+                try {
+                    return btoa(unescape(encodeURIComponent(payload)));
+                } catch(e) {
+                    return btoa(unescape(encodeURIComponent(JSON.stringify({
+                        title: title,
+                        author: author,
+                        date: date,
+                        domain: domain,
+                        html: "Error encoding content: " + e.message
+                    }))));
+                }
             })()
             """.trimIndent()
-        ) { extractedJson ->
+        ) { b64Result ->
             try {
-                // The returned string from evaluateJavascript is double-escaped JSON string inside quotes
-                val unescaped = extractedJson?.replace("\\\"", "\"")?.trim('\"') ?: ""
-                val regexTitle = "\"title\":\"(.*?)\"".toRegex()
-                val regexAuthor = "\"author\":\"(.*?)\"".toRegex()
-                val regexHtml = "\"html\":\"(.*)\"".toRegex()
-
-                val extractedTitle = regexTitle.find(unescaped)?.groups?.get(1)?.value ?: "Article"
-                val extractedAuthor = regexAuthor.find(unescaped)?.groups?.get(1)?.value ?: ""
-                val extractedHtml = regexHtml.find(unescaped)?.groups?.get(1)?.value
-                    ?.replace("\\n", "\n")
-                    ?.replace("\\t", "\t")
-                    ?.replace("\\/", "/") ?: "No text content found."
+                var cleaned = b64Result ?: ""
+                if (cleaned.startsWith("\"") && cleaned.endsWith("\"") && cleaned.length >= 2) {
+                    cleaned = cleaned.substring(1, cleaned.length - 1)
+                }
+                val decodedBytes = android.util.Base64.decode(cleaned, android.util.Base64.DEFAULT)
+                val decodedString = String(decodedBytes, Charsets.UTF_8)
+                
+                val jsonObject = org.json.JSONObject(decodedString)
+                val extractedTitle = jsonObject.optString("title", "Article")
+                val extractedAuthor = jsonObject.optString("author", "")
+                val extractedDate = jsonObject.optString("date", "")
+                val extractedDomain = jsonObject.optString("domain", "")
+                val extractedHtml = jsonObject.optString("html", "No text content found.")
 
                 _uiState.update {
                     it.copy(
                         readerModeTitle = extractedTitle,
                         readerModeAuthor = extractedAuthor.ifBlank { null },
+                        readerModeDate = extractedDate.ifBlank { null },
+                        readerModeDomain = extractedDomain.ifBlank { null },
                         readerModeContent = extractedHtml,
                         readerModeActive = true
                     )
                 }
             } catch (e: Exception) {
-                // Fallback direct text if regex fails
                 _uiState.update {
                     it.copy(
                         readerModeTitle = "Article Reader",
@@ -1654,6 +2141,405 @@ class BrowserViewModel(
         }
     }
 
+    // Web Notification and Permission Helper Methods
+    fun showNotificationPermissionDialog(origin: String) {
+        val currentOriginStatus = prefs.getString("site_perm_exception/notifications/$origin", "")
+        if (currentOriginStatus.isEmpty()) {
+            _notificationRequestOrigin.value = origin
+        }
+    }
+
+    fun handleNotificationPermissionResponse(origin: String, allowed: Boolean) {
+        prefs.setString("site_perm_exception/notifications/$origin", if (allowed) "Allow" else "Block")
+        _notificationRequestOrigin.value = null
+        if (allowed) {
+            triggerWebNotification(origin, "🔔 Notifications Allowed", "You will now receive notifications from $origin.")
+        }
+    }
+
+    fun triggerWebNotification(origin: String, title: String, body: String) {
+        val status = prefs.getString("site_perm_exception/notifications/$origin", "Ask")
+        // Check default if not set
+        val defaultGlobal = prefs.getString("site_perm_default/notifications", "Ask")
+        val isGranted = if (status.isNotEmpty()) status == "Allow" else defaultGlobal == "Allow" || defaultGlobal == "Ask"
+        if (!isGranted) return
+
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+            try {
+                val context = getApplication<Application>()
+                val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+                val channelId = "website_notifications_channel"
+
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                    val channel = android.app.NotificationChannel(
+                        channelId,
+                        "Website Push Notifications",
+                        android.app.NotificationManager.IMPORTANCE_HIGH
+                    ).apply {
+                        description = "Notifications received from websites"
+                        enableLights(true)
+                        enableVibration(true)
+                    }
+                    notificationManager.createNotificationChannel(channel)
+                }
+
+                val clickIntent = android.content.Intent(context, com.example.MainActivity::class.java).apply {
+                    action = android.content.Intent.ACTION_VIEW
+                    putExtra("NOTIFICATION_URL", if (origin.startsWith("http")) origin else "https://$origin")
+                    flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
+                }
+                val pendingFlags = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                    android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+                } else {
+                    android.app.PendingIntent.FLAG_UPDATE_CURRENT
+                }
+                val pendingIntent = android.app.PendingIntent.getActivity(context, System.currentTimeMillis().toInt(), clickIntent, pendingFlags)
+
+                val builder = androidx.core.app.NotificationCompat.Builder(context, channelId)
+                    .setSmallIcon(android.R.drawable.stat_notify_chat)
+                    .setContentTitle(title)
+                    .setContentText(body)
+                    .setSubText(origin)
+                    .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
+                    .setDefaults(androidx.core.app.NotificationCompat.DEFAULT_ALL)
+                    .setContentIntent(pendingIntent)
+                    .setAutoCancel(true)
+
+                notificationManager.notify(System.currentTimeMillis().toInt(), builder.build())
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    fun applyDarkReaderLiveFilters() {
+        val activeId = _uiState.value.activeTabId
+        val webView = webViewMap[activeId]
+        if (webView != null) {
+            val enabled = prefs.getBoolean("ext_dark_reader", false)
+            if (enabled) {
+                val brightness = prefs.getInt("ext_dark_reader_brightness", 90)
+                val contrast = prefs.getInt("ext_dark_reader_contrast", 100)
+                val sepia = prefs.getInt("ext_dark_reader_sepia", 0)
+                val grayscale = prefs.getInt("ext_dark_reader_grayscale", 0)
+                val filterString = "invert(90%) hue-rotate(180deg) brightness($brightness%) contrast($contrast%) sepia($sepia%) grayscale($grayscale%)"
+                val js = """
+                    (function() {
+                        var css = 'html { filter: $filterString !important; background: #121212 !important; } img, video, iframe, canvas, [style*="background-image"] { filter: invert(100%) hue-rotate(180deg) !important; }';
+                        var style = document.getElementById('dark-reader-ext');
+                        if (style) {
+                            style.innerHTML = css;
+                        } else {
+                            style = document.createElement('style');
+                            style.id = 'dark-reader-ext';
+                            style.type = 'text/css';
+                            style.appendChild(document.createTextNode(css));
+                            document.head.appendChild(style);
+                        }
+                    })()
+                """.trimIndent()
+                webView.evaluateJavascript(js, null)
+            } else {
+                val js = "var el = document.getElementById('dark-reader-ext'); if(el) el.remove();"
+                webView.evaluateJavascript(js, null)
+            }
+        }
+    }
+
+    // Chrome Extension manager helper methods
+    fun evaluateJavascriptOnActiveWebview(jsCode: String, onResult: ((String) -> Unit)? = null) {
+        val activeId = _uiState.value.activeTabId
+        val webView = webViewMap[activeId] ?: return
+        webView.post {
+            webView.evaluateJavascript(jsCode) { result ->
+                onResult?.invoke(result ?: "")
+            }
+        }
+    }
+
+    fun isExtensionEnabled(key: String): Boolean {
+        return prefs.getBoolean(key, key == "ext_adblock" || key == "ext_dark_reader" || key == "ext_grok_automation")
+    }
+
+    fun setExtensionEnabled(key: String, enabled: Boolean) {
+        prefs.setBoolean(key, enabled)
+
+        if (key == "ext_dark_reader") {
+            applyDarkReaderLiveFilters()
+        }
+    }
+
+    fun getCustomExtensionScript(): String {
+        return prefs.getString("ext_custom_script_code", "")
+    }
+
+    fun setCustomExtensionScript(code: String) {
+        prefs.setString("ext_custom_script_code", code)
+    }
+
+    fun getUploadedExtensionName(): String {
+        return prefs.getString("ext_uploaded_name", "No uploaded ZIP extension")
+    }
+
+    fun uninstallUploadedExtension() {
+        val uploadedId = prefs.getString("ext_uploaded_id", "")
+        prefs.setString("ext_uploaded_name", "No uploaded ZIP extension")
+        prefs.setString("ext_uploaded_id", "")
+        prefs.setString("ext_uploaded_script_code", "")
+        prefs.setBoolean("ext_uploaded_script_enabled", false)
+        
+        if (uploadedId.isNotEmpty()) {
+            viewModelScope.launch {
+                try {
+                    extensionManager.uninstallExtension(uploadedId)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+    }
+
+    fun getInstalledDbExtensions(): List<com.example.extensionengine.ParsedExtension> {
+        return extensionManager.engine.registry.getAllActiveExtensions()
+    }
+
+    fun uninstallDbExtension(id: String) {
+        viewModelScope.launch {
+            try {
+                extensionManager.uninstallExtension(id)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    fun exportExtension(extensionId: String, context: Context, onResult: (Boolean, String) -> Unit) {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val dbExt = extensionManager.engine.database.extensionDao().getExtensionById(extensionId)
+                val extName = dbExt?.name?.replace("[^a-zA-Z0-9]".toRegex(), "_") ?: "extension"
+                val extensionDir = com.example.extensionengine.ExtensionDirectoryResolver.getExtensionDir(context, extensionId, dbExt?.name)
+                if (!extensionDir.exists() || !extensionDir.isDirectory) {
+                    throw Exception("Extension source files do not exist.")
+                }
+                
+                val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+                if (downloadsDir != null && !downloadsDir.exists()) {
+                    downloadsDir.mkdirs()
+                }
+                
+                val zipFileName = "${extName}_${extensionId}_export.zip"
+                val destinationZipFile = java.io.File(downloadsDir, zipFileName)
+                
+                java.io.FileOutputStream(destinationZipFile).use { fos ->
+                    java.util.zip.ZipOutputStream(fos).use { zos ->
+                        zipDirectory(extensionDir, extensionDir, zos)
+                    }
+                }
+                
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onResult(true, "Exported successfully to Downloads/$zipFileName")
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onResult(false, "Export failed: ${e.localizedMessage}")
+                }
+            }
+        }
+    }
+
+    fun shareExtension(extensionId: String, context: Context) {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val app = context.applicationContext
+            try {
+                val dbExt = extensionManager.engine.database.extensionDao().getExtensionById(extensionId)
+                val extName = dbExt?.name?.replace("[^a-zA-Z0-9]".toRegex(), "_") ?: "extension"
+                val extensionDir = com.example.extensionengine.ExtensionDirectoryResolver.getExtensionDir(app, extensionId, dbExt?.name)
+                
+                if (!extensionDir.exists() || !extensionDir.isDirectory) {
+                    throw Exception("Extension files not found.")
+                }
+                
+                // Save zip in external files directory to match file_paths provider config
+                val shareFile = java.io.File(app.getExternalFilesDir(null), "share_${extName}_$extensionId.zip")
+                if (shareFile.exists()) shareFile.delete()
+                
+                java.io.FileOutputStream(shareFile).use { fos ->
+                    java.util.zip.ZipOutputStream(fos).use { zos ->
+                        zipDirectory(extensionDir, extensionDir, zos)
+                    }
+                }
+                
+                val uri = androidx.core.content.FileProvider.getUriForFile(
+                    app,
+                    "${app.packageName}.provider",
+                    shareFile
+                )
+                
+                val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                    type = "application/zip"
+                    putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                    putExtra(android.content.Intent.EXTRA_SUBJECT, "Share Extension: ${dbExt?.name ?: extensionId}")
+                    putExtra(android.content.Intent.EXTRA_TEXT, "Here is the Chrome Extension: ${dbExt?.name ?: extensionId} (from Orion Browser)")
+                    addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                
+                val chooserIntent = android.content.Intent.createChooser(intent, "Share Extension via").apply {
+                    addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                
+                app.startActivity(chooserIntent)
+            } catch (e: Exception) {
+                e.printStackTrace()
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    android.widget.Toast.makeText(app, "Share failed: ${e.localizedMessage}", android.widget.Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    private fun zipDirectory(rootFolder: java.io.File, sourceFolder: java.io.File, zos: java.util.zip.ZipOutputStream) {
+        val files = sourceFolder.listFiles() ?: return
+        for (file in files) {
+            if (file.isDirectory) {
+                zipDirectory(rootFolder, file, zos)
+            } else {
+                val relativePath = file.absolutePath.substring(rootFolder.absolutePath.length + 1)
+                val entry = java.util.zip.ZipEntry(relativePath)
+                zos.putNextEntry(entry)
+                file.inputStream().use { fis ->
+                    fis.copyTo(zos)
+                }
+                zos.closeEntry()
+            }
+        }
+    }
+
+    fun loadExtensionFromZip(context: Context, uri: android.net.Uri, onResult: (Boolean, String) -> Unit) {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+            try {
+                val parsed = extensionManager.installExtension(uri)
+                prefs.setString("ext_uploaded_id", parsed.id)
+                prefs.setString("ext_uploaded_name", parsed.name)
+                prefs.setBoolean("ext_uploaded_script_enabled", true)
+                onResult(true, "Installed '${parsed.name}' successfully!")
+            } catch (e: Exception) {
+                e.printStackTrace()
+                onResult(false, "Failed to load extension: ${e.localizedMessage}")
+            }
+        }
+    }
+
+    fun downloadChromeExtension(context: Context, extensionId: String, onResult: (Boolean, String) -> Unit) {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            var downloadSuccess = false
+            var errorMsg = ""
+            val app = context.applicationContext
+            
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                android.widget.Toast.makeText(app, "Connecting to Chrome Web Store...", android.widget.Toast.LENGTH_SHORT).show()
+            }
+            
+            val tempFile = java.io.File(app.cacheDir, "temp_webstore_${extensionId}.crx")
+            if (tempFile.exists()) {
+                tempFile.delete()
+            }
+            
+            // Try url 1
+            val urls = listOf(
+                "https://clients2.google.com/service/update2/crx?response=redirect&acceptformat=crx2,crx3&prodversion=114.0&x=id%3D${extensionId}%26installsource%3Dondemand%26uc",
+                "https://clients2.google.com/service/update2/crx?response=redirect&os=win&arch=x86-64&nacl_arch=x86-64&prod=chromecrx&prodchannel=stable&prodversion=114.0&acceptformat=crx2,crx3&x=id%3D${extensionId}%26uc"
+            )
+            
+            for (url in urls) {
+                try {
+                    val req = okhttp3.Request.Builder()
+                        .url(url)
+                        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
+                        .build()
+                    
+                    okHttpClient.newCall(req).execute().use { response ->
+                        if (response.isSuccessful) {
+                            val body = response.body
+                            if (body != null) {
+                                val contentLength = body.contentLength()
+                                val inputStream = body.byteStream()
+                                val output = java.io.FileOutputStream(tempFile)
+                                
+                                val buffer = ByteArray(8192)
+                                var bytesRead: Long = 0
+                                var lastProgress = -1
+                                
+                                output.use { fos ->
+                                    inputStream.use { fis ->
+                                        var count = fis.read(buffer)
+                                        while (count != -1) {
+                                            fos.write(buffer, 0, count)
+                                            bytesRead += count
+                                            
+                                            if (contentLength > 0) {
+                                                val progress = ((bytesRead * 100) / contentLength).toInt()
+                                                if (progress != lastProgress && (progress % 20 == 0 || progress == 100)) {
+                                                    lastProgress = progress
+                                                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                                        android.widget.Toast.makeText(app, "Downloading: $progress%", android.widget.Toast.LENGTH_SHORT).show()
+                                                    }
+                                                }
+                                            }
+                                            count = fis.read(buffer)
+                                        }
+                                    }
+                                }
+                                
+                                if (contentLength > 0 && bytesRead != contentLength) {
+                                    tempFile.delete()
+                                    errorMsg = "Partial download: got $bytesRead of $contentLength"
+                                } else if (bytesRead == 0L) {
+                                    tempFile.delete()
+                                    errorMsg = "Downloaded file was empty"
+                                } else {
+                                    downloadSuccess = true
+                                }
+                            } else {
+                                errorMsg = "Null response body"
+                            }
+                        } else {
+                            errorMsg = "HTTP ${response.code}"
+                        }
+                    }
+                    if (downloadSuccess) break
+                } catch (e: Exception) {
+                    errorMsg = e.localizedMessage ?: "Unknown network error"
+                }
+            }
+            
+            if (!downloadSuccess || !tempFile.exists()) {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onResult(false, "Download failed: $errorMsg")
+                }
+                return@launch
+            }
+            
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                try {
+                    val parsed = extensionManager.installExtension(Uri.fromFile(tempFile))
+                    prefs.setString("ext_uploaded_id", parsed.id)
+                    prefs.setString("ext_uploaded_name", parsed.name)
+                    prefs.setBoolean("ext_uploaded_script_enabled", true)
+                    
+                    if (tempFile.exists()) {
+                        tempFile.delete()
+                    }
+                    onResult(true, "Installed '${parsed.name}' from Web Store!")
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    onResult(false, "Failed to load unpacked extension: ${e.localizedMessage}")
+                }
+            }
+        }
+    }
+
     // Dynamic checks
     fun clearWebViewCache(context: Context) {
         // Clear all web cache
@@ -1699,16 +2585,146 @@ class BrowserViewModel(
 
     fun safeLoadUrl(webView: android.webkit.WebView?, url: String) {
         if (webView == null) return
-        val trimmed = url.trim()
+        var trimmed = url.trim()
         if (trimmed.isEmpty()) return
+
+        // Mobile layout enforcement
+        val activeId = _uiState.value.activeTabId
+        val tab = _uiState.value.tabs.find { it.id == activeId }
+        val isDesktop = tab?.isDesktopMode == true
+        if (!isDesktop && !trimmed.startsWith("orion://") && !trimmed.startsWith("about:") && !trimmed.contains("translate.google.com")) {
+            trimmed = enforceMobileUrl(trimmed)
+        }
         
+        val finalUrl = trimmed
         webView.post {
             try {
-                webView.loadUrl(trimmed)
+                webView.loadUrl(finalUrl)
             } catch (e: Exception) {
                 e.printStackTrace()
             }
         }
+    }
+
+    fun triggerTranslationSelection() {
+        val activeId = _uiState.value.activeTabId
+        val webView = webViewMap[activeId] ?: return
+        val currentUrl = webView.url ?: ""
+        if (currentUrl.isEmpty() || currentUrl.startsWith("orion://") || currentUrl.startsWith("about:")) return
+
+        _uiState.update { 
+            it.copy(
+                showTranslateBar = true,
+                originalTranslationUrl = if (!it.isPageTranslated) currentUrl else it.originalTranslationUrl
+            )
+        }
+    }
+
+    fun dismissTranslateBar() {
+        _uiState.update { it.copy(showTranslateBar = false) }
+    }
+
+    fun undoTranslation() {
+        val activeId = _uiState.value.activeTabId
+        val webView = webViewMap[activeId] ?: return
+        _uiState.update { 
+            it.copy(
+                isPageTranslated = false,
+                showTranslateBar = true
+            )
+        }
+        webView.post {
+            webView.reload()
+        }
+    }
+
+    fun executeGoogleTranslation(langCode: String, langName: String) {
+        val activeId = _uiState.value.activeTabId
+        val webView = webViewMap[activeId] ?: return
+        val currentUrl = webView.url ?: ""
+        if (currentUrl.isEmpty() || currentUrl.startsWith("orion://") || currentUrl.startsWith("about:")) return
+
+        val originalUrl = if (!_uiState.value.isPageTranslated) currentUrl else _uiState.value.originalTranslationUrl
+        
+        _uiState.update { 
+            it.copy(
+                isPageTranslated = true,
+                translateTargetLang = langName,
+                translateTargetLangCode = langCode,
+                originalTranslationUrl = originalUrl,
+                showTranslateBar = true
+            )
+        }
+
+        val jsScript = """
+            (function() {
+                var existingCombo = document.querySelector('select.goog-te-combo');
+                if (existingCombo) {
+                    existingCombo.value = '$langCode';
+                    existingCombo.dispatchEvent(new Event('change'));
+                    return "re-translated";
+                }
+                
+                var container = document.createElement('div');
+                container.id = 'google_translate_element';
+                container.style.display = 'none';
+                document.body.appendChild(container);
+                
+                window.googleTranslateElementInit = function() {
+                    new google.translate.TranslateElement({
+                        pageLanguage: 'auto',
+                        layout: google.translate.TranslateElement.InlineLayout.SIMPLE,
+                        autoDisplay: false
+                    }, 'google_translate_element');
+                    
+                    var checkInterval = setInterval(function() {
+                        var combo = document.querySelector('select.goog-te-combo');
+                        if (combo) {
+                            clearInterval(checkInterval);
+                            combo.value = '$langCode';
+                            combo.dispatchEvent(new Event('change'));
+                        }
+                    }, 150);
+                };
+                
+                var tag = document.createElement('script');
+                tag.type = 'text/javascript';
+                tag.src = 'https://translate.google.com/translate_a/element.js?cb=googleTranslateElementInit';
+                document.body.appendChild(tag);
+                return "injected";
+            })()
+        """.trimIndent()
+
+        webView.post {
+            webView.evaluateJavascript(jsScript, null)
+        }
+    }
+
+    fun translateActivePage(targetLangCode: String) {
+        val languagesMap = mapOf(
+            "hi" to "Hindi",
+            "es" to "Spanish",
+            "fr" to "French",
+            "de" to "German",
+            "en" to "English",
+            "ja" to "Japanese",
+            "ar" to "Arabic",
+            "bn" to "Bengali",
+            "pt" to "Portuguese",
+            "ru" to "Russian",
+            "zh-CN" to "Chinese Simplified",
+            "ur" to "Urdu",
+            "tr" to "Turkish",
+            "te" to "Telugu",
+            "mr" to "Marathi",
+            "ta" to "Tamil",
+            "gu" to "Gujarati",
+            "kn" to "Kannada",
+            "ml" to "Malayalam",
+            "pa" to "Punjabi"
+        )
+        val langName = languagesMap[targetLangCode] ?: targetLangCode
+        executeGoogleTranslation(targetLangCode, langName)
     }
 
     private fun getSelectedSearchEngine(): String {
@@ -1815,6 +2831,22 @@ class BrowserViewModel(
         _uiState.update { it.copy(isDownloadsOpen = isOpen) }
     }
 
+    fun openLocalFile(filePath: String, fileName: String, mimeType: String) {
+        _uiState.update {
+            it.copy(
+                activeViewerFile = ActiveViewerFile(filePath, fileName, mimeType),
+                isDownloadsOpen = false
+            )
+        }
+    }
+
+    fun closeLocalFile() {
+        stopBackgroundAudio()
+        _uiState.update {
+            it.copy(activeViewerFile = null)
+        }
+    }
+
     fun deleteDownload(downloadId: Long) {
         viewModelScope.launch {
             try {
@@ -1876,7 +2908,13 @@ class BrowserViewModel(
     fun handleBackNavigation(onShowExitToast: () -> Unit): Boolean {
         val currentState = _uiState.value
         
-        // 1. If settings overlay is open
+        // 1. If active local file viewer is open
+        if (currentState.activeViewerFile != null) {
+            closeLocalFile()
+            return true
+        }
+        
+        // 2. If settings overlay is open
         if (currentState.isSettingsOpen) {
             return false // Let nested settings handle it
         }
@@ -1911,11 +2949,26 @@ class BrowserViewModel(
             return true
         }
 
+        // 6.5. If reader mode is active, close reader mode
+        if (currentState.readerModeActive) {
+            closeReaderMode()
+            return true
+        }
+
         // 7. If current web tab can go back in WebView history
         val activeId = currentState.activeTabId
         val webView = webViewMap[activeId]
         if (webView != null && webView.canGoBack()) {
             webView.goBack()
+            return true
+        }
+
+        // 7.5. Switch to parent tab if this was opened as a child tab from a link click
+        val currentTab = currentState.tabs.find { it.id == activeId }
+        val parentId = currentTab?.parentTabId
+        if (parentId != null && currentState.tabs.any { it.id == parentId }) {
+            selectTab(parentId)
+            closeTab(activeId)
             return true
         }
         
@@ -2114,7 +3167,18 @@ class BrowserViewModel(
         val currentTab = _uiState.value.tabs.find { it.id == activeId } ?: return
         val webView = webViewMap[activeId] ?: return
         val currentUrl = webView.url ?: currentTab.url
-        if (currentUrl.isEmpty() || currentUrl.startsWith("orion://") || currentUrl.startsWith("about:")) return
+        if (currentUrl.isEmpty() || currentUrl.startsWith("orion://") || currentUrl.startsWith("about:")) {
+            val newMode = !currentTab.isDesktopMode
+            updateTabState(activeId) {
+                it.copy(isDesktopMode = newMode)
+            }
+            webView.settings.userAgentString = if (newMode) {
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Safari/537.36"
+            } else {
+                "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Mobile Safari/537.36"
+            }
+            return
+        }
 
         val domain = Uri.parse(currentUrl).host ?: return
         val currentMode = domainDesktopMap[domain] ?: false
@@ -2138,7 +3202,14 @@ class BrowserViewModel(
             it.copy(isDesktopMode = newMode)
         }
 
-        webView.reload()
+        // Smart redirect to mobile or desktop URL depending on the toggle
+        val redirectUrl = if (newMode) enforceDesktopUrl(currentUrl) else enforceMobileUrl(currentUrl)
+
+        if (redirectUrl != currentUrl) {
+            webView.loadUrl(redirectUrl)
+        } else {
+            webView.reload()
+        }
     }
 
     private var feedJob: kotlinx.coroutines.Job? = null
@@ -2300,18 +3371,125 @@ class BrowserViewModel(
     }
 
     // TTS Control Methods
+    private fun setupTtsProgressListener() {
+        ttsEngine?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) {}
+
+            override fun onDone(utteranceId: String?) {
+                viewModelScope.launch(Dispatchers.Main) {
+                    playNextTtsSegment()
+                }
+            }
+
+            override fun onError(utteranceId: String?) {}
+        })
+    }
+
+    fun playTtsSegment(index: Int) {
+        if (index < 0 || index >= ttsSegments.size) {
+            stopTtsPlayback()
+            return
+        }
+        currentTtsSegmentIndex = index
+        val textToSpeak = ttsSegments[index]
+        
+        _uiState.update { 
+            it.copy(
+                currentTtsText = textToSpeak,
+                currentTtsIndex = index,
+                isTtsActive = true,
+                isTtsPlaying = true
+            ) 
+        }
+        
+        ttsEngine?.setSpeechRate(_uiState.value.ttsSpeed)
+        val params = android.os.Bundle()
+        params.putString(android.speech.tts.TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, "segment_$index")
+        ttsEngine?.speak(textToSpeak, android.speech.tts.TextToSpeech.QUEUE_FLUSH, params, "segment_$index")
+    }
+
+    fun playNextTtsSegment() {
+        if (currentTtsSegmentIndex + 1 < ttsSegments.size) {
+            playTtsSegment(currentTtsSegmentIndex + 1)
+        } else {
+            stopTtsPlayback()
+        }
+    }
+
+    fun playPreviousTtsSegment() {
+        if (currentTtsSegmentIndex - 1 >= 0) {
+            playTtsSegment(currentTtsSegmentIndex - 1)
+        } else {
+            playTtsSegment(currentTtsSegmentIndex)
+        }
+    }
+
     fun startListeningToPageText() {
         val activeId = _uiState.value.activeTabId
         val webView = webViewMap[activeId] ?: return
-        webView.evaluateJavascript("document.body.innerText") { result ->
-            val cleanResult = result?.trim()
-                ?.removePrefix("\"")?.removeSuffix("\"")
-                ?.replace("\\n", " ")?.replace("\\\"", "\"")
-                ?.replace("\\\\", "\\") ?: ""
-            if (cleanResult.isNotBlank() && cleanResult != "null") {
-                _uiState.update { it.copy(isTtsActive = true, isTtsPlaying = true) }
-                ttsEngine?.setSpeechRate(_uiState.value.ttsSpeed)
-                ttsEngine?.speak(cleanResult.take(6000), android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, "swift_tts")
+        
+        val js = """
+            (function() {
+                var articleContent = "";
+                var mainElement = document.querySelector('article, main, .main-content, #main-content, .post, .entry-content');
+                if (mainElement) { articleContent = mainElement.innerText; }
+                if (!articleContent || articleContent.trim().length < 200) {
+                    var paragraphs = document.querySelectorAll('p');
+                    var pTexts = [];
+                    paragraphs.forEach(function(p) {
+                        var text = p.innerText.trim();
+                        if (text.length > 20) { pTexts.push(text); }
+                    });
+                    articleContent = pTexts.join("\n\n");
+                }
+                if (!articleContent || articleContent.trim().length < 100) {
+                    articleContent = document.body.innerText;
+                }
+                return articleContent;
+            })()
+        """.trimIndent()
+        
+        webView.evaluateJavascript(js) { result ->
+            val cleanResult = if (result != null && result.startsWith("\"") && result.endsWith("\"")) {
+                try {
+                    org.json.JSONTokener(result).nextValue() as? String ?: result
+                } catch (e: Exception) {
+                    result
+                }
+            } else {
+                result ?: ""
+            }
+            
+            val trimmedText = cleanResult.trim()
+                .replace("\\n", "\n")
+                .replace("\\t", "\t")
+                .replace("\\\"", "\"")
+                .replace("\\\\", "\\")
+            
+            if (trimmedText.isNotBlank() && trimmedText != "null") {
+                val sentences = trimmedText.split(Regex("(?<=[.!?])\\s+"))
+                    .map { it.trim().replace(Regex("\\s+"), " ") }
+                    .filter { it.isNotBlank() && it.length > 3 }
+                
+                if (sentences.isNotEmpty()) {
+                    ttsSegments = sentences
+                    currentTtsSegmentIndex = 0
+                    
+                    _uiState.update { 
+                        it.copy(
+                            isTtsActive = true, 
+                            isTtsPlaying = true,
+                            currentTtsText = sentences[0],
+                            currentTtsIndex = 0,
+                            totalTtsSegments = sentences.size
+                        ) 
+                    }
+                    
+                    setupTtsProgressListener()
+                    playTtsSegment(0)
+                } else {
+                    android.widget.Toast.makeText(getApplication(), "No read-aloud sentences found on this page.", android.widget.Toast.LENGTH_SHORT).show()
+                }
             } else {
                 android.widget.Toast.makeText(getApplication(), "No text content found on this webpage.", android.widget.Toast.LENGTH_SHORT).show()
             }
@@ -2324,18 +3502,25 @@ class BrowserViewModel(
             ttsEngine?.stop()
             _uiState.update { it.copy(isTtsPlaying = false) }
         } else {
-            startListeningToPageText()
+            if (ttsSegments.isNotEmpty() && currentTtsSegmentIndex in ttsSegments.indices) {
+                playTtsSegment(currentTtsSegmentIndex)
+            } else {
+                startListeningToPageText()
+            }
         }
     }
 
     fun stopTtsPlayback() {
         ttsEngine?.stop()
-        _uiState.update { it.copy(isTtsActive = false, isTtsPlaying = false) }
+        _uiState.update { it.copy(isTtsActive = false, isTtsPlaying = false, currentTtsText = "", currentTtsIndex = 0, totalTtsSegments = 0) }
     }
 
     fun setTtsSpeechRate(speed: Float) {
         _uiState.update { it.copy(ttsSpeed = speed) }
         ttsEngine?.setSpeechRate(speed)
+        if (_uiState.value.isTtsPlaying && ttsSegments.isNotEmpty() && currentTtsSegmentIndex in ttsSegments.indices) {
+            playTtsSegment(currentTtsSegmentIndex)
+        }
     }
 
     // Tab Grouping & Group States
@@ -2599,8 +3784,274 @@ class BrowserViewModel(
         }
     }
 
+    fun closeLocalViewer() {
+        _uiState.update { it.copy(activeViewerFile = null) }
+        stopBackgroundAudio()
+    }
+
+    // Continuous music / background playback player
+    private var mediaPlayer: android.media.MediaPlayer? = null
+    
+    val isMediaPlaying = androidx.compose.runtime.mutableStateOf(false)
+    val mediaDuration = androidx.compose.runtime.mutableIntStateOf(0)
+    val mediaPosition = androidx.compose.runtime.mutableIntStateOf(0)
+    val mediaTrackName = androidx.compose.runtime.mutableStateOf("")
+    val isShuffleEnabled = androidx.compose.runtime.mutableStateOf(false)
+    val isRepeatEnabled = androidx.compose.runtime.mutableStateOf(false)
+    
+    fun initAudioPlayer(filePath: String, trackName: String) {
+        try {
+            mediaPlayer?.release()
+            mediaPlayer = android.media.MediaPlayer().apply {
+                setDataSource(filePath)
+                prepare()
+                start()
+                isLooping = isRepeatEnabled.value
+            }
+            isMediaPlaying.value = true
+            mediaDuration.value = mediaPlayer?.duration ?: 0
+            mediaTrackName.value = trackName
+            
+            // Start position slider tracker
+            startAudioTicker()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+    
+    private fun startAudioTicker() {
+        viewModelScope.launch {
+            while (isMediaPlaying.value) {
+                mediaPosition.value = mediaPlayer?.currentPosition ?: 0
+                kotlinx.coroutines.delay(1000)
+            }
+        }
+    }
+    
+    fun toggleAudioPlayback() {
+        mediaPlayer?.let { player ->
+            if (player.isPlaying) {
+                player.pause()
+                isMediaPlaying.value = false
+            } else {
+                player.start()
+                isMediaPlaying.value = true
+                startAudioTicker()
+            }
+        }
+    }
+    
+    fun seekAudioTo(position: Int) {
+        mediaPlayer?.seekTo(position)
+        mediaPosition.value = position
+    }
+    
+    fun toggleShuffle() {
+        isShuffleEnabled.value = !isShuffleEnabled.value
+    }
+    
+    fun toggleRepeat() {
+        isRepeatEnabled.value = !isRepeatEnabled.value
+        mediaPlayer?.isLooping = isRepeatEnabled.value
+    }
+    
+    fun stopBackgroundAudio() {
+        try {
+            mediaPlayer?.stop()
+            mediaPlayer?.release()
+            mediaPlayer = null
+            isMediaPlaying.value = false
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun deleteDownloads(downloadIds: Set<Long>) {
+        viewModelScope.launch {
+            val dm = getApplication<Application>().getSystemService(Context.DOWNLOAD_SERVICE) as android.app.DownloadManager
+            downloadIds.forEach { id ->
+                try {
+                    dm.remove(id)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+                repository.deleteDownloadFromDb(id)
+            }
+        }
+    }
+
+    fun renameDownloadFile(downloadId: Long, oldName: String, newName: String): Boolean {
+        try {
+            val downloadDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+            val oldFile = java.io.File(downloadDir, oldName)
+            val newFile = java.io.File(downloadDir, newName)
+            if (oldFile.exists() && !newFile.exists()) {
+                val success = oldFile.renameTo(newFile)
+                if (success) {
+                    viewModelScope.launch {
+                        repository.updateDownloadFileNameInDb(downloadId, newName)
+                    }
+                    return true
+                }
+            } else if (oldFile.exists() && newFile.exists()) {
+                return false
+            } else {
+                viewModelScope.launch {
+                    repository.updateDownloadFileNameInDb(downloadId, newName)
+                }
+                return true
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return false
+    }
+
+    private fun enforceMobileUrl(url: String): String {
+        try {
+            val uri = android.net.Uri.parse(url)
+            val host = uri.host ?: return url
+            val newHost = when {
+                (host == "youtube.com" || host == "www.youtube.com") && !uri.path.orEmpty().contains("embed") -> "m.youtube.com"
+                host == "facebook.com" || host == "www.facebook.com" -> "m.facebook.com"
+                host == "twitter.com" || host == "www.twitter.com" -> "mobile.twitter.com"
+                (host.contains("wikipedia.org") && !host.contains(".m.wikipedia.org")) -> {
+                    if (host == "wikipedia.org") {
+                        "m.wikipedia.org"
+                    } else {
+                        val parts = host.split(".")
+                        if (parts.size == 3 && parts[0] != "www" && parts[1] == "wikipedia") {
+                            "${parts[0]}.m.wikipedia.org"
+                        } else {
+                            null
+                        }
+                    }
+                }
+                else -> null
+            }
+            if (newHost != null && newHost != host) {
+                var builder = uri.buildUpon().authority(newHost)
+                if (newHost == "m.youtube.com" && url.contains("app=desktop")) {
+                    builder = builder.clearQuery()
+                    uri.queryParameterNames.forEach { name ->
+                        if (name == "app") {
+                            builder.appendQueryParameter(name, "m")
+                        } else {
+                            uri.getQueryParameters(name).forEach { value ->
+                                builder.appendQueryParameter(name, value)
+                            }
+                        }
+                    }
+                }
+                return builder.build().toString()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return url
+    }
+
+    private fun enforceDesktopUrl(url: String): String {
+        try {
+            val uri = android.net.Uri.parse(url)
+            val host = uri.host ?: return url
+            val newHost = when {
+                host == "m.youtube.com" -> "www.youtube.com"
+                host == "m.facebook.com" -> "www.facebook.com"
+                host == "mobile.twitter.com" -> "www.twitter.com"
+                host.contains(".m.wikipedia.org") -> host.replace(".m.wikipedia.org", ".wikipedia.org")
+                else -> null
+            }
+            if (newHost != null && newHost != host) {
+                return uri.buildUpon().authority(newHost).build().toString()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return url
+    }
+
+    // com.example.extensionengine.BrowserDelegate implementations
+    override fun queryTabs(queryInfo: org.json.JSONObject): org.json.JSONArray {
+        val array = org.json.JSONArray()
+        val tabs = uiState.value.tabs
+        val activeId = uiState.value.activeTabId
+        tabs.forEach { tab ->
+            val obj = org.json.JSONObject()
+            obj.put("id", tab.id)
+            obj.put("url", tab.url)
+            obj.put("title", tab.title)
+            obj.put("active", tab.id == activeId)
+            array.put(obj)
+        }
+        return array
+    }
+
+    override fun createTab(url: String, active: Boolean) {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+            addNewTab(url = url)
+        }
+    }
+
+    override fun removeTab(tabId: String) {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+            closeTab(tabId)
+        }
+    }
+
+    override fun reloadTab(tabId: String) {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+            val activeId = uiState.value.activeTabId
+            if (tabId == activeId || tabId.isBlank()) {
+                reload()
+            }
+        }
+    }
+
+    override fun updateTab(tabId: String, url: String) {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+            val activeId = uiState.value.activeTabId
+            if (tabId == activeId || tabId.isBlank()) {
+                navigateTo(url)
+            }
+        }
+    }
+
+    override fun showNotification(title: String, message: String) {
+        android.widget.Toast.makeText(getApplication(), "[$title] $message", android.widget.Toast.LENGTH_LONG).show()
+    }
+
+    override fun downloadFile(url: String, filename: String?) {
+        try {
+            val dm = getApplication<Application>().getSystemService(Context.DOWNLOAD_SERVICE) as android.app.DownloadManager
+            val req = android.app.DownloadManager.Request(android.net.Uri.parse(url)).apply {
+                setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                if (filename != null) {
+                    setDestinationInExternalPublicDir(android.os.Environment.DIRECTORY_DOWNLOADS, filename)
+                }
+            }
+            dm.enqueue(req)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    override fun getActiveTabId(): String? {
+        return uiState.value.activeTabId
+    }
+
+    override fun executeScriptOnTab(tabId: String, code: String, callback: (String?) -> Unit) {
+        callback(null)
+    }
+
     override fun onCleared() {
         super.onCleared()
+        stopBackgroundAudio()
+        try {
+            extensionManager.shutdown()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
         try {
             ttsEngine?.stop()
             ttsEngine?.shutdown()

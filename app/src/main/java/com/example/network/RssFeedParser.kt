@@ -55,19 +55,55 @@ object RssFeedParser {
                                     "link" -> currentItemLink = parser.nextText()
                                     "pubdate" -> currentItemPubDate = parser.nextText()
                                     "description" -> {
-                                        currentItemDesc = stripHtml(parser.nextText())
+                                        val rawDesc = parser.nextText() ?: ""
+                                        if (currentItemImg.isEmpty()) {
+                                            val imgRegex = Regex("<img[^>]+src=(?:\"([^\"]+)\"|'([^']+)'|([^\\s>]+))", RegexOption.IGNORE_CASE)
+                                            val match = imgRegex.find(rawDesc)
+                                            if (match != null) {
+                                                val url = (match.groupValues[1].ifBlank { match.groupValues[2].ifBlank { match.groupValues[3] } }).trim()
+                                                if (url.isNotEmpty()) {
+                                                    currentItemImg = if (url.startsWith("//")) "https:$url" else url
+                                                }
+                                            }
+                                        }
+                                        currentItemDesc = stripHtml(rawDesc)
                                     }
                                     "source" -> currentItemSource = parser.nextText()
                                     "enclosure" -> {
-                                        val attrUrl = parser.getAttributeValue(null, "url")
+                                        var attrUrl: String? = null
+                                        for (i in 0 until parser.attributeCount) {
+                                            if (parser.getAttributeName(i).lowercase() == "url") {
+                                                attrUrl = parser.getAttributeValue(i)
+                                                break
+                                            }
+                                        }
                                         if (!attrUrl.isNullOrEmpty()) {
-                                            currentItemImg = attrUrl
+                                            currentItemImg = if (attrUrl.startsWith("//")) "https:$attrUrl" else attrUrl
                                         }
                                     }
-                                    "media:content", "content" -> {
-                                        val attrUrl = parser.getAttributeValue(null, "url")
+                                    "media:content", "content", "media:thumbnail", "thumbnail", "media:image", "image" -> {
+                                        var attrUrl: String? = null
+                                        for (i in 0 until parser.attributeCount) {
+                                            if (parser.getAttributeName(i).lowercase() == "url") {
+                                                attrUrl = parser.getAttributeValue(i)
+                                                break
+                                            }
+                                        }
                                         if (!attrUrl.isNullOrEmpty()) {
-                                            currentItemImg = attrUrl
+                                            currentItemImg = if (attrUrl.startsWith("//")) "https:$attrUrl" else attrUrl
+                                        }
+                                    }
+                                    "content:encoded", "encoded" -> {
+                                        val rawContent = parser.nextText() ?: ""
+                                        if (currentItemImg.isEmpty()) {
+                                            val imgRegex = Regex("<img[^>]+src=(?:\"([^\"]+)\"|'([^']+)'|([^\\s>]+))", RegexOption.IGNORE_CASE)
+                                            val match = imgRegex.find(rawContent)
+                                            if (match != null) {
+                                                val url = (match.groupValues[1].ifBlank { match.groupValues[2].ifBlank { match.groupValues[3] } }).trim()
+                                                if (url.isNotEmpty()) {
+                                                    currentItemImg = if (url.startsWith("//")) "https:$url" else url
+                                                }
+                                            }
                                         }
                                     }
                                 }
