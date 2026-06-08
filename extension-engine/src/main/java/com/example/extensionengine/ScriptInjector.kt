@@ -1,16 +1,23 @@
 package com.example.extensionengine
 
-import android.webkit.WebView
+/**
+ * Interface that abstracts dynamic script/code compilation targets.
+ * Decouples extension content injections from platform-specific WebViews.
+ */
+interface ScriptEvaluator {
+    fun evaluateJavascript(code: String, callback: ((String?) -> Unit)? = null)
+    fun post(action: () -> Unit)
+}
 
 class ScriptInjector {
 
     /**
-     * Physically runs a block of JavaScript code inside the target WebView content container.
+     * Runs a block of JavaScript code inside the target evaluator scope.
      */
-    fun injectScript(webView: WebView, code: String, onResult: ((String?) -> Unit)? = null) {
-        webView.post {
+    fun injectScript(evaluator: ScriptEvaluator, code: String, onResult: ((String?) -> Unit)? = null) {
+        evaluator.post {
             try {
-                webView.evaluateJavascript(code) { value ->
+                evaluator.evaluateJavascript(code) { value ->
                     onResult?.invoke(value)
                 }
             } catch (e: Exception) {

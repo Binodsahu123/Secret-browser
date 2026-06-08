@@ -12,9 +12,9 @@ class BackgroundScriptManager(
 ) {
 
     private val backgroundWebViews = mutableMapOf<String, WebView>()
-    private var runtimeBridgeProvider: (() -> RuntimeBridge)? = null
+    private var runtimeBridgeProvider: ((WebView) -> RuntimeBridge)? = null
 
-    fun setRuntimeBridgeProvider(provider: () -> RuntimeBridge) {
+    fun setRuntimeBridgeProvider(provider: (WebView) -> RuntimeBridge) {
         this.runtimeBridgeProvider = provider
     }
 
@@ -33,8 +33,9 @@ class BackgroundScriptManager(
                     settings.domStorageEnabled = true
                     settings.databaseEnabled = true
 
-                    val bridge = runtimeBridgeProvider?.invoke()
+                    val bridge = runtimeBridgeProvider?.invoke(this)
                     if (bridge != null) {
+                        this.tag = bridge
                         addJavascriptInterface(bridge, "OrionExtensionBridge")
                     }
 
@@ -51,7 +52,18 @@ class BackgroundScriptManager(
                                 try {
                                     val code = readExtensionFile(extensionDir, scriptFile)
                                     if (code.isNotBlank()) {
-                                        evaluateJavascript("(function() {\n $code \n})();", null)
+                                        val wrapper = """
+                                            (function() {
+                                                try {
+                                                     const browser = window._orionGetExtensionContext("${ext.id}");
+                                                     const chrome = browser;
+                                                     $code
+                                                } catch(e) {
+                                                     console.error("Background Script Exec Error in $scriptFile: ", e);
+                                                }
+                                            })();
+                                        """.trimIndent()
+                                        evaluateJavascript(wrapper, null)
                                     }
                                 } catch (e: Exception) {
                                     e.printStackTrace()

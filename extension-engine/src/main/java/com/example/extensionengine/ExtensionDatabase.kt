@@ -6,11 +6,17 @@ import kotlinx.coroutines.flow.Flow
 
 @Entity(tableName = "extensions")
 data class ExtensionEntity(
-    @PrimaryKey val id: String,
+    @PrimaryKey val extensionId: String,
     val name: String,
+    val shortName: String,
     val version: String,
     val description: String,
-    val isEnabled: Boolean,
+    val iconPath: String,
+    val installPath: String,
+    val popupPath: String,
+    val manifestPath: String,
+    val backgroundPath: String,
+    val enabledState: Boolean,
     val manifestJson: String,
     val dateInstalled: Long = System.currentTimeMillis()
 )
@@ -31,16 +37,16 @@ interface ExtensionDao {
     @Query("SELECT * FROM extensions")
     suspend fun getAllExtensions(): List<ExtensionEntity>
 
-    @Query("SELECT * FROM extensions WHERE id = :id")
+    @Query("SELECT * FROM extensions WHERE extensionId = :id")
     suspend fun getExtensionById(id: String): ExtensionEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertExtension(extension: ExtensionEntity)
 
-    @Query("DELETE FROM extensions WHERE id = :id")
+    @Query("DELETE FROM extensions WHERE extensionId = :id")
     suspend fun deleteExtensionById(id: String)
 
-    @Query("UPDATE extensions SET isEnabled = :enabled WHERE id = :id")
+    @Query("UPDATE extensions SET enabledState = :enabled WHERE extensionId = :id")
     suspend fun updateEnabledState(id: String, enabled: Boolean)
 }
 
@@ -62,7 +68,7 @@ interface StorageDao {
     suspend fun clearStorage(extensionId: String, area: String)
 }
 
-@Database(entities = [ExtensionEntity::class, StorageEntity::class], version = 1, exportSchema = false)
+@Database(entities = [ExtensionEntity::class, StorageEntity::class], version = 2, exportSchema = false)
 abstract class ExtensionDatabase : RoomDatabase() {
     abstract fun extensionDao(): ExtensionDao
     abstract fun storageDao(): StorageDao
@@ -77,7 +83,7 @@ abstract class ExtensionDatabase : RoomDatabase() {
                     context.applicationContext,
                     ExtensionDatabase::class.java,
                     "extension_engine.db"
-                ).build()
+                ).fallbackToDestructiveMigration().build()
                 INSTANCE = instance
                 instance
             }

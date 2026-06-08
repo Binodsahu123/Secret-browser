@@ -2,34 +2,115 @@ package com.example.extensionengine
 
 import org.json.JSONObject
 import java.util.concurrent.CopyOnWriteArrayList
+import java.lang.ref.WeakReference
 
 interface MessageListener {
-    fun onMessageReceived(extensionId: String, senderTabId: String?, message: JSONObject, callbackId: String?)
+    fun onMessageReceived(extensionId: String, senderTabId: String?, message: JSONObject, callbackId: String?, targetTabId: String?)
+    fun onResponseReceived(extensionId: String, callbackId: String, response: Any)
+}
+
+interface PortConnectionListener {
+    fun onPortConnect(extensionId: String, channelId: String, portName: String, senderId: String)
+    fun onPortMessage(channelId: String, message: JSONObject)
+    fun onPortDisconnect(channelId: String)
 }
 
 class MessageBus {
-    private val listeners = CopyOnWriteArrayList<MessageListener>()
+    private val listeners = CopyOnWriteArrayList<WeakReference<MessageListener>>()
+    private val portListeners = CopyOnWriteArrayList<WeakReference<PortConnectionListener>>()
 
     fun registerListener(listener: MessageListener) {
-        if (!listeners.contains(listener)) {
-            listeners.add(listener)
+        removeGarbageCollected()
+        if (listeners.none { it.get() === listener }) {
+            listeners.add(WeakReference(listener))
         }
     }
 
     fun unregisterListener(listener: MessageListener) {
-        listeners.remove(listener)
+        listeners.removeAll { it.get() === listener || it.get() == null }
+    }
+
+    fun registerPortListener(listener: PortConnectionListener) {
+        removeGarbageCollected()
+        if (portListeners.none { it.get() === listener }) {
+            portListeners.add(WeakReference(listener))
+        }
+    }
+
+    fun unregisterPortListener(listener: PortConnectionListener) {
+        portListeners.removeAll { it.get() === listener || it.get() == null }
+    }
+
+    private fun removeGarbageCollected() {
+        listeners.removeAll { it.get() == null }
+        portListeners.removeAll { it.get() == null }
     }
 
     /**
      * Propagates a standard chrome.runtime message payload to all active handlers,
      * including background scripts and target tab interfaces.
      */
-    fun broadcastMessage(extensionId: String, senderTabId: String?, message: JSONObject, callbackId: String? = null) {
-        listeners.forEach { listener ->
-            try {
-                listener.onMessageReceived(extensionId, senderTabId, message, callbackId)
-            } catch (e: Exception) {
-                e.printStackTrace()
+    fun broadcastMessage(extensionId: String, senderTabId: String?, message: JSONObject, callbackId: String? = null, targetTabId: String? = null) {
+        removeGarbageCollected()
+        listeners.forEach { ref ->
+            ref.get()?.let { listener ->
+                try {
+                    listener.onMessageReceived(extensionId, senderTabId, message, callbackId, targetTabId)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+    }
+
+    fun broadcastResponse(extensionId: String, callbackId: String, response: Any) {
+        removeGarbageCollected()
+        listeners.forEach { ref ->
+            ref.get()?.let { listener ->
+                try {
+                    listener.onResponseReceived(extensionId, callbackId, response)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+    }
+
+    fun broadcastPortConnect(extensionId: String, channelId: String, portName: String, senderId: String) {
+        removeGarbageCollected()
+        portListeners.forEach { ref ->
+            ref.get()?.let { listener ->
+                try {
+                    listener.onPortConnect(extensionId, channelId, portName, senderId)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+    }
+
+    fun broadcastPortMessage(channelId: String, message: JSONObject) {
+        removeGarbageCollected()
+        portListeners.forEach { ref ->
+            ref.get()?.let { listener ->
+                try {
+                    listener.onPortMessage(channelId, message)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+    }
+
+    fun broadcastPortDisconnect(channelId: String) {
+        removeGarbageCollected()
+        portListeners.forEach { ref ->
+            ref.get()?.let { listener ->
+                try {
+                    listener.onPortDisconnect(channelId)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
             }
         }
     }

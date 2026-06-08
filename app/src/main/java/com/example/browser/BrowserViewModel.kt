@@ -173,6 +173,8 @@ class BrowserViewModel(
 ) : AndroidViewModel(application), com.example.extensionengine.BrowserDelegate {
 
     val extensionManager = com.example.extensionengine.ExtensionManager(application, this)
+    val permissionEngine: com.example.permissionengine.PermissionEngine = com.example.permissionengine.PermissionEngineImpl(application)
+    val translateManager = com.example.translateengine.TranslateManager(application)
 
     private val _uiState = MutableStateFlow(BrowserUiState())
     val uiState: StateFlow<BrowserUiState> = _uiState.asStateFlow()
@@ -180,6 +182,30 @@ class BrowserViewModel(
     // Notification permission request variables
     private val _notificationRequestOrigin = MutableStateFlow<String?>(null)
     val notificationRequestOrigin: StateFlow<String?> = _notificationRequestOrigin
+
+    // Web Permission properties for camera/mic
+    private val _pendingPermissionRequest = MutableStateFlow<android.webkit.PermissionRequest?>(null)
+    val pendingPermissionRequest: StateFlow<android.webkit.PermissionRequest?> = _pendingPermissionRequest.asStateFlow()
+
+    // Web Geolocation properties
+    private val _pendingGeolocationPrompt = MutableStateFlow<Pair<String, android.webkit.GeolocationPermissions.Callback>?>(null)
+    val pendingGeolocationPrompt: StateFlow<Pair<String, android.webkit.GeolocationPermissions.Callback>?> = _pendingGeolocationPrompt.asStateFlow()
+
+    fun setPendingPermissionRequest(request: android.webkit.PermissionRequest?) {
+        _pendingPermissionRequest.value = request
+    }
+
+    fun clearPermissionRequest() {
+        _pendingPermissionRequest.value = null
+    }
+
+    fun setPendingGeolocationPrompt(prompt: Pair<String, android.webkit.GeolocationPermissions.Callback>?) {
+        _pendingGeolocationPrompt.value = prompt
+    }
+
+    fun clearGeolocationPrompt() {
+        _pendingGeolocationPrompt.value = null
+    }
 
     // Map of active WebViews
     private val webViewMap = mutableMapOf<String, WebView>()
@@ -252,7 +278,7 @@ class BrowserViewModel(
         }
 
         // Initialize AdBlocker
-        com.example.engine.AdBlocker.init(application)
+        com.example.adblockengine.AdBlocker.init(application)
         
         // OkHttp Cache Setup (50MB)
         val cacheSize = 50 * 1024 * 1024L
@@ -264,11 +290,11 @@ class BrowserViewModel(
 
         _uiState.update {
             it.copy(
-                globalAdBlockEnabled = com.example.engine.AdBlocker.globalAdBlockEnabled,
-                globalTrackersEnabled = com.example.engine.AdBlocker.globalTrackersEnabled,
-                youtubeAdSkipEnabled = com.example.engine.AdBlocker.youtubeAdSkipEnabled,
-                adblockWhitelist = com.example.engine.AdBlocker.whitelistedSites.toSet(),
-                adblockBlacklist = com.example.engine.AdBlocker.blockedSites.toSet()
+                globalAdBlockEnabled = com.example.adblockengine.AdBlocker.globalAdBlockEnabled,
+                globalTrackersEnabled = com.example.adblockengine.AdBlocker.globalTrackersEnabled,
+                youtubeAdSkipEnabled = com.example.adblockengine.AdBlocker.youtubeAdSkipEnabled,
+                adblockWhitelist = com.example.adblockengine.AdBlocker.whitelistedSites.toSet(),
+                adblockBlacklist = com.example.adblockengine.AdBlocker.blockedSites.toSet()
             )
         }
 
@@ -388,8 +414,23 @@ class BrowserViewModel(
                 isTabSwitcherOpen = false,
                 readerModeActive = false,
                 findInPageActive = false,
-                areToolbarsVisible = true
+                areToolbarsVisible = true,
+                showTranslateBar = false,
+                isPageTranslated = false
             )
+        }
+        translateManager.stateManager.transitionTo(com.example.translateengine.TranslationState.Hidden)
+
+        try {
+            val activeParams = org.json.JSONObject().apply {
+                put("activeInfo", org.json.JSONObject().apply {
+                    put("tabId", com.example.extensionengine.TabIdMapper.getIntId(tabId))
+                    put("windowId", 1)
+                })
+            }
+            extensionManager.engine.eventManager.triggerEvent("tabs.onActivated", activeParams)
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
 
         // 2. Resume the newly active tab WebView IMMEDIATELY
@@ -782,7 +823,7 @@ class BrowserViewModel(
                 _uiState.value.isHardwareAccelerationEnabled,
                 currentTab?.isDesktopMode ?: false
             )
-            extensionManager.setupWebView(this)
+            extensionManager.setupWebView(this, tabId)
 
             setDownloadListener { url, userAgent, contentDisposition, mimetype, contentLength ->
                 try {
@@ -801,10 +842,14 @@ class BrowserViewModel(
                 ): WebResourceResponse? {
                     return try {
                         val urlStr = request?.url?.toString()
+                        if (urlStr != null && (urlStr.startsWith("chrome-extension://") || urlStr.startsWith("orion-extension://"))) {
+                            val interceptRes = com.example.extensionengine.ExtensionDirectoryResolver.handleExtensionRequest(context, urlStr)
+                            if (interceptRes != null) return interceptRes
+                        }
                         val currentDocUrl = view?.url ?: _uiState.value.tabs.find { it.id == tabId }?.url
-                        if (com.example.engine.AdBlocker.shouldBlock(urlStr, currentDocUrl)) {
+                        if (com.example.adblockengine.AdBlocker.shouldBlock(urlStr, currentDocUrl)) {
                             incrementBlockedAdsCount(tabId)
-                            com.example.engine.AdBlocker.createEmptyResponse()
+                            com.example.adblockengine.AdBlocker.createEmptyResponse()
                         } else {
                             super.shouldInterceptRequest(view, request)
                         }
@@ -877,12 +922,44 @@ class BrowserViewModel(
                         if (_uiState.value.activeTabId == tabId) {
                             _uiState.update { 
                                 it.copy(
-                                    currentInputUrl = if (finalUrl == "orion://newtab" || finalUrl == "orion://newtab-incognito") "" else finalUrl
+                                    currentInputUrl = if (finalUrl == "orion://newtab" || finalUrl == "orion://newtab-incognito") "" else finalUrl,
+                                    isPageTranslated = false,
+                                    showTranslateBar = false
                                 ) 
                             }
+                            translateManager.stateManager.transitionTo(com.example.translateengine.TranslationState.Hidden)
+                        }
+                        try {
+                            if (url != null) {
+                                val params = org.json.JSONObject().apply {
+                                    put("tabId", com.example.extensionengine.TabIdMapper.getIntId(tabId))
+                                    put("changeInfo", org.json.JSONObject().put("status", "loading").put("url", url))
+                                    put("tab", org.json.JSONObject().apply {
+                                        put("id", com.example.extensionengine.TabIdMapper.getIntId(tabId))
+                                        put("url", url)
+                                        put("status", "loading")
+                                    })
+                                }
+                                extensionManager.engine.eventManager.triggerEvent("tabs.onUpdated", params)
+                            }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
                         }
                     } catch (e: Throwable) {
                         e.printStackTrace()
+                    }
+                }
+
+                override fun onPageCommitVisible(view: WebView?, url: String?) {
+                    super.onPageCommitVisible(view, url)
+                    if (view != null && url != null && !url.startsWith("orion://") && !url.startsWith("about:") && !url.startsWith("file://")) {
+                        try {
+                            // Inject early API bootstrap hook rules so extension script variables are populated before page scripts complete
+                            extensionManager.setupWebView(view, tabId)
+                            extensionManager.injectContentScripts(view, url)
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
                     }
                 }
 
@@ -1119,19 +1196,44 @@ class BrowserViewModel(
 
                         // Translate engine hook
                         if (url != null && !url.contains("translate.google.com") && !url.startsWith("orion://") && url != "about:blank") {
-                            val autoTranslate = prefs.getBoolean("ext_auto_translate", false)
-                            if (autoTranslate) {
-                                val targetLangCode = _uiState.value.translateTargetLangCode
-                                val targetLangName = _uiState.value.translateTargetLang
-                                executeGoogleTranslation(targetLangCode, targetLangName)
-                            } else {
-                                // Clear translation flags for this new normal page load
-                                _uiState.update { 
-                                    it.copy(
-                                        isPageTranslated = false,
-                                        showTranslateBar = false,
-                                        originalTranslationUrl = url
-                                    ) 
+                            // Extract sample text for Chrome-style language detection Offer
+                            val detectionScript = """
+                                (function() {
+                                    try {
+                                        return (document.title || '') + ' ' + (document.body ? document.body.innerText.substring(0, 300) : '');
+                                    } catch(e) {
+                                        return '';
+                                    }
+                                })()
+                            """.trimIndent()
+                            view?.evaluateJavascript(detectionScript) { innerText ->
+                                if (!innerText.isNullOrBlank() && innerText != "null" && innerText != "\"\"") {
+                                    viewModelScope.launch(kotlinx.coroutines.Dispatchers.Default) {
+                                        try {
+                                            val detectedLang = translateManager.detectPageLanguage(innerText)
+                                            val targetLangCode = _uiState.value.translateTargetLangCode
+                                            val host = com.example.adblockengine.AdBlocker.getDomainName(url) ?: ""
+                                            val isNeverSite = translateManager.settings.getNeverTranslateSites().contains(host)
+                                            val isNeverLang = translateManager.settings.getNeverTranslateLanguages().contains(detectedLang)
+                                            
+                                            if (detectedLang.isNotEmpty() && detectedLang != "unknown" && detectedLang != targetLangCode) {
+                                                // Check auto translate first
+                                                val autoTranslate = translateManager.settings.isAutoTranslateEnabled() || 
+                                                                    translateManager.settings.getAlwaysTranslateSites().contains(host)
+                                                
+                                                if (autoTranslate && !isNeverSite && !isNeverLang) {
+                                                    // Auto translate
+                                                    val targetLangName = _uiState.value.translateTargetLang
+                                                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                                        executeGoogleTranslation(targetLangCode, targetLangName)
+                                                    }
+                                                }
+                                                // Automatic offer popups are completely disabled under any circumstances! Only manual triggers.
+                                            }
+                                        } catch (e: Exception) {
+                                            e.printStackTrace()
+                                        }
+                                    }
                                 }
                             }
                         } else if (url != null && url.contains("translate.google.com")) {
@@ -1149,7 +1251,7 @@ class BrowserViewModel(
                             }
                         }
 
-                        if (url != null && url.contains("youtube.com") && com.example.engine.AdBlocker.youtubeAdSkipEnabled) {
+                        if (url != null && url.contains("youtube.com") && com.example.adblockengine.AdBlocker.youtubeAdSkipEnabled) {
                             view?.evaluateJavascript("""
                                 (function() {
                                     var selectors = [
@@ -1178,7 +1280,83 @@ class BrowserViewModel(
                         if (url != null && !url.startsWith("orion://")) {
                             detectReaderModeAvailability(view)
                         }
+                        try {
+                            if (url != null) {
+                                val params = org.json.JSONObject().apply {
+                                    put("tabId", com.example.extensionengine.TabIdMapper.getIntId(tabId))
+                                    put("changeInfo", org.json.JSONObject().put("status", "complete").put("url", url))
+                                    put("tab", org.json.JSONObject().apply {
+                                        put("id", com.example.extensionengine.TabIdMapper.getIntId(tabId))
+                                        put("url", url)
+                                        put("status", "complete")
+                                    })
+                                }
+                                extensionManager.engine.eventManager.triggerEvent("tabs.onUpdated", params)
+
+                                val navParams = org.json.JSONObject().apply {
+                                    put("details", org.json.JSONObject().apply {
+                                        put("tabId", com.example.extensionengine.TabIdMapper.getIntId(tabId))
+                                        put("url", url)
+                                        put("timeStamp", System.currentTimeMillis())
+                                    })
+                                }
+                                extensionManager.engine.eventManager.triggerEvent("webNavigation.onCompleted", navParams)
+                            }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
                     } catch (e: Throwable) {
+                        e.printStackTrace()
+                    }
+                }
+
+                override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                    try {
+                        super.doUpdateVisitedHistory(view, url, isReload)
+                        if (url != null && view != null && !url.startsWith("orion://") && url != "about:blank") {
+                            val currentTab = _uiState.value.tabs.find { it.id == tabId }
+                            if (currentTab != null && currentTab.url != url) {
+                                val cleanUrl = if (url == "about:blank") "" else url
+                                updateTabState(tabId) {
+                                    it.copy(
+                                        url = cleanUrl,
+                                        title = view.title?.ifBlank { cleanUrl } ?: cleanUrl
+                                    )
+                                }
+                                if (_uiState.value.activeTabId == tabId) {
+                                    _uiState.update { 
+                                        it.copy(currentInputUrl = cleanUrl) 
+                                    }
+                                }
+                                
+                                extensionManager.injectContentScripts(view, url)
+                                
+                                try {
+                                    val params = org.json.JSONObject().apply {
+                                        put("tabId", com.example.extensionengine.TabIdMapper.getIntId(tabId))
+                                        put("changeInfo", org.json.JSONObject().put("status", "complete").put("url", url))
+                                        put("tab", org.json.JSONObject().apply {
+                                            put("id", com.example.extensionengine.TabIdMapper.getIntId(tabId))
+                                            put("url", url)
+                                            put("status", "complete")
+                                        })
+                                    }
+                                    extensionManager.engine.eventManager.triggerEvent("tabs.onUpdated", params)
+
+                                    val navParams = org.json.JSONObject().apply {
+                                        put("details", org.json.JSONObject().apply {
+                                            put("tabId", com.example.extensionengine.TabIdMapper.getIntId(tabId))
+                                            put("url", url)
+                                            put("timeStamp", System.currentTimeMillis())
+                                        })
+                                    }
+                                    extensionManager.engine.eventManager.triggerEvent("webNavigation.onHistoryStateUpdated", navParams)
+                                } catch (e: Exception) {
+                                    e.printStackTrace()
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
                         e.printStackTrace()
                     }
                 }
@@ -1387,11 +1565,17 @@ class BrowserViewModel(
                     origin: String?,
                     callback: android.webkit.GeolocationPermissions.Callback?
                 ) {
-                    callback?.invoke(origin, true, false)
+                    if (origin != null && callback != null) {
+                        setPendingGeolocationPrompt(Pair(origin, callback))
+                    } else {
+                        callback?.invoke(origin, false, false)
+                    }
                 }
 
                 override fun onPermissionRequest(request: android.webkit.PermissionRequest?) {
-                    request?.grant(request.resources)
+                    if (request != null) {
+                        setPendingPermissionRequest(request)
+                    }
                 }
 
                 override fun onCreateWindow(
@@ -2143,14 +2327,14 @@ class BrowserViewModel(
 
     // Web Notification and Permission Helper Methods
     fun showNotificationPermissionDialog(origin: String) {
-        val currentOriginStatus = prefs.getString("site_perm_exception/notifications/$origin", "")
-        if (currentOriginStatus.isEmpty()) {
+        val currentOriginStatus = permissionEngine.getPermissionState(origin, "notifications")
+        if (currentOriginStatus == "Ask") {
             _notificationRequestOrigin.value = origin
         }
     }
 
     fun handleNotificationPermissionResponse(origin: String, allowed: Boolean) {
-        prefs.setString("site_perm_exception/notifications/$origin", if (allowed) "Allow" else "Block")
+        permissionEngine.setPermissionState(origin, "notifications", if (allowed) "Allow" else "Block")
         _notificationRequestOrigin.value = null
         if (allowed) {
             triggerWebNotification(origin, "🔔 Notifications Allowed", "You will now receive notifications from $origin.")
@@ -2158,10 +2342,10 @@ class BrowserViewModel(
     }
 
     fun triggerWebNotification(origin: String, title: String, body: String) {
-        val status = prefs.getString("site_perm_exception/notifications/$origin", "Ask")
+        val status = permissionEngine.getPermissionState(origin, "notifications")
         // Check default if not set
         val defaultGlobal = prefs.getString("site_perm_default/notifications", "Ask")
-        val isGranted = if (status.isNotEmpty()) status == "Allow" else defaultGlobal == "Allow" || defaultGlobal == "Ask"
+        val isGranted = if (status != "Ask") status == "Allow" else defaultGlobal == "Allow" || defaultGlobal == "Ask"
         if (!isGranted) return
 
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.Main) {
@@ -2606,11 +2790,17 @@ class BrowserViewModel(
         }
     }
 
+    fun getUrlHost(url: String): String {
+        return com.example.adblockengine.AdBlocker.getDomainName(url) ?: ""
+    }
+
     fun triggerTranslationSelection() {
         val activeId = _uiState.value.activeTabId
         val webView = webViewMap[activeId] ?: return
         val currentUrl = webView.url ?: ""
         if (currentUrl.isEmpty() || currentUrl.startsWith("orion://") || currentUrl.startsWith("about:")) return
+
+        translateManager.stateManager.transitionTo(com.example.translateengine.TranslationState.Visible)
 
         _uiState.update { 
             it.copy(
@@ -2621,20 +2811,22 @@ class BrowserViewModel(
     }
 
     fun dismissTranslateBar() {
+        translateManager.stateManager.transitionTo(com.example.translateengine.TranslationState.Hidden)
         _uiState.update { it.copy(showTranslateBar = false) }
     }
 
     fun undoTranslation() {
         val activeId = _uiState.value.activeTabId
         val webView = webViewMap[activeId] ?: return
+        translateManager.stateManager.transitionTo(com.example.translateengine.TranslationState.Original)
         _uiState.update { 
             it.copy(
                 isPageTranslated = false,
                 showTranslateBar = true
             )
         }
-        webView.post {
-            webView.reload()
+        com.example.translateengine.DomRestoreEngine.restoreOriginal(webView) { res ->
+            android.util.Log.d("BrowserViewModel", "DOM restoration finished! Result: $res")
         }
     }
 
@@ -2646,6 +2838,7 @@ class BrowserViewModel(
 
         val originalUrl = if (!_uiState.value.isPageTranslated) currentUrl else _uiState.value.originalTranslationUrl
         
+        translateManager.stateManager.transitionTo(com.example.translateengine.TranslationState.Translating)
         _uiState.update { 
             it.copy(
                 isPageTranslated = true,
@@ -2656,47 +2849,13 @@ class BrowserViewModel(
             )
         }
 
-        val jsScript = """
-            (function() {
-                var existingCombo = document.querySelector('select.goog-te-combo');
-                if (existingCombo) {
-                    existingCombo.value = '$langCode';
-                    existingCombo.dispatchEvent(new Event('change'));
-                    return "re-translated";
-                }
-                
-                var container = document.createElement('div');
-                container.id = 'google_translate_element';
-                container.style.display = 'none';
-                document.body.appendChild(container);
-                
-                window.googleTranslateElementInit = function() {
-                    new google.translate.TranslateElement({
-                        pageLanguage: 'auto',
-                        layout: google.translate.TranslateElement.InlineLayout.SIMPLE,
-                        autoDisplay: false
-                    }, 'google_translate_element');
-                    
-                    var checkInterval = setInterval(function() {
-                        var combo = document.querySelector('select.goog-te-combo');
-                        if (combo) {
-                            clearInterval(checkInterval);
-                            combo.value = '$langCode';
-                            combo.dispatchEvent(new Event('change'));
-                        }
-                    }, 150);
-                };
-                
-                var tag = document.createElement('script');
-                tag.type = 'text/javascript';
-                tag.src = 'https://translate.google.com/translate_a/element.js?cb=googleTranslateElementInit';
-                document.body.appendChild(tag);
-                return "injected";
-            })()
-        """.trimIndent()
+        val activeTab = _uiState.value.tabs.find { it.id == activeId }
+        val isDesktop = activeTab?.isDesktopMode == true
 
-        webView.post {
-            webView.evaluateJavascript(jsScript, null)
+        // Call our advanced background translation manager
+        translateManager.translateWebView(webView, langCode, activeId, isDesktop) { count ->
+            android.util.Log.d("BrowserViewModel", "Page translation finished! Injected $count nodes.")
+            translateManager.stateManager.transitionTo(com.example.translateengine.TranslationState.Translated)
         }
     }
 
@@ -2721,7 +2880,8 @@ class BrowserViewModel(
             "gu" to "Gujarati",
             "kn" to "Kannada",
             "ml" to "Malayalam",
-            "pa" to "Punjabi"
+            "pa" to "Punjabi",
+            "or" to "Odia"
         )
         val langName = languagesMap[targetLangCode] ?: targetLangCode
         executeGoogleTranslation(targetLangCode, langName)
@@ -3288,34 +3448,34 @@ class BrowserViewModel(
     }
 
     fun setGlobalAdBlockEnabled(enabled: Boolean) {
-        com.example.engine.AdBlocker.globalAdBlockEnabled = enabled
-        com.example.engine.AdBlocker.savePreferences(getApplication())
+        com.example.adblockengine.AdBlocker.globalAdBlockEnabled = enabled
+        com.example.adblockengine.AdBlocker.savePreferences(getApplication())
         _uiState.update { it.copy(globalAdBlockEnabled = enabled) }
     }
 
     fun setGlobalTrackersEnabled(enabled: Boolean) {
-        com.example.engine.AdBlocker.globalTrackersEnabled = enabled
-        com.example.engine.AdBlocker.savePreferences(getApplication())
+        com.example.adblockengine.AdBlocker.globalTrackersEnabled = enabled
+        com.example.adblockengine.AdBlocker.savePreferences(getApplication())
         _uiState.update { it.copy(globalTrackersEnabled = enabled) }
     }
 
     fun setYoutubeAdSkipEnabled(enabled: Boolean) {
-        com.example.engine.AdBlocker.youtubeAdSkipEnabled = enabled
-        com.example.engine.AdBlocker.savePreferences(getApplication())
+        com.example.adblockengine.AdBlocker.youtubeAdSkipEnabled = enabled
+        com.example.adblockengine.AdBlocker.savePreferences(getApplication())
         _uiState.update { it.copy(youtubeAdSkipEnabled = enabled) }
     }
 
     fun toggleAdBlockForSite(url: String) {
-        val domain = com.example.engine.AdBlocker.getDomainName(url) ?: return
-        if (com.example.engine.AdBlocker.whitelistedSites.contains(domain)) {
-            com.example.engine.AdBlocker.whitelistedSites.remove(domain)
+        val domain = com.example.adblockengine.AdBlocker.getDomainName(url) ?: return
+        if (com.example.adblockengine.AdBlocker.whitelistedSites.contains(domain)) {
+            com.example.adblockengine.AdBlocker.whitelistedSites.remove(domain)
         } else {
-            com.example.engine.AdBlocker.whitelistedSites.add(domain)
+            com.example.adblockengine.AdBlocker.whitelistedSites.add(domain)
         }
-        com.example.engine.AdBlocker.savePreferences(getApplication())
+        com.example.adblockengine.AdBlocker.savePreferences(getApplication())
         _uiState.update {
             it.copy(
-                adblockWhitelist = com.example.engine.AdBlocker.whitelistedSites.toSet()
+                adblockWhitelist = com.example.adblockengine.AdBlocker.whitelistedSites.toSet()
             )
         }
     }
@@ -3323,36 +3483,36 @@ class BrowserViewModel(
     fun addWhitelistedSite(domain: String) {
         if (domain.isBlank()) return
         val clean = domain.trim().lowercase().removePrefix("www.")
-        com.example.engine.AdBlocker.whitelistedSites.add(clean)
-        com.example.engine.AdBlocker.savePreferences(getApplication())
+        com.example.adblockengine.AdBlocker.whitelistedSites.add(clean)
+        com.example.adblockengine.AdBlocker.savePreferences(getApplication())
         _uiState.update {
-            it.copy(adblockWhitelist = com.example.engine.AdBlocker.whitelistedSites.toSet())
+            it.copy(adblockWhitelist = com.example.adblockengine.AdBlocker.whitelistedSites.toSet())
         }
     }
 
     fun removeWhitelistedSite(domain: String) {
-        com.example.engine.AdBlocker.whitelistedSites.remove(domain)
-        com.example.engine.AdBlocker.savePreferences(getApplication())
+        com.example.adblockengine.AdBlocker.whitelistedSites.remove(domain)
+        com.example.adblockengine.AdBlocker.savePreferences(getApplication())
         _uiState.update {
-            it.copy(adblockWhitelist = com.example.engine.AdBlocker.whitelistedSites.toSet())
+            it.copy(adblockWhitelist = com.example.adblockengine.AdBlocker.whitelistedSites.toSet())
         }
     }
 
     fun addBlockedSite(domain: String) {
         if (domain.isBlank()) return
         val clean = domain.trim().lowercase().removePrefix("www.")
-        com.example.engine.AdBlocker.blockedSites.add(clean)
-        com.example.engine.AdBlocker.savePreferences(getApplication())
+        com.example.adblockengine.AdBlocker.blockedSites.add(clean)
+        com.example.adblockengine.AdBlocker.savePreferences(getApplication())
         _uiState.update {
-            it.copy(adblockBlacklist = com.example.engine.AdBlocker.blockedSites.toSet())
+            it.copy(adblockBlacklist = com.example.adblockengine.AdBlocker.blockedSites.toSet())
         }
     }
 
     fun removeBlockedSite(domain: String) {
-        com.example.engine.AdBlocker.blockedSites.remove(domain)
-        com.example.engine.AdBlocker.savePreferences(getApplication())
+        com.example.adblockengine.AdBlocker.blockedSites.remove(domain)
+        com.example.adblockengine.AdBlocker.savePreferences(getApplication())
         _uiState.update {
-            it.copy(adblockBlacklist = com.example.engine.AdBlocker.blockedSites.toSet())
+            it.copy(adblockBlacklist = com.example.adblockengine.AdBlocker.blockedSites.toSet())
         }
     }
 
@@ -3360,7 +3520,7 @@ class BrowserViewModel(
         viewModelScope.launch {
             try {
                 _uiState.update { it.copy(isFeedLoading = true) }
-                val size = com.example.engine.AdBlocker.downloadBlocklists(getApplication())
+                val size = com.example.adblockengine.AdBlocker.downloadBlocklists(getApplication())
                 android.widget.Toast.makeText(getApplication(), "Blocklists updated! $size rules downloaded.", android.widget.Toast.LENGTH_LONG).show()
             } catch (e: Exception) {
                 android.widget.Toast.makeText(getApplication(), "Failed to update blocklists: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
@@ -3976,12 +4136,19 @@ class BrowserViewModel(
         val array = org.json.JSONArray()
         val tabs = uiState.value.tabs
         val activeId = uiState.value.activeTabId
+        val filterActive = if (queryInfo.has("active")) queryInfo.optBoolean("active") else null
+        
         tabs.forEach { tab ->
+            val isActive = tab.id == activeId
+            if (filterActive != null && isActive != filterActive) {
+                return@forEach
+            }
             val obj = org.json.JSONObject()
-            obj.put("id", tab.id)
+            val intId = com.example.extensionengine.TabIdMapper.getIntId(tab.id)
+            obj.put("id", intId)
             obj.put("url", tab.url)
             obj.put("title", tab.title)
-            obj.put("active", tab.id == activeId)
+            obj.put("active", isActive)
             array.put(obj)
         }
         return array
@@ -4041,6 +4208,18 @@ class BrowserViewModel(
     }
 
     override fun executeScriptOnTab(tabId: String, code: String, callback: (String?) -> Unit) {
+        val targetId = if (tabId.isBlank()) uiState.value.activeTabId else tabId
+        if (targetId != null) {
+            val webView = webViewMap[targetId]
+            if (webView != null) {
+                webView.post {
+                    webView.evaluateJavascript(code) { res ->
+                        callback(res)
+                    }
+                }
+                return
+            }
+        }
         callback(null)
     }
 

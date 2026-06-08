@@ -22,7 +22,14 @@ data class ParsedExtension(
     val contentScripts: List<ContentScriptSpec>,
     val actionPopup: String,
     val optionsPage: String,
-    val manifestJson: String
+    val manifestJson: String,
+    val shortName: String = "",
+    val iconPath: String = "",
+    val installPath: String = "",
+    val popupPath: String = "",
+    val manifestPath: String = "",
+    val backgroundPath: String = "",
+    val isEnabled: Boolean = true
 )
 
 class ManifestParser {

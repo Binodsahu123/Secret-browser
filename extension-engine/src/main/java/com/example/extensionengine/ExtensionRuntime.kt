@@ -1,7 +1,6 @@
 package com.example.extensionengine
 
 import android.content.Context
-import android.webkit.WebView
 
 class ExtensionRuntime(
     val parsedExtension: ParsedExtension,
@@ -26,9 +25,9 @@ class ExtensionRuntime(
         backgroundScriptManager.stopBackgroundWorker(parsedExtension.id)
     }
 
-    fun matchAndInjectContentScripts(webView: WebView, url: String) {
+    fun matchAndInjectContentScripts(evaluator: ScriptEvaluator, url: String) {
         if (!isActive) return
-        contentScriptManager.matchAndInject(webView, url, listOf(parsedExtension))
+        contentScriptManager.matchAndInject(evaluator, url, listOf(parsedExtension))
     }
 
     fun getActionPopupUrl(): String? {

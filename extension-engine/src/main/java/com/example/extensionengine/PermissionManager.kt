@@ -44,17 +44,21 @@ class PermissionManager {
 
     private fun convertPatternToRegex(pattern: String): Pattern {
         var glob = pattern
-        if (glob.startsWith("*://")) {
-            glob = "https?://" + glob.substring(4)
-        } else {
-            glob = glob.replace("http://", "http://")
-            glob = glob.replace("https://", "https://")
+        val hasWildcardScheme = glob.startsWith("*://")
+        if (hasWildcardScheme) {
+            glob = glob.substring(4)
         }
         
         // Escape standard characters while wildcarding *
         glob = glob.replace(".", "\\.")
         glob = glob.replace("*", ".*")
-        glob = glob.replace("?", ".?")
+        glob = glob.replace("?", "\\?")
+        
+        glob = if (hasWildcardScheme) {
+            "https?://$glob"
+        } else {
+            glob.replace("http://", "https?://").replace("https://", "https?://")
+        }
         
         return Pattern.compile("^$glob", Pattern.CASE_INSENSITIVE)
     }

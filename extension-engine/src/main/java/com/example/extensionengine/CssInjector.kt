@@ -1,15 +1,13 @@
 package com.example.extensionengine
 
-import android.webkit.WebView
-
 class CssInjector {
 
     /**
-     * Creates and appends a stylesheet block containing raw CSS definitions into the host head container.
+     * Appends a style block with raw CSS definitions into the document head container.
      */
-    fun injectCss(webView: WebView, cssContent: String) {
+    fun injectCss(evaluator: ScriptEvaluator, cssContent: String) {
         if (cssContent.isBlank()) return
-        webView.post {
+        evaluator.post {
             try {
                 val escapedCss = cssContent
                     .replace("\\", "\\\\")
@@ -26,7 +24,7 @@ class CssInjector {
                     })();
                 """.trimIndent()
                 
-                webView.evaluateJavascript(stylePayloadScript, null)
+                evaluator.evaluateJavascript(stylePayloadScript, null)
             } catch (e: Exception) {
                 e.printStackTrace()
             }

@@ -118,5 +118,10 @@ dependencies {
   debugImplementation(libs.androidx.compose.ui.tooling)
   "ksp"(libs.androidx.room.compiler)
   "ksp"(libs.moshi.kotlin.codegen)
+  implementation(project(":ui-core"))
+  implementation(project(":browser-engine"))
   implementation(project(":extension-engine"))
+  implementation(project(":permission-engine"))
+  implementation(project(":adblock-engine"))
+  implementation(project(":translate-engine"))
 }

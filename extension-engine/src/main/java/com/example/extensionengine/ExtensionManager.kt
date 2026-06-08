@@ -8,10 +8,10 @@ class ExtensionManager(
     private val context: Context,
     private val delegate: BrowserDelegate?
 ) {
-    val engine = ExtensionEngine(context, delegate)
+    val engine = ExtensionEngineImpl(context, delegate)
 
-    fun setupWebView(webView: WebView) {
-        engine.setupWebView(webView)
+    fun setupWebView(webView: WebView, tabId: String? = null) {
+        engine.setupWebView(webView, tabId)
     }
 
     fun injectContentScripts(webView: WebView, url: String) {

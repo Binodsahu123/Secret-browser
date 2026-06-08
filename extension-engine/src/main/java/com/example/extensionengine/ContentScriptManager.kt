@@ -1,7 +1,6 @@
 package com.example.extensionengine
 
 import android.content.Context
-import android.webkit.WebView
 import java.io.File
 
 class ContentScriptManager(
@@ -14,7 +13,7 @@ class ContentScriptManager(
     /**
      * Checks matching patterns and triggers evaluation of assets on current URL.
      */
-    fun matchAndInject(webView: WebView, url: String, parsedExtensions: List<ParsedExtension>) {
+    fun matchAndInject(evaluator: ScriptEvaluator, url: String, parsedExtensions: List<ParsedExtension>) {
         if (url.startsWith("about:") || url.startsWith("orion:") || url.startsWith("file://")) return
 
         for (ext in parsedExtensions) {
@@ -27,7 +26,23 @@ class ContentScriptManager(
                         try {
                             val cssContent = readExtensionFile(extensionDir, cssPath)
                             if (cssContent.isNotBlank()) {
-                                cssInjector.injectCss(webView, cssContent)
+                                val cssKey = "style_${ext.id}_${cssPath.hashCode()}"
+                                val guardAndInjectScript = """
+                                    (function() {
+                                        window._orionStylesInjected = window._orionStylesInjected || {};
+                                        if (window._orionStylesInjected["$cssKey"]) return;
+                                        window._orionStylesInjected["$cssKey"] = true;
+                                        try {
+                                             const style = document.createElement('style');
+                                             style.type = 'text/css';
+                                             style.innerHTML = ${org.json.JSONObject.quote(cssContent)};
+                                             (document.head || document.documentElement).appendChild(style);
+                                        } catch(e) {
+                                             console.error("CSS Injection Error in $cssPath: ", e);
+                                        }
+                                    })();
+                                """.trimIndent()
+                                scriptInjector.injectScript(evaluator, guardAndInjectScript)
                             }
                         } catch (e: Exception) {
                             e.printStackTrace()
@@ -39,16 +54,22 @@ class ContentScriptManager(
                         try {
                             val jsContent = readExtensionFile(extensionDir, jsPath)
                             if (jsContent.isNotBlank()) {
+                                val jsKey = "script_${ext.id}_${jsPath.hashCode()}"
                                 val selfContainedScopedScript = """
                                     (function() {
+                                        window._orionScriptsInjected = window._orionScriptsInjected || {};
+                                        if (window._orionScriptsInjected["$jsKey"]) return;
+                                        window._orionScriptsInjected["$jsKey"] = true;
                                         try {
+                                            const browser = window._orionGetExtensionContext("${ext.id}");
+                                            const chrome = browser;
                                             $jsContent
                                         } catch (e) {
                                             console.error("Content Script Exec Error in $jsPath: ", e);
                                         }
                                     })();
                                 """.trimIndent()
-                                scriptInjector.injectScript(webView, selfContainedScopedScript)
+                                scriptInjector.injectScript(evaluator, selfContainedScopedScript)
                             }
                         } catch (e: Exception) {
                             e.printStackTrace()
