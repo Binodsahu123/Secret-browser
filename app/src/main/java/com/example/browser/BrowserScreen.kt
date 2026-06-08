@@ -9,6 +9,11 @@ import android.text.format.Formatter
 import android.widget.Toast
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
@@ -5157,135 +5162,143 @@ fun MobileTranslationBar(
         shape = RoundedCornerShape(14.dp),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+                .padding(horizontal = 12.dp, vertical = 8.dp)
         ) {
             Row(
+                modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.weight(1f)
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Icon(
-                    imageVector = Icons.Default.Translate,
-                    contentDescription = "Translate",
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(20.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Translate,
+                        contentDescription = "Translate",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
 
-                AssistChip(
-                    onClick = { showMoreLanguages = true },
-                    label = {
-                        Text(
-                            text = uiState.translateTargetLang,
-                            style = MaterialTheme.typography.bodyMedium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    },
-                    trailingIcon = { Icon(Icons.Default.ArrowDropDown, null, modifier = Modifier.size(16.dp)) },
-                    modifier = Modifier.testTag("mobile_language_selector")
-                )
-            }
+                    AssistChip(
+                        onClick = { showMoreLanguages = true },
+                        label = {
+                            Text(
+                                text = uiState.translateTargetLang,
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        },
+                        trailingIcon = { Icon(Icons.Default.ArrowDropDown, null, modifier = Modifier.size(16.dp)) },
+                        modifier = Modifier.testTag("mobile_language_selector")
+                    )
+                }
 
-            Spacer(modifier = Modifier.width(6.dp))
+                Spacer(modifier = Modifier.width(6.dp))
 
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                Box {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Box {
+                        IconButton(
+                            onClick = { showMoreMenu = true },
+                            modifier = Modifier.size(36.dp).testTag("mobile_translate_settings")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Settings,
+                                contentDescription = "Options",
+                                modifier = Modifier.size(18.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        DropdownMenu(
+                            expanded = showMoreMenu,
+                            onDismissRequest = { showMoreMenu = false }
+                        ) {
+                            DropdownMenuItem(
+                                leadingIcon = { Icon(Icons.Default.Language, null, modifier = Modifier.size(16.dp)) },
+                                text = { Text("Choose language...", fontSize = 13.sp) },
+                                onClick = {
+                                    showMoreMenu = false
+                                    showMoreLanguages = true
+                                }
+                            )
+                            DropdownMenuItem(
+                                leadingIcon = { Icon(Icons.Default.Block, null, modifier = Modifier.size(16.dp)) },
+                                text = { Text("Never show for this page", fontSize = 13.sp) },
+                                onClick = {
+                                    showMoreMenu = false
+                                    val currentUrl = activeTab?.url ?: ""
+                                    val host = viewModel.getUrlHost(currentUrl)
+                                    if (host.isNotEmpty()) {
+                                        viewModel.translateManager.settings.addNeverTranslateSite(host)
+                                        Toast.makeText(context, "Never translate $host added", Toast.LENGTH_SHORT).show()
+                                    }
+                                    viewModel.dismissTranslateBar()
+                                }
+                            )
+                            DropdownMenuItem(
+                                leadingIcon = { Icon(Icons.Default.Language, null, modifier = Modifier.size(16.dp)) },
+                                text = { Text("Never show for this language (${detectedLang.uppercase()})", fontSize = 13.sp) },
+                                onClick = {
+                                    showMoreMenu = false
+                                    viewModel.translateManager.settings.addNeverTranslateLanguage(detectedLang)
+                                    Toast.makeText(context, "Never translate ${detectedLang.uppercase()} pages", Toast.LENGTH_SHORT).show()
+                                    viewModel.dismissTranslateBar()
+                                }
+                            )
+                            DropdownMenuItem(
+                                leadingIcon = { Icon(Icons.Default.Info, null, modifier = Modifier.size(16.dp)) },
+                                text = { Text("Translation Diagnostics", fontSize = 13.sp) },
+                                onClick = {
+                                    showMoreMenu = false
+                                    onShowDiagnostics()
+                                }
+                            )
+                        }
+                    }
+
+                    if (uiState.isPageTranslated) {
+                        TextButton(
+                            onClick = { viewModel.undoTranslation() },
+                            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.primary),
+                            modifier = Modifier.height(36.dp).testTag("mobile_translate_undo")
+                        ) {
+                            Text("Show Original", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        }
+                    } else {
+                        Button(
+                            onClick = { viewModel.translateActivePage(uiState.translateTargetLangCode) },
+                            modifier = Modifier.height(36.dp).testTag("mobile_translate_do")
+                        ) {
+                            Text("Translate", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        }
+                    }
+
                     IconButton(
-                        onClick = { showMoreMenu = true },
-                        modifier = Modifier.size(36.dp).testTag("mobile_translate_settings")
+                        onClick = { viewModel.dismissTranslateBar() },
+                        modifier = Modifier.size(36.dp).testTag("mobile_translate_close")
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Settings,
-                            contentDescription = "Options",
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Close",
                             modifier = Modifier.size(18.dp),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-
-                    DropdownMenu(
-                        expanded = showMoreMenu,
-                        onDismissRequest = { showMoreMenu = false }
-                    ) {
-                        DropdownMenuItem(
-                            leadingIcon = { Icon(Icons.Default.Language, null, modifier = Modifier.size(16.dp)) },
-                            text = { Text("Choose language...", fontSize = 13.sp) },
-                            onClick = {
-                                showMoreMenu = false
-                                showMoreLanguages = true
-                            }
-                        )
-                        DropdownMenuItem(
-                            leadingIcon = { Icon(Icons.Default.Block, null, modifier = Modifier.size(16.dp)) },
-                            text = { Text("Never show for this page", fontSize = 13.sp) },
-                            onClick = {
-                                showMoreMenu = false
-                                val currentUrl = activeTab?.url ?: ""
-                                val host = viewModel.getUrlHost(currentUrl)
-                                if (host.isNotEmpty()) {
-                                    viewModel.translateManager.settings.addNeverTranslateSite(host)
-                                    Toast.makeText(context, "Never translate $host added", Toast.LENGTH_SHORT).show()
-                                }
-                                viewModel.dismissTranslateBar()
-                            }
-                        )
-                        DropdownMenuItem(
-                            leadingIcon = { Icon(Icons.Default.Language, null, modifier = Modifier.size(16.dp)) },
-                            text = { Text("Never show for this language (${detectedLang.uppercase()})", fontSize = 13.sp) },
-                            onClick = {
-                                showMoreMenu = false
-                                viewModel.translateManager.settings.addNeverTranslateLanguage(detectedLang)
-                                Toast.makeText(context, "Never translate ${detectedLang.uppercase()} pages", Toast.LENGTH_SHORT).show()
-                                viewModel.dismissTranslateBar()
-                            }
-                        )
-                        DropdownMenuItem(
-                            leadingIcon = { Icon(Icons.Default.Info, null, modifier = Modifier.size(16.dp)) },
-                            text = { Text("Translation Diagnostics", fontSize = 13.sp) },
-                            onClick = {
-                                showMoreMenu = false
-                                onShowDiagnostics()
-                            }
-                        )
-                    }
-                }
-
-                if (uiState.isPageTranslated) {
-                    TextButton(
-                        onClick = { viewModel.undoTranslation() },
-                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.primary),
-                        modifier = Modifier.height(36.dp).testTag("mobile_translate_undo")
-                    ) {
-                        Text("Show Original", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                    }
-                } else {
-                    Button(
-                        onClick = { viewModel.translateActivePage(uiState.translateTargetLangCode) },
-                        modifier = Modifier.height(36.dp).testTag("mobile_translate_do")
-                    ) {
-                        Text("Translate", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                    }
-                }
-
-                IconButton(
-                    onClick = { viewModel.dismissTranslateBar() },
-                    modifier = Modifier.size(36.dp).testTag("mobile_translate_close")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Close,
-                        contentDescription = "Close",
-                        modifier = Modifier.size(18.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
                 }
             }
+            TranslationProgressSection(
+                progressManager = viewModel.translateManager.progressManager,
+                onRetry = { viewModel.translateActivePage(uiState.translateTargetLangCode) }
+            )
         }
     }
 
@@ -5323,154 +5336,162 @@ fun DesktopTranslationBar(
         shape = RoundedCornerShape(8.dp),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.2f))
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .padding(horizontal = 16.dp, vertical = 10.dp)
         ) {
             Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.weight(1.2f)
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f), RoundedCornerShape(8.dp)),
-                    contentAlignment = Alignment.Center
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1.2f)
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Translate,
-                        contentDescription = "Translate Logo",
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-                Spacer(modifier = Modifier.width(12.dp))
-                Column {
-                    Text(
-                        text = "Orion Translator",
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Text(
-                        text = if (uiState.isPageTranslated) "Translated to ${uiState.translateTargetLang}" else "Detected page is in ${detectedLang.uppercase()}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.weight(2f)
-            ) {
-                AssistChip(
-                    onClick = { showMoreLanguages = true },
-                    label = { Text("Target: ${uiState.translateTargetLang}") },
-                    leadingIcon = { Icon(Icons.Default.Language, null, modifier = Modifier.size(16.dp)) },
-                    modifier = Modifier.testTag("desktop_target_language_chip")
-                )
-
-                val popularLangs = listOf("hi" to "Hindi", "es" to "Spanish", "fr" to "French")
-                popularLangs.forEach { (code, name) ->
-                    val isSelected = uiState.translateTargetLangCode == code
-                    FilterChip(
-                        selected = isSelected,
-                        onClick = { viewModel.translateActivePage(code) },
-                        label = { Text(name) }
-                    )
-                }
-            }
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Box {
-                    IconButton(onClick = { showMoreMenu = true }) {
-                        Icon(Icons.Default.Settings, "Translation Options", modifier = Modifier.size(18.dp))
-                    }
-                    DropdownMenu(
-                        expanded = showMoreMenu,
-                        onDismissRequest = { showMoreMenu = false }
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f), RoundedCornerShape(8.dp)),
+                        contentAlignment = Alignment.Center
                     ) {
-                        DropdownMenuItem(
-                            leadingIcon = { Icon(Icons.Default.Block, null, modifier = Modifier.size(16.dp)) },
-                            text = { Text("Never show for this page", fontSize = 13.sp) },
-                            onClick = {
-                                showMoreMenu = false
-                                val currentUrl = activeTab?.url ?: ""
-                                val host = viewModel.getUrlHost(currentUrl)
-                                if (host.isNotEmpty()) {
-                                    viewModel.translateManager.settings.addNeverTranslateSite(host)
-                                    Toast.makeText(context, "Never translate $host added", Toast.LENGTH_SHORT).show()
+                        Icon(
+                            imageVector = Icons.Default.Translate,
+                            contentDescription = "Translate Logo",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text(
+                            text = "Orion Translator",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = if (uiState.isPageTranslated) "Translated to ${uiState.translateTargetLang}" else "Detected page is in ${detectedLang.uppercase()}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.weight(2f)
+                ) {
+                    AssistChip(
+                        onClick = { showMoreLanguages = true },
+                        label = { Text("Target: ${uiState.translateTargetLang}") },
+                        leadingIcon = { Icon(Icons.Default.Language, null, modifier = Modifier.size(16.dp)) },
+                        modifier = Modifier.testTag("desktop_target_language_chip")
+                    )
+
+                    val popularLangs = listOf("hi" to "Hindi", "es" to "Spanish", "fr" to "French")
+                    popularLangs.forEach { (code, name) ->
+                        val isSelected = uiState.translateTargetLangCode == code
+                        FilterChip(
+                            selected = isSelected,
+                            onClick = { viewModel.translateActivePage(code) },
+                            label = { Text(name) }
+                        )
+                    }
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box {
+                        IconButton(onClick = { showMoreMenu = true }) {
+                            Icon(Icons.Default.Settings, "Translation Options", modifier = Modifier.size(18.dp))
+                        }
+                        DropdownMenu(
+                            expanded = showMoreMenu,
+                            onDismissRequest = { showMoreMenu = false }
+                        ) {
+                            DropdownMenuItem(
+                                leadingIcon = { Icon(Icons.Default.Block, null, modifier = Modifier.size(16.dp)) },
+                                text = { Text("Never show for this page", fontSize = 13.sp) },
+                                onClick = {
+                                    showMoreMenu = false
+                                    val currentUrl = activeTab?.url ?: ""
+                                    val host = viewModel.getUrlHost(currentUrl)
+                                    if (host.isNotEmpty()) {
+                                        viewModel.translateManager.settings.addNeverTranslateSite(host)
+                                        Toast.makeText(context, "Never translate $host added", Toast.LENGTH_SHORT).show()
+                                    }
+                                    viewModel.dismissTranslateBar()
                                 }
-                                viewModel.dismissTranslateBar()
-                            }
-                        )
-                        DropdownMenuItem(
-                            leadingIcon = { Icon(Icons.Default.Language, null, modifier = Modifier.size(16.dp)) },
-                            text = { Text("Never show for this language (${detectedLang.uppercase()})", fontSize = 13.sp) },
-                            onClick = {
-                                showMoreMenu = false
-                                viewModel.translateManager.settings.addNeverTranslateLanguage(detectedLang)
-                                Toast.makeText(context, "Never translate ${detectedLang.uppercase()} pages", Toast.LENGTH_SHORT).show()
-                                viewModel.dismissTranslateBar()
-                            }
-                        )
-                        DropdownMenuItem(
-                            leadingIcon = { Icon(Icons.Default.Info, null, modifier = Modifier.size(16.dp)) },
-                            text = { Text("Translation Diagnostics", fontSize = 13.sp) },
-                            onClick = {
-                                showMoreMenu = false
-                                onShowDiagnostics()
-                            }
-                        )
+                            )
+                            DropdownMenuItem(
+                                leadingIcon = { Icon(Icons.Default.Language, null, modifier = Modifier.size(16.dp)) },
+                                text = { Text("Never show for this language (${detectedLang.uppercase()})", fontSize = 13.sp) },
+                                onClick = {
+                                    showMoreMenu = false
+                                    viewModel.translateManager.settings.addNeverTranslateLanguage(detectedLang)
+                                    Toast.makeText(context, "Never translate ${detectedLang.uppercase()} pages", Toast.LENGTH_SHORT).show()
+                                    viewModel.dismissTranslateBar()
+                                }
+                            )
+                            DropdownMenuItem(
+                                leadingIcon = { Icon(Icons.Default.Info, null, modifier = Modifier.size(16.dp)) },
+                                text = { Text("Translation Diagnostics", fontSize = 13.sp) },
+                                onClick = {
+                                    showMoreMenu = false
+                                    onShowDiagnostics()
+                                }
+                            )
+                        }
                     }
-                }
 
-                if (!uiState.isPageTranslated) {
-                    FilledTonalButton(
-                        onClick = { viewModel.translateActivePage(uiState.translateTargetLangCode) },
-                        modifier = Modifier.testTag("desktop_translate_button")
+                    if (!uiState.isPageTranslated) {
+                        FilledTonalButton(
+                            onClick = { viewModel.translateActivePage(uiState.translateTargetLangCode) },
+                            modifier = Modifier.testTag("desktop_translate_button")
+                        ) {
+                            Text("Translate")
+                        }
+                    }
+
+                    if (uiState.isPageTranslated) {
+                        Button(
+                            onClick = { viewModel.undoTranslation() },
+                            modifier = Modifier.testTag("desktop_show_original_button")
+                        ) {
+                            Text("Show Original")
+                        }
+                    }
+
+                    OutlinedButton(
+                        onClick = { viewModel.dismissTranslateBar() },
+                        modifier = Modifier.testTag("desktop_hide_button")
                     ) {
-                        Text("Translate")
+                        Text("Hide")
                     }
-                }
 
-                if (uiState.isPageTranslated) {
-                    Button(
-                        onClick = { viewModel.undoTranslation() },
-                        modifier = Modifier.testTag("desktop_show_original_button")
+                    IconButton(
+                        onClick = { viewModel.dismissTranslateBar() },
+                        modifier = Modifier.size(36.dp).background(MaterialTheme.colorScheme.surfaceVariant, CircleShape).testTag("desktop_close_button")
                     ) {
-                        Text("Show Original")
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Close Toolbar",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(16.dp)
+                        )
                     }
-                }
-
-                OutlinedButton(
-                    onClick = { viewModel.dismissTranslateBar() },
-                    modifier = Modifier.testTag("desktop_hide_button")
-                ) {
-                    Text("Hide")
-                }
-
-                IconButton(
-                    onClick = { viewModel.dismissTranslateBar() },
-                    modifier = Modifier.size(36.dp).background(MaterialTheme.colorScheme.surfaceVariant, CircleShape).testTag("desktop_close_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Close,
-                        contentDescription = "Close Toolbar",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(16.dp)
-                    )
                 }
             }
+            TranslationProgressSection(
+                progressManager = viewModel.translateManager.progressManager,
+                onRetry = { viewModel.translateActivePage(uiState.translateTargetLangCode) }
+            )
         }
     }
 
@@ -5560,5 +5581,110 @@ fun TranslationDiagnosticsDialog(viewModel: BrowserViewModel, onDismiss: () -> U
             }
         }
     )
+}
+
+@Composable
+fun TranslationProgressSection(
+    progressManager: com.example.translateengine.TranslationProgressManager,
+    onRetry: () -> Unit
+) {
+    val state by progressManager.state.collectAsState()
+    val total by progressManager.totalNodes.collectAsState()
+    val translated by progressManager.translatedNodes.collectAsState()
+
+    if (state == com.example.translateengine.ProgressState.Idle) return
+
+    val infiniteTransition = rememberInfiniteTransition(label = "translation_rotation")
+    val rotation by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1200, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "translation_rotation"
+    )
+
+    Surface(
+        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f),
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+            .testTag("translation_progress_section")
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
+                when (state) {
+                    com.example.translateengine.ProgressState.Translating -> {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "Translating",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier
+                                .size(18.dp)
+                                .graphicsLayer { rotationZ = rotation }
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = if (total > 0) "Translating $translated / $total" else "Translating...",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
+                    com.example.translateengine.ProgressState.Completed -> {
+                        Icon(
+                            imageVector = Icons.Default.CheckCircle,
+                            contentDescription = "Success",
+                            tint = Color(0xFF2E7D32),
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "✓ Translation Complete",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF2E7D32)
+                        )
+                    }
+                    com.example.translateengine.ProgressState.Failed -> {
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = "Failed",
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "⚠ Translation Failed",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                    else -> {}
+                }
+            }
+
+            if (state == com.example.translateengine.ProgressState.Failed) {
+                TextButton(
+                    onClick = onRetry,
+                    modifier = Modifier.height(32.dp).testTag("translation_progress_retry")
+                ) {
+                    Text("Retry", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
 }
 

@@ -19,6 +19,12 @@ class AppTranslateEngine(private val context: Context) : TranslateEngine {
     private val providerAdapter = GoogleTranslateBridge()
     private val coordinator = TranslationCoordinator(context, providerAdapter)
 
+    var progressManager: TranslationProgressManager? = null
+        set(value) {
+            field = value
+            coordinator.progressManager = value
+        }
+
     override suspend fun translateText(text: String, srcLang: String, targetLang: String): String {
         return providerAdapter.translate(text, srcLang, targetLang)
     }

@@ -9,6 +9,11 @@ class TranslateManager(private val context: Context) {
     val detector = LanguageDetector()
     val debugger = TranslationDebugger
     val stateManager = TranslationStateManager()
+    val progressManager = TranslationProgressManager()
+
+    init {
+        engine.progressManager = progressManager
+    }
 
     /**
      * Translates the active page inside a target WebView.

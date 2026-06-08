@@ -19,6 +19,7 @@ class TranslationCoordinator(
     private val queue = TranslationQueue()
     private val tracker = DomTrackingEngine()
     private var observerManager: MutationObserverManager? = null
+    var progressManager: TranslationProgressManager? = null
 
     /**
      * Translates the active page loaded in the WebView using in-place text swap.
@@ -29,6 +30,8 @@ class TranslationCoordinator(
         
         Log.d("TranslationCoordinator", "Starting translation of tab: $tabId to $targetLang, desktopMode: $isDesktopMode")
         val startTime = System.currentTimeMillis()
+        progressManager?.reset()
+        progressManager?.startTranslation(0)
 
         // Setup the dynamic observer for automatic translation of new elements (infinite scroll / dynamic SPA)
         setupMutationObserver(webView, targetLang, tabId, isDesktopMode)
@@ -38,19 +41,33 @@ class TranslationCoordinator(
                 if (rawJson.isNullOrBlank()) {
                     Log.d("TranslationCoordinator", "No translatable nodes extracted.")
                     onFinished(0)
+                    progressManager?.completeTranslation()
                     return@extractContent
                 }
 
                 queue.enqueueJob {
-                    val count = processPayload(webView, rawJson, targetLang, tabId, isDesktopMode)
-                    val elapsed = System.currentTimeMillis() - startTime
-                    TranslationDebugger.addTranslationTime(elapsed)
-                    
-                    // Activate live observer in page
-                    observerManager?.startObserving(isDesktopMode)
-                    
-                    withContext(Dispatchers.Main) {
-                        onFinished(count)
+                    try {
+                        val count = processPayload(webView, rawJson, targetLang, tabId, isDesktopMode)
+                        val elapsed = System.currentTimeMillis() - startTime
+                        TranslationDebugger.addTranslationTime(elapsed)
+                        
+                        // Activate live observer in page
+                        observerManager?.startObserving(isDesktopMode)
+                        
+                        withContext(Dispatchers.Main) {
+                            if (TranslationDebugger.failedBatches.get() > 0 && count == 0) {
+                                progressManager?.failTranslation()
+                            } else {
+                                progressManager?.completeTranslation()
+                            }
+                            onFinished(count)
+                        }
+                    } catch (e: Exception) {
+                        Log.e("TranslationCoordinator", "Translation job error", e)
+                        withContext(Dispatchers.Main) {
+                            progressManager?.failTranslation()
+                            onFinished(0)
+                        }
                     }
                 }
             }
@@ -94,6 +111,8 @@ class TranslationCoordinator(
 
             if (itemsCount == 0) return 0
 
+            progressManager?.setTotal(itemsCount)
+
             val toTranslateList = mutableListOf<TranslationRequestItem>()
             val readyTranslations = JSONArray()
 
@@ -134,6 +153,9 @@ class TranslationCoordinator(
                 }
             }
 
+            val cachedCount = readyTranslations.length()
+            progressManager?.updateProgress(cachedCount)
+
             // 2. Chunk cache misses into batches
             if (toTranslateList.isNotEmpty()) {
                 val batchConfig = TranslationBatchManager.createBatches(toTranslateList)
@@ -143,10 +165,16 @@ class TranslationCoordinator(
                 val jobs = mutableListOf<Deferred<List<JSONObject>>>()
                 val jobScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
+                val completedNodes = java.util.concurrent.atomic.AtomicInteger(cachedCount)
+
                 // Process batches with limited parallel workers
                 batchConfig.batches.forEach { batch ->
                     val job = jobScope.async {
-                        translateBatchWithRetry(batch, targetLang, 3)
+                        val batchResults = translateBatchWithRetry(batch, targetLang, 3)
+                        val size = batch.size
+                        val currentComp = completedNodes.addAndGet(size)
+                        progressManager?.updateProgress(currentComp)
+                        batchResults
                     }
                     jobs.add(job)
                 }
