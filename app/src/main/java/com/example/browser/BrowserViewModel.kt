@@ -707,6 +707,75 @@ class BrowserViewModel(
         _uiState.update { it.copy(showFilePicker = false) }
     }
 
+    inner class BrowserWebView(context: Context, val tabId: String) : WebView(context) {
+        private var startX = 0f
+        private var startY = 0f
+        private val swipeThreshold = 150f
+        private val yThreshold = 100f
+        private var accumulatedNativeScroll = 0
+
+        override fun onWindowVisibilityChanged(visibility: Int) {
+            if (visibility == View.GONE || visibility == View.INVISIBLE) {
+                super.onWindowVisibilityChanged(View.VISIBLE)
+            } else {
+                super.onWindowVisibilityChanged(visibility)
+            }
+        }
+
+        override fun onScrollChanged(l: Int, t: Int, oldl: Int, oldt: Int) {
+            super.onScrollChanged(l, t, oldl, oldt)
+            val currentY = t
+            val diff = currentY - oldt
+            
+            if ((diff > 0 && accumulatedNativeScroll < 0) || (diff < 0 && accumulatedNativeScroll > 0)) {
+                accumulatedNativeScroll = 0
+            }
+            
+            accumulatedNativeScroll += diff
+            
+            if (currentY <= 15) {
+                setToolbarsVisible(true)
+                accumulatedNativeScroll = 0
+            } else {
+                if (accumulatedNativeScroll > 100) {
+                    setToolbarsVisible(false)
+                    accumulatedNativeScroll = 0
+                } else if (accumulatedNativeScroll < -60) {
+                    setToolbarsVisible(true)
+                    accumulatedNativeScroll = 0
+                }
+            }
+        }
+
+        override fun onTouchEvent(event: android.view.MotionEvent): Boolean {
+            when (event.action) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    startX = event.x
+                    startY = event.y
+                }
+                android.view.MotionEvent.ACTION_UP -> {
+                    val diffX = event.x - startX
+                    val diffY = event.y - startY
+                    
+                    if (Math.abs(diffX) > Math.abs(diffY) && Math.abs(diffX) > swipeThreshold && Math.abs(diffY) < yThreshold) {
+                        if (diffX > 0) {
+                            if (canGoBack()) {
+                                goBack()
+                                return true
+                            }
+                        } else {
+                            if (canGoForward()) {
+                                goForward()
+                                return true
+                            }
+                        }
+                    }
+                }
+            }
+            return super.onTouchEvent(event)
+        }
+    }
+
     // Lazily get or create the WebView for Composable use
     fun getOrCreateWebView(tabId: String, context: Context): WebView {
         val existing = webViewMap[tabId]
@@ -721,75 +790,7 @@ class BrowserViewModel(
 
         val currentTab = _uiState.value.tabs.find { it.id == tabId }
 
-        val webView = object : WebView(context) {
-            private var startX = 0f
-            private var startY = 0f
-            private val swipeThreshold = 150f
-            private val yThreshold = 100f
-
-            override fun onWindowVisibilityChanged(visibility: Int) {
-                if (visibility == View.GONE || visibility == View.INVISIBLE) {
-                    super.onWindowVisibilityChanged(View.VISIBLE)
-                } else {
-                    super.onWindowVisibilityChanged(visibility)
-                }
-            }
-
-            private var accumulatedNativeScroll = 0
-
-            override fun onScrollChanged(l: Int, t: Int, oldl: Int, oldt: Int) {
-                super.onScrollChanged(l, t, oldl, oldt)
-                val currentY = t
-                val diff = currentY - oldt
-                
-                if ((diff > 0 && accumulatedNativeScroll < 0) || (diff < 0 && accumulatedNativeScroll > 0)) {
-                    accumulatedNativeScroll = 0
-                }
-                
-                accumulatedNativeScroll += diff
-                
-                if (currentY <= 15) {
-                    setToolbarsVisible(true)
-                    accumulatedNativeScroll = 0
-                } else {
-                    if (accumulatedNativeScroll > 100) {
-                        setToolbarsVisible(false)
-                        accumulatedNativeScroll = 0
-                    } else if (accumulatedNativeScroll < -60) {
-                        setToolbarsVisible(true)
-                        accumulatedNativeScroll = 0
-                    }
-                }
-            }
-
-            override fun onTouchEvent(event: android.view.MotionEvent): Boolean {
-                when (event.action) {
-                    android.view.MotionEvent.ACTION_DOWN -> {
-                        startX = event.x
-                        startY = event.y
-                    }
-                    android.view.MotionEvent.ACTION_UP -> {
-                        val diffX = event.x - startX
-                        val diffY = event.y - startY
-                        
-                        if (Math.abs(diffX) > Math.abs(diffY) && Math.abs(diffX) > swipeThreshold && Math.abs(diffY) < yThreshold) {
-                            if (diffX > 0) {
-                                if (canGoBack()) {
-                                    goBack()
-                                    return true
-                                }
-                            } else {
-                                if (canGoForward()) {
-                                    goForward()
-                                    return true
-                                }
-                            }
-                        }
-                    }
-                }
-                return super.onTouchEvent(event)
-            }
-        }.apply {
+        val webView = BrowserWebView(context, tabId).apply {
             id = View.generateViewId()
 
             setOnLongClickListener {
