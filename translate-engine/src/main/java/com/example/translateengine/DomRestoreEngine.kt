@@ -8,6 +8,8 @@ object DomRestoreEngine {
      * Executes the restore in the WebView in-place, keeping layout and scroll position intact.
      */
     fun restoreOriginal(webView: WebView, callback: (String?) -> Unit = {}) {
-        OriginalDomSnapshotManager.restoreFromSnapshot(webView, callback)
+        OriginalPageSnapshotManager.restoreSnapshot(webView, "active_tab") { res ->
+            callback(if (res) "restored" else "snapshot_failed")
+        }
     }
 }

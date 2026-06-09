@@ -45,6 +45,10 @@ class TranslationCoordinator(
                     return@extractContent
                 }
 
+                OriginalPageSnapshotManager.captureSnapshot(webView, tabId) { snapshotCount ->
+                    Log.d("TranslationCoordinator", "Captured original snapshot: $snapshotCount nodes")
+                }
+
                 queue.enqueueJob {
                     try {
                         val count = processPayload(webView, rawJson, targetLang, tabId, isDesktopMode)

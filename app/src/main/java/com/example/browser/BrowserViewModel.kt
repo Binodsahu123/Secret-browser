@@ -55,8 +55,8 @@ data class TabState(
     val parentTabId: String? = null,
     val showTranslateBar: Boolean = false,
     val isPageTranslated: Boolean = false,
-    val translateTargetLang: String = "Hindi",
-    val translateTargetLangCode: String = "hi",
+    val translateTargetLang: String = "English",
+    val translateTargetLangCode: String = "en",
     val originalTranslationUrl: String = "",
     val autoTranslateEnabled: Boolean = false
 )
@@ -133,8 +133,8 @@ data class BrowserUiState(
     // Google Translate State
     val showTranslateBar: Boolean = false,
     val isPageTranslated: Boolean = false,
-    val translateTargetLang: String = "Hindi",
-    val translateTargetLangCode: String = "hi",
+    val translateTargetLang: String = "English",
+    val translateTargetLangCode: String = "en",
     val originalTranslationUrl: String = "",
     val autoTranslateEnabled: Boolean = false
 )
@@ -182,7 +182,12 @@ class BrowserViewModel(
     val permissionEngine: com.example.permissionengine.PermissionEngine = com.example.permissionengine.PermissionEngineImpl(application)
     val translateManager = com.example.translateengine.TranslateManager(application)
 
-    private val _uiState = MutableStateFlow(BrowserUiState())
+    private val _uiState = MutableStateFlow(
+        BrowserUiState(
+            translateTargetLang = com.example.translateengine.TranslationPreferenceManager.getTargetLanguageName(application),
+            translateTargetLangCode = com.example.translateengine.TranslationPreferenceManager.getTargetLanguageCode(application)
+        )
+    )
     val uiState: StateFlow<BrowserUiState> = _uiState.asStateFlow()
 
     // Notification permission request variables
@@ -1215,43 +1220,80 @@ class BrowserViewModel(
                         }
 
                         // Translate engine hook
-                        if (url != null && !url.contains("translate.google.com") && !url.startsWith("orion://") && url != "about:blank") {
-                            // Extract sample text for Chrome-style language detection Offer
-                            val detectionScript = """
-                                (function() {
-                                    try {
-                                        return (document.title || '') + ' ' + (document.body ? document.body.innerText.substring(0, 300) : '');
-                                    } catch(e) {
-                                        return '';
-                                    }
-                                })()
-                            """.trimIndent()
-                            view?.evaluateJavascript(detectionScript) { innerText ->
-                                if (!innerText.isNullOrBlank() && innerText != "null" && innerText != "\"\"") {
-                                    viewModelScope.launch(kotlinx.coroutines.Dispatchers.Default) {
+                        if (url != null && !url.contains("translate.google.com") && !url.startsWith("orion://") && url != "about:blank" && url != "orion://newtab" && url != "orion://newtab-incognito") {
+                            val host = com.example.adblockengine.AdBlocker.getDomainName(url) ?: ""
+                            
+                            // Initialize page started navigation tracking
+                            com.example.translateengine.TranslationNavigationManager.handlePageStarted(getApplication(), tabId, url)
+
+                            // Clear any stale snapshots for this tab context since a new page is loaded
+                            com.example.translateengine.OriginalPageSnapshotManager.clearSnapshot(tabId)
+
+                            val autoTranslateLangCode = com.example.translateengine.TranslationNavigationManager.shouldAutoTranslate(getApplication(), url)
+                            if (autoTranslateLangCode != null) {
+                                val languagesMap = mapOf(
+                                    "hi" to "Hindi",
+                                    "es" to "Spanish",
+                                    "fr" to "French",
+                                    "de" to "German",
+                                    "en" to "English",
+                                    "ja" to "Japanese",
+                                    "ar" to "Arabic",
+                                    "bn" to "Bengali",
+                                    "pt" to "Portuguese",
+                                    "ru" to "Russian",
+                                    "zh-CN" to "Chinese Simplified",
+                                    "ur" to "Urdu",
+                                    "tr" to "Turkish",
+                                    "te" to "Telugu",
+                                    "mr" to "Marathi",
+                                    "ta" to "Tamil",
+                                    "gu" to "Gujarati",
+                                    "kn" to "Kannada",
+                                    "ml" to "Malayalam",
+                                    "pa" to "Punjabi",
+                                    "or" to "Odia"
+                                )
+                                val autoTranslateLangName = languagesMap[autoTranslateLangCode] ?: "English"
+                                viewModelScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                                    executeGoogleTranslation(autoTranslateLangCode, autoTranslateLangName)
+                                }
+                            } else {
+                                // Extract sample text for Chrome-style language detection Offer
+                                val detectionScript = """
+                                    (function() {
                                         try {
-                                            val detectedLang = translateManager.detectPageLanguage(innerText)
-                                            val targetLangCode = _uiState.value.translateTargetLangCode
-                                            val host = com.example.adblockengine.AdBlocker.getDomainName(url) ?: ""
-                                            val isNeverSite = translateManager.settings.getNeverTranslateSites().contains(host)
-                                            val isNeverLang = translateManager.settings.getNeverTranslateLanguages().contains(detectedLang)
-                                            
-                                            if (detectedLang.isNotEmpty() && detectedLang != "unknown" && detectedLang != targetLangCode) {
-                                                // Check auto translate first
-                                                val autoTranslate = translateManager.settings.isAutoTranslateEnabled() || 
-                                                                    translateManager.settings.getAlwaysTranslateSites().contains(host)
+                                            return (document.title || '') + ' ' + (document.body ? document.body.innerText.substring(0, 300) : '');
+                                        } catch(e) {
+                                            return '';
+                                        }
+                                    })()
+                                """.trimIndent()
+                                view?.evaluateJavascript(detectionScript) { innerText ->
+                                    if (!innerText.isNullOrBlank() && innerText != "null" && innerText != "\"\"") {
+                                        viewModelScope.launch(kotlinx.coroutines.Dispatchers.Default) {
+                                            try {
+                                                val detectedLang = translateManager.detectPageLanguage(innerText)
+                                                val targetLangCode = _uiState.value.translateTargetLangCode
+                                                val isNeverSite = translateManager.settings.getNeverTranslateSites().contains(host)
+                                                val isNeverLang = translateManager.settings.getNeverTranslateLanguages().contains(detectedLang)
                                                 
-                                                if (autoTranslate && !isNeverSite && !isNeverLang) {
-                                                    // Auto translate
-                                                    val targetLangName = _uiState.value.translateTargetLang
-                                                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                                                        executeGoogleTranslation(targetLangCode, targetLangName)
+                                                if (detectedLang.isNotEmpty() && detectedLang != "unknown" && detectedLang != targetLangCode) {
+                                                    // Check auto translate first
+                                                    val autoTranslate = translateManager.settings.isAutoTranslateEnabled() || 
+                                                                        translateManager.settings.getAlwaysTranslateSites().contains(host)
+                                                    
+                                                    if (autoTranslate && !isNeverSite && !isNeverLang) {
+                                                        // Auto translate
+                                                        val targetLangName = _uiState.value.translateTargetLang
+                                                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                                            executeGoogleTranslation(targetLangCode, targetLangName)
+                                                        }
                                                     }
                                                 }
-                                                // Automatic offer popups are completely disabled under any circumstances! Only manual triggers.
+                                            } catch (e: Exception) {
+                                                e.printStackTrace()
                                             }
-                                        } catch (e: Exception) {
-                                            e.printStackTrace()
                                         }
                                     }
                                 }
@@ -2841,24 +2883,48 @@ class BrowserViewModel(
     }
 
     fun dismissTranslateBar() {
-        translateManager.stateManager.transitionTo(com.example.translateengine.TranslationState.Hidden)
         val activeId = _uiState.value.activeTabId
+        val webView = webViewMap[activeId]
+        val currentUrl = webView?.url ?: ""
+        val host = com.example.adblockengine.AdBlocker.getDomainName(currentUrl) ?: ""
+        if (host.isNotEmpty()) {
+            com.example.translateengine.TranslationSessionManager.disableDomainTranslation(host)
+            com.example.translateengine.TranslationPreferenceManager.removePersistedActiveDomain(getApplication(), host)
+        }
+
+        translateManager.stateManager.transitionTo(com.example.translateengine.TranslationState.Hidden)
         _uiState.update { state ->
             val updatedTabs = state.tabs.map { tab ->
                 if (tab.id == activeId) {
-                    tab.copy(showTranslateBar = false)
+                    tab.copy(
+                        showTranslateBar = false,
+                        isPageTranslated = false
+                    )
                 } else tab
             }
             state.copy(
                 showTranslateBar = false,
+                isPageTranslated = false,
                 tabs = updatedTabs
             )
+        }
+        if (webView != null) {
+            com.example.translateengine.DomRestoreEngine.restoreOriginal(webView) { res ->
+                android.util.Log.d("BrowserViewModel", "DOM restoration on dismiss finished! Result: $res")
+            }
         }
     }
 
     fun undoTranslation() {
         val activeId = _uiState.value.activeTabId
         val webView = webViewMap[activeId] ?: return
+        val currentUrl = webView.url ?: ""
+        val host = com.example.adblockengine.AdBlocker.getDomainName(currentUrl) ?: ""
+        if (host.isNotEmpty()) {
+            com.example.translateengine.TranslationSessionManager.disableDomainTranslation(host)
+            com.example.translateengine.TranslationPreferenceManager.removePersistedActiveDomain(getApplication(), host)
+        }
+
         translateManager.stateManager.transitionTo(com.example.translateengine.TranslationState.Original)
         _uiState.update { state ->
             val updatedTabs = state.tabs.map { tab ->
@@ -2885,6 +2951,13 @@ class BrowserViewModel(
         val webView = webViewMap[activeId] ?: return
         val currentUrl = webView.url ?: ""
         if (currentUrl.isEmpty() || currentUrl.startsWith("orion://") || currentUrl.startsWith("about:")) return
+
+        com.example.translateengine.TranslationPreferenceManager.saveTargetLanguage(getApplication(), langCode, langName)
+        val host = com.example.adblockengine.AdBlocker.getDomainName(currentUrl) ?: ""
+        if (host.isNotEmpty()) {
+            com.example.translateengine.TranslationSessionManager.startSession(activeId, host, langCode, langName)
+            com.example.translateengine.TranslationPreferenceManager.addPersistedActiveDomain(getApplication(), host)
+        }
 
         val originalUrl = if (!_uiState.value.isPageTranslated) currentUrl else _uiState.value.originalTranslationUrl
         
