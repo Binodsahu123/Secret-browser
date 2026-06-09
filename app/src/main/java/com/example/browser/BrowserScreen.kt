@@ -5538,6 +5538,17 @@ fun TranslationDiagnosticsDialog(viewModel: BrowserViewModel, onDismiss: () -> U
                 )
                 Divider(color = MaterialTheme.colorScheme.outlineVariant)
                 
+                val totalNodes = dbg.textNodesFound.get()
+                val translatedNodes = dbg.textNodesTranslated.get()
+                val failedNodes = maxOf(0, totalNodes - translatedNodes)
+                val originalNodes = totalNodes
+                val successRate = if (totalNodes > 0) {
+                    (translatedNodes.toDouble() / totalNodes.toDouble()) * 100.0
+                } else {
+                    100.0
+                }
+                val successRateStr = String.format("%.1f%%", successRate)
+
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("Detected Language:", fontWeight = FontWeight.Medium, fontSize = 13.sp)
                     Text(dbg.detectedLanguage.uppercase(), fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.secondary, fontSize = 13.sp)
@@ -5547,36 +5558,32 @@ fun TranslationDiagnosticsDialog(viewModel: BrowserViewModel, onDismiss: () -> U
                     Text(dbg.targetLanguage.uppercase(), fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary, fontSize = 13.sp)
                 }
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Text Nodes Found:", fontWeight = FontWeight.Medium, fontSize = 13.sp)
-                    Text("${dbg.textNodesFound.get()}", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    Text("Total Nodes:", fontWeight = FontWeight.Medium, fontSize = 13.sp)
+                    Text("$totalNodes", fontWeight = FontWeight.Bold, fontSize = 13.sp)
                 }
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Text Nodes Translated:", fontWeight = FontWeight.Medium, fontSize = 13.sp)
-                    Text("${dbg.textNodesTranslated.get()}", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                    Text("Translated Nodes:", fontWeight = FontWeight.Medium, fontSize = 13.sp)
+                    Text("$translatedNodes", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary, fontSize = 13.sp)
                 }
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Active Parallel Workers:", fontWeight = FontWeight.Medium, fontSize = 13.sp)
-                    Text("${dbg.activeWorkersCount}", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    Text("Failed Nodes:", fontWeight = FontWeight.Medium, fontSize = 13.sp)
+                    Text("$failedNodes", fontWeight = FontWeight.Bold, color = if (failedNodes > 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
                 }
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Remaining Queue Backlog:", fontWeight = FontWeight.Medium, fontSize = 13.sp)
-                    Text("${dbg.queueLength}", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    Text("Original Nodes:", fontWeight = FontWeight.Medium, fontSize = 13.sp)
+                    Text("$originalNodes", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                }
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Replacement Success Rate:", fontWeight = FontWeight.Medium, fontSize = 13.sp)
+                    Text(successRateStr, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.secondary, fontSize = 13.sp)
                 }
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("Cache Hits (Memory/Room):", fontWeight = FontWeight.Medium, fontSize = 13.sp)
                     Text("${dbg.cacheHits.get()}", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary, fontSize = 13.sp)
                 }
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Cache Misses:", fontWeight = FontWeight.Medium, fontSize = 13.sp)
-                    Text("${dbg.cacheMisses.get()}", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
-                }
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Translation Time:", fontWeight = FontWeight.Medium, fontSize = 13.sp)
+                    Text("Translation Latency:", fontWeight = FontWeight.Medium, fontSize = 13.sp)
                     Text("${dbg.totalTranslationTimeMs.get()} ms", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                }
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Failed Batches (Retried):", fontWeight = FontWeight.Medium, fontSize = 13.sp)
-                    Text("${dbg.failedBatches.get()}", fontWeight = FontWeight.Bold, color = if (dbg.failedBatches.get() > 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outline, fontSize = 13.sp)
                 }
             }
         }

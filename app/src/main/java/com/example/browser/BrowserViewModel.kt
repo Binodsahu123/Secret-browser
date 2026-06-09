@@ -52,7 +52,13 @@ data class TabState(
     val groupColor: Long? = null,
     val blockedAdsCount: Int = 0,
     val hasLoadedSuccessfully: Boolean = false,
-    val parentTabId: String? = null
+    val parentTabId: String? = null,
+    val showTranslateBar: Boolean = false,
+    val isPageTranslated: Boolean = false,
+    val translateTargetLang: String = "Hindi",
+    val translateTargetLangCode: String = "hi",
+    val originalTranslationUrl: String = "",
+    val autoTranslateEnabled: Boolean = false
 )
 
 data class BrowserUiState(
@@ -406,7 +412,7 @@ class BrowserViewModel(
             val updatedTabs = state.tabs.map {
                 if (it.id == tabId) it.copy(lastActiveTime = System.currentTimeMillis()) else it
             }
-            val activeTab = updatedTabs.find { it.id == tabId }
+            val activeTab = updatedTabs.find { id -> id.id == tabId }
             state.copy(
                 tabs = updatedTabs,
                 activeTabId = tabId,
@@ -415,11 +421,22 @@ class BrowserViewModel(
                 readerModeActive = false,
                 findInPageActive = false,
                 areToolbarsVisible = true,
-                showTranslateBar = false,
-                isPageTranslated = false
+                showTranslateBar = activeTab?.showTranslateBar ?: false,
+                isPageTranslated = activeTab?.isPageTranslated ?: false,
+                translateTargetLang = activeTab?.translateTargetLang ?: "Hindi",
+                translateTargetLangCode = activeTab?.translateTargetLangCode ?: "hi",
+                originalTranslationUrl = activeTab?.originalTranslationUrl ?: ""
             )
         }
-        translateManager.stateManager.transitionTo(com.example.translateengine.TranslationState.Hidden)
+        val targetTab = _uiState.value.tabs.find { it.id == tabId }
+        val targetState = if (targetTab?.isPageTranslated == true) {
+            com.example.translateengine.TranslationState.Translated
+        } else if (targetTab?.showTranslateBar == true) {
+            com.example.translateengine.TranslationState.Visible
+        } else {
+            com.example.translateengine.TranslationState.Hidden
+        }
+        translateManager.stateManager.transitionTo(targetState)
 
         try {
             val activeParams = org.json.JSONObject().apply {
@@ -917,7 +934,9 @@ class BrowserViewModel(
                                 favicon = favicon ?: it.favicon,
                                 readerModeAvailable = false,
                                 blockedAdsCount = 0,
-                                hasLoadedSuccessfully = false
+                                hasLoadedSuccessfully = false,
+                                isPageTranslated = false,
+                                showTranslateBar = false
                             )
                         }
                         if (_uiState.value.activeTabId == tabId) {
@@ -2803,27 +2822,57 @@ class BrowserViewModel(
 
         translateManager.stateManager.transitionTo(com.example.translateengine.TranslationState.Visible)
 
-        _uiState.update { 
-            it.copy(
+        _uiState.update { state ->
+            val origUrl = if (!state.isPageTranslated) currentUrl else state.originalTranslationUrl
+            val updatedTabs = state.tabs.map { tab ->
+                if (tab.id == activeId) {
+                    tab.copy(
+                        showTranslateBar = true,
+                        originalTranslationUrl = origUrl
+                    )
+                } else tab
+            }
+            state.copy(
                 showTranslateBar = true,
-                originalTranslationUrl = if (!it.isPageTranslated) currentUrl else it.originalTranslationUrl
+                originalTranslationUrl = origUrl,
+                tabs = updatedTabs
             )
         }
     }
 
     fun dismissTranslateBar() {
         translateManager.stateManager.transitionTo(com.example.translateengine.TranslationState.Hidden)
-        _uiState.update { it.copy(showTranslateBar = false) }
+        val activeId = _uiState.value.activeTabId
+        _uiState.update { state ->
+            val updatedTabs = state.tabs.map { tab ->
+                if (tab.id == activeId) {
+                    tab.copy(showTranslateBar = false)
+                } else tab
+            }
+            state.copy(
+                showTranslateBar = false,
+                tabs = updatedTabs
+            )
+        }
     }
 
     fun undoTranslation() {
         val activeId = _uiState.value.activeTabId
         val webView = webViewMap[activeId] ?: return
         translateManager.stateManager.transitionTo(com.example.translateengine.TranslationState.Original)
-        _uiState.update { 
-            it.copy(
+        _uiState.update { state ->
+            val updatedTabs = state.tabs.map { tab ->
+                if (tab.id == activeId) {
+                    tab.copy(
+                        isPageTranslated = false,
+                        showTranslateBar = true
+                    )
+                } else tab
+            }
+            state.copy(
                 isPageTranslated = false,
-                showTranslateBar = true
+                showTranslateBar = true,
+                tabs = updatedTabs
             )
         }
         com.example.translateengine.DomRestoreEngine.restoreOriginal(webView) { res ->
@@ -2840,13 +2889,25 @@ class BrowserViewModel(
         val originalUrl = if (!_uiState.value.isPageTranslated) currentUrl else _uiState.value.originalTranslationUrl
         
         translateManager.stateManager.transitionTo(com.example.translateengine.TranslationState.Translating)
-        _uiState.update { 
-            it.copy(
+        _uiState.update { state ->
+            val updatedTabs = state.tabs.map { tab ->
+                if (tab.id == activeId) {
+                    tab.copy(
+                        isPageTranslated = true,
+                        translateTargetLang = langName,
+                        translateTargetLangCode = langCode,
+                        originalTranslationUrl = originalUrl,
+                        showTranslateBar = true
+                    )
+                } else tab
+            }
+            state.copy(
                 isPageTranslated = true,
                 translateTargetLang = langName,
                 translateTargetLangCode = langCode,
                 originalTranslationUrl = originalUrl,
-                showTranslateBar = true
+                showTranslateBar = true,
+                tabs = updatedTabs
             )
         }
 

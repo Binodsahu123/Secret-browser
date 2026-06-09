@@ -63,18 +63,23 @@ object DomExtractionEngine {
                 var node;
                 var idx = 0;
                 window.orionTextNodes = window.orionTextNodes || {};
+                window.orionOriginalSnapshot = window.orionOriginalSnapshot || {};
                 
                 while(node = walker.nextNode()) {
                     if (!node.orionTrId) {
                         node.orionTrId = "text_" + idx++;
                         window.orionTextNodes[node.orionTrId] = node;
                         node.originalText = node.nodeValue;
+                        window.orionOriginalSnapshot[node.orionTrId] = node.nodeValue;
                     }
-                    items.push({
-                        id: node.orionTrId,
-                        type: "text",
-                        text: node.nodeValue
-                    });
+                    var textVal = node.nodeValue ? node.nodeValue.trim() : "";
+                    if (textVal.length > 0) {
+                        items.push({
+                            id: node.orionTrId,
+                            type: "text",
+                            text: textVal
+                        });
+                    }
                 }
                 
                 var placeholders = document.querySelectorAll('input[placeholder], textarea[placeholder]');
@@ -84,12 +89,16 @@ object DomExtractionEngine {
                         el.orionTrId = "place_" + idx++;
                         window.orionTextNodes[el.orionTrId] = el;
                         el.originalPlaceholder = el.getAttribute('placeholder');
+                        window.orionOriginalSnapshot[el.orionTrId + "_place"] = el.getAttribute('placeholder');
                     }
-                    items.push({
-                        id: el.orionTrId,
-                        type: "placeholder",
-                        text: el.getAttribute('placeholder')
-                    });
+                    var placeVal = el.getAttribute('placeholder') ? el.getAttribute('placeholder').trim() : "";
+                    if (placeVal.length > 0) {
+                        items.push({
+                            id: el.orionTrId,
+                            type: "placeholder",
+                            text: placeVal
+                        });
+                    }
                 });
 
                 var buttons = document.querySelectorAll('input[type="button"], input[type="submit"], input[type="reset"]');
@@ -101,11 +110,12 @@ object DomExtractionEngine {
                         el.orionTrId = "buttonval_" + idx++;
                         window.orionTextNodes[el.orionTrId] = el;
                         el.originalValue = el.value;
+                        window.orionOriginalSnapshot[el.orionTrId + "_val"] = el.value;
                     }
                     items.push({
                         id: el.orionTrId,
                         type: "value",
-                        text: el.value
+                        text: val
                     });
                 });
                 
