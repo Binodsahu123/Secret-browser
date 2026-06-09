@@ -177,12 +177,16 @@ fun BrowserScreen(
     var showExtensionsDialog by remember { mutableStateOf(false) }
     var showActiveExtensionsSheet by remember { mutableStateOf(false) }
     var selectedExtensionIdForPopup by remember { mutableStateOf<String?>(null) }
+    var showAIChatSheet by remember { mutableStateOf(false) }
+    var currentCapturedText by remember { mutableStateOf("") }
 
     BackHandler(enabled = true) {
         if (showExtensionsDialog) {
             showExtensionsDialog = false
         } else if (showActiveExtensionsSheet) {
             showActiveExtensionsSheet = false
+        } else if (showAIChatSheet) {
+            showAIChatSheet = false
         } else if (selectedExtensionIdForPopup != null) {
             selectedExtensionIdForPopup = null
         } else if (uiState.isSearchFocused) {
@@ -440,14 +444,24 @@ fun BrowserScreen(
                             }
                         }
 
-                        // 4.5 Extensions Button (Puzzle Icon)
+                        // AI Assistant Summary Button (AutoAwesome Sparkles Icon)
                         IconButton(
-                            onClick = { showActiveExtensionsSheet = true },
-                            modifier = Modifier.size(36.dp).testTag("extensions_puzzle_btn")
+                            onClick = {
+                                if (activeTab?.url?.startsWith("http") == true) {
+                                    viewModel.getActiveWebViewText { text ->
+                                        currentCapturedText = text
+                                        showAIChatSheet = true
+                                    }
+                                } else {
+                                    currentCapturedText = ""
+                                    showAIChatSheet = true
+                                }
+                            },
+                            modifier = Modifier.size(36.dp).testTag("ai_star_btn")
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Extension,
-                                contentDescription = "Active Extensions",
+                                imageVector = Icons.Default.AutoAwesome,
+                                contentDescription = "Active Page Summary Assistant",
                                 tint = if (isGlass) Color.White else LocalContentColor.current,
                                 modifier = Modifier.size(22.dp)
                             )
@@ -786,8 +800,7 @@ fun BrowserScreen(
     }
 
     Box(
-        modifier = modifier
-            .fillMaxSize()
+        modifier = (if (fullscreenState != null) Modifier.fillMaxSize() else modifier)
             .background(MaterialTheme.colorScheme.background)
     ) {
         if (fullscreenState != null) {
@@ -1153,14 +1166,24 @@ fun BrowserScreen(
                             )
                         }
 
-                        // Extensions Button (Puzzle Icon)
+                        // AI Assistant Summary Button (AutoAwesome Sparkles Icon)
                         IconButton(
-                            onClick = { showActiveExtensionsSheet = true },
-                            modifier = Modifier.testTag("extensions_puzzle_btn")
+                            onClick = {
+                                if (activeTab?.url?.startsWith("http") == true) {
+                                    viewModel.getActiveWebViewText { text ->
+                                        currentCapturedText = text
+                                        showAIChatSheet = true
+                                    }
+                                } else {
+                                    currentCapturedText = ""
+                                    showAIChatSheet = true
+                                }
+                            },
+                            modifier = Modifier.testTag("ai_star_btn")
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Extension,
-                                contentDescription = "Active Extensions",
+                                imageVector = Icons.Default.AutoAwesome,
+                                contentDescription = "Active Page Summary Assistant",
                                 tint = if (isGlass) Color.White else LocalContentColor.current
                             )
                         }
@@ -1590,6 +1613,13 @@ fun BrowserScreen(
                 activeFile = activeFile,
                 viewModel = viewModel,
                 onClose = { viewModel.closeLocalFile() }
+            )
+        }
+
+        if (showAIChatSheet) {
+            AIChatPanel(
+                pageText = currentCapturedText,
+                onDismiss = { showAIChatSheet = false }
             )
         }
 
@@ -2070,6 +2100,7 @@ fun TabSwitcherLayout(
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
+        floatingActionButtonPosition = FabPosition.End,
         topBar = {
             if (isSelectionMode) {
                 TopAppBar(
@@ -2663,6 +2694,14 @@ fun SettingsOverlay(
                                     modifier = Modifier.clickable { currentScreen = "appearance" }
                                 )
 
+                                ListItem(
+                                    headlineContent = { Text("AI Assistant Settings") },
+                                    supportingContent = { Text("Default provider, language tuning & custom endpoints", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                                    leadingContent = { Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                                    trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color.Gray) },
+                                    modifier = Modifier.clickable { currentScreen = "ai_settings" }
+                                )
+
                                 HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
 
                                 // Group: Advanced
@@ -3013,6 +3052,12 @@ fun SettingsOverlay(
                     }
                     "downloads" -> {
                         DownloadsSettingsFragment(prefs = prefs, onBack = {
+                            currentScreen = "main"
+                            viewModel.refreshSettings()
+                        })
+                    }
+                    "ai_settings" -> {
+                        AISettingsFragment(onBack = {
                             currentScreen = "main"
                             viewModel.refreshSettings()
                         })

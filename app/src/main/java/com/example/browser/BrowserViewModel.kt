@@ -1691,12 +1691,17 @@ class BrowserViewModel(
                     super.onShowCustomView(view, callback)
                     if (view != null && callback != null) {
                         _fullscreenState.value = FullscreenState(view, callback)
+                        FullscreenController.onEnterFullscreen(view.context)
                     }
                 }
 
                 override fun onHideCustomView() {
                     super.onHideCustomView()
-                    _fullscreenState.value?.callback?.onCustomViewHidden()
+                    val state = _fullscreenState.value
+                    if (state != null) {
+                        FullscreenController.onExitFullscreen(state.view.context)
+                        state.callback.onCustomViewHidden()
+                    }
                     _fullscreenState.value = null
                 }
             }
@@ -2804,7 +2809,11 @@ class BrowserViewModel(
     }
 
     fun exitFullscreen() {
-        _fullscreenState.value?.callback?.onCustomViewHidden()
+        val state = _fullscreenState.value
+        if (state != null) {
+            FullscreenController.onExitFullscreen(state.view.context)
+            state.callback.onCustomViewHidden()
+        }
         _fullscreenState.value = null
     }
 
@@ -4356,6 +4365,21 @@ class BrowserViewModel(
             }
         }
         callback(null)
+    }
+
+    fun getActiveWebViewText(onResult: (String) -> Unit) {
+        executeScriptOnTab("", "(function() { return document.documentElement.innerText || document.body.innerText || ''; })()") { res ->
+            val text = if (res != null && res != "null") {
+                try {
+                    org.json.JSONTokener(res).nextValue() as? String ?: res
+                } catch (e: Exception) {
+                    res
+                }
+            } else {
+                ""
+            }
+            onResult(text)
+        }
     }
 
     override fun onCleared() {
