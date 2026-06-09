@@ -1618,6 +1618,8 @@ fun BrowserScreen(
 
         if (showAIChatSheet) {
             AIChatPanel(
+                tabId = activeTab?.id ?: "default_tab",
+                url = activeTab?.url ?: "",
                 pageText = currentCapturedText,
                 onDismiss = { showAIChatSheet = false }
             )

@@ -1,28 +1,82 @@
 package com.example.browser
 
+data class AIProvider(
+    val name: String,
+    val displayName: String,
+    val isGuestSupported: Boolean,
+    val isLoginRequiredByDefault: Boolean,
+    val models: List<String>
+)
+
 object AIProviderManager {
     val providers = listOf(
-        "Gemini",
-        "ChatGPT",
-        "Claude",
-        "DeepSeek",
-        "Qwen",
-        "Mistral",
-        "Llama",
-        "OpenRouter"
+        AIProvider(
+            name = "Gemini",
+            displayName = "Gemini (Google)",
+            isGuestSupported = true,
+            isLoginRequiredByDefault = false,
+            models = listOf("gemini-3.5-flash", "gemini-3.1-pro-preview", "gemini-2.1-flash", "gemini-2.5-flash-image")
+        ),
+        AIProvider(
+            name = "ChatGPT",
+            displayName = "ChatGPT (OpenAI)",
+            isGuestSupported = false,
+            isLoginRequiredByDefault = true,
+            models = listOf("gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo")
+        ),
+        AIProvider(
+            name = "Claude",
+            displayName = "Claude (Anthropic)",
+            isGuestSupported = false,
+            isLoginRequiredByDefault = true,
+            models = listOf("claude-3-5-sonnet-latest", "claude-3-5-haiku-latest", "claude-3-opus")
+        ),
+        AIProvider(
+            name = "DeepSeek",
+            displayName = "DeepSeek AI",
+            isGuestSupported = false,
+            isLoginRequiredByDefault = true,
+            models = listOf("deepseek-chat", "deepseek-coder", "deepseek-reasoner")
+        ),
+        AIProvider(
+            name = "Qwen",
+            displayName = "Qwen (Alibaba)",
+            isGuestSupported = true,
+            isLoginRequiredByDefault = false,
+            models = listOf("qwen-turbo", "qwen-plus", "qwen-max")
+        ),
+        AIProvider(
+            name = "Mistral",
+            displayName = "Mistral AI",
+            isGuestSupported = true,
+            isLoginRequiredByDefault = false,
+            models = listOf("mistral-large-latest", "mistral-medium-latest", "mistral-small-latest")
+        ),
+        AIProvider(
+            name = "Llama",
+            displayName = "Llama (Meta / Together)",
+            isGuestSupported = true,
+            isLoginRequiredByDefault = false,
+            models = listOf("llama-3-70b-instruct", "llama-3-8b-instruct")
+        ),
+        AIProvider(
+            name = "OpenRouter",
+            displayName = "OpenRouter Gateway",
+            isGuestSupported = true,
+            isLoginRequiredByDefault = false,
+            models = listOf("auto", "google/gemini-2.5-flash", "anthropic/claude-3.5-sonnet", "meta-llama/llama-3-8b")
+        )
     )
 
+    fun getProvider(name: String): AIProvider? {
+        return providers.find { it.name.equals(name, ignoreCase = true) }
+    }
+
     fun getModelsForProvider(provider: String): List<String> {
-        return when (provider) {
-            "Gemini" -> listOf("gemini-3.5-flash", "gemini-3.1-pro-preview", "gemini-2.5-flash-image")
-            "ChatGPT" -> listOf("gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo")
-            "Claude" -> listOf("claude-3-5-sonnet-latest", "claude-3-5-haiku-latest", "claude-3-opus")
-            "DeepSeek" -> listOf("deepseek-chat", "deepseek-coder", "deepseek-reasoner")
-            "Qwen" -> listOf("qwen-turbo", "qwen-plus", "qwen-max")
-            "Mistral" -> listOf("mistral-large-latest", "mistral-medium-latest", "mistral-small-latest")
-            "Llama" -> listOf("llama-3-70b-instruct", "llama-3-8b-instruct")
-            "OpenRouter" -> listOf("auto", "google/gemini-2.5-flash", "anthropic/claude-3.5-sonnet", "meta-llama/llama-3-8b")
-            else -> listOf("default")
-        }
+        return getProvider(provider)?.models ?: listOf("Default")
+    }
+
+    fun getProvidersList(): List<String> {
+        return providers.map { it.name }
     }
 }

@@ -22,6 +22,7 @@ class BackgroundScriptManager(
      * Instantiates an invisible WebView instance acting as the sandbox execution run-loop
      * for Chrome extension background workers/pages.
      */
+    @android.annotation.SuppressLint("JavascriptInterface")
     fun startBackgroundWorker(ext: ParsedExtension, bootstrapScript: String) {
         if (ext.backgroundScripts.isEmpty()) return
         if (backgroundWebViews.containsKey(ext.id)) return

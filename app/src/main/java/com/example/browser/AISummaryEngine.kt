@@ -1,5 +1,7 @@
 package com.example.browser
 
+import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -11,6 +13,7 @@ import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
 object AISummaryEngine {
+    private const val TAG = "AISummaryEngine"
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -22,153 +25,207 @@ object AISummaryEngine {
 
     suspend fun analyzePage(
         pageText: String,
-        settingsManager: AISettingsManager
+        settingsManager: AISettingsManager,
+        context: Context
     ): String = withContext(Dispatchers.IO) {
-        val provider = settingsManager.defaultProvider
-        val selectedModel = settingsManager.defaultModel
-        val preferredLanguage = settingsManager.preferredLanguage
-        val responseLength = settingsManager.responseLength
-        
-        val apiKey = settingsManager.getApiKey(provider)
-        
-        if (apiKey.trim().isEmpty() && !provider.equals("Gemini", ignoreCase = true)) {
-            return@withContext """
-                [MAIN TOPIC]
-                API Key Required
-                
-                [SUMMARY]
-                You have selected '$provider', but no API Key was detected in your Settings.
-                To activate real-time intelligence for webpage summary and chat:
-                1. Go to Browser Settings -> AI Settings.
-                2. Select '$provider' as your Provider.
-                3. Enter your custom API Key for '$provider'.
-                
-                Below is a mock demo of how the page content looks:
-                ${pageText.take(200)}...
-            """.trimIndent()
-        }
+        var currentProvider = settingsManager.defaultProvider
+        var attempts = 0
+        val maxAttempts = 3
+        var lastErrorMessage = ""
 
-        val prompt = AIPageAnalyzer.prepareAnalysisPrompt(pageText, preferredLanguage, responseLength)
-        val route = AIModelRouter.resolveRoute(provider, selectedModel, settingsManager)
-
-        try {
-            val jsonRequest = buildRequestBody(provider, route.resolvedModelName, prompt)
-            val requestBuilder = Request.Builder()
-                .url(route.endpointUrl)
-                .post(jsonRequest.toString().toRequestBody(MEDIA_TYPE_JSON))
-
-            // Apply authorization headers
-            if (provider.equals("Gemini", ignoreCase = true)) {
-                // If Gemini, either header or query parameter is used. We use header.
-                requestBuilder.addHeader(route.apiKeyHeaderName, apiKey)
+        while (attempts < maxAttempts) {
+            attempts++
+            val selectedModel = if (currentProvider.equals(settingsManager.defaultProvider, ignoreCase = true)) {
+                settingsManager.defaultModel
             } else {
-                if (route.useBearerToken) {
-                    requestBuilder.addHeader("Authorization", "Bearer $apiKey")
+                "Default"
+            }
+            val preferredLanguage = settingsManager.preferredLanguage
+            val responseLength = settingsManager.responseLength
+            
+            val guestModeManager = AIGuestModeManager(context)
+            val accountManager = AIAccountManager(context)
+            val apiKey = settingsManager.getApiKey(currentProvider)
+            
+            // Check access clearance (guest permissions or login validation)
+            if (apiKey.isEmpty() && 
+                !currentProvider.equals("Gemini", ignoreCase = true) && 
+                !guestModeManager.isGuestAllowed(currentProvider) && 
+                !accountManager.isLoggedIn(currentProvider)
+            ) {
+                lastErrorMessage = "Credentials or authentication required for provider '$currentProvider'"
+                Log.w(TAG, "$lastErrorMessage. Retrying fallback router...")
+                val next = AIProviderRouter.findFallbackProvider(currentProvider, context)
+                if (next != null && !next.equals(currentProvider, ignoreCase = true)) {
+                    currentProvider = next
+                    continue
                 } else {
+                    break
+                }
+            }
+
+            val prompt = AIPageAnalyzer.prepareAnalysisPrompt(pageText, preferredLanguage, responseLength)
+            val route = AIModelRouter.resolveRoute(currentProvider, selectedModel, settingsManager)
+
+            try {
+                val jsonRequest = buildRequestBody(currentProvider, route.resolvedModelName, prompt)
+                val requestBuilder = Request.Builder()
+                    .url(route.endpointUrl)
+                    .post(jsonRequest.toString().toRequestBody(MEDIA_TYPE_JSON))
+
+                if (currentProvider.equals("Gemini", ignoreCase = true)) {
                     requestBuilder.addHeader(route.apiKeyHeaderName, apiKey)
-                }
-            }
-
-            // Anthropic has specialized headers
-            if (provider.equals("Claude", ignoreCase = true)) {
-                requestBuilder.addHeader("anthropic-version", "2023-06-01")
-            }
-
-            val request = requestBuilder.build()
-            client.newCall(request).execute().use { response ->
-                val bodyString = response.body?.string() ?: ""
-                if (!response.isSuccessful) {
-                    val errorMsg = try {
-                        JSONObject(bodyString).optString("error", "HTTP ${response.code}")
-                    } catch (e: Exception) {
-                        try {
-                            JSONObject(bodyString).getJSONObject("error").optString("message", "HTTP ${response.code}")
-                        } catch (ex: Exception) {
-                            "HTTP ${response.code}"
-                        }
+                } else {
+                    if (route.useBearerToken) {
+                        requestBuilder.addHeader("Authorization", "Bearer $apiKey")
+                    } else {
+                        requestBuilder.addHeader(route.apiKeyHeaderName, apiKey)
                     }
-                    return@withContext """
-                        [MAIN TOPIC]
-                        API Request Error
-                        
-                        [SUMMARY]
-                        An error occurred while communicating with '$provider'.
-                        Error Code: ${response.code}
-                        Details: $errorMsg
-                        
-                        Please verify your API key is correct and valid for model '${route.resolvedModelName}' in Browser Settings -> AI Settings.
-                    """.trimIndent()
                 }
 
-                return@withContext parseResponse(provider, bodyString)
+                if (currentProvider.equals("Claude", ignoreCase = true)) {
+                    requestBuilder.addHeader("anthropic-version", "2023-06-01")
+                }
+
+                val request = requestBuilder.build()
+                client.newCall(request).execute().use { response ->
+                    val bodyString = response.body?.string() ?: ""
+                    if (!response.isSuccessful) {
+                        lastErrorMessage = "HTTP ${response.code} from $currentProvider: $bodyString"
+                        Log.e(TAG, "Dynamic execution failed: $lastErrorMessage")
+                        
+                        val next = AIProviderRouter.findFallbackProvider(currentProvider, context)
+                        if (next != null && !next.equals(currentProvider, ignoreCase = true)) {
+                            currentProvider = next
+                            // trigger next iteration in loop
+                        } else {
+                            return@withContext parseResponse(currentProvider, bodyString)
+                        }
+                    } else {
+                        return@withContext parseResponse(currentProvider, bodyString)
+                    }
+                }
+            } catch (e: Exception) {
+                lastErrorMessage = e.localizedMessage ?: "Timeout connecting to $currentProvider"
+                Log.e(TAG, "Network exception calling $currentProvider: $lastErrorMessage")
+                
+                val next = AIProviderRouter.findFallbackProvider(currentProvider, context)
+                if (next != null && !next.equals(currentProvider, ignoreCase = true)) {
+                    currentProvider = next
+                    continue
+                } else {
+                    break
+                }
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
-            return@withContext """
-                [MAIN TOPIC]
-                Connection Failed
-                
-                [SUMMARY]
-                Failed to reach the AI engine provider.
-                Details: ${e.localizedMessage ?: "Unknown Timeout or Network Offside error"}
-                
-                Please ensure you have an active internet connection.
-            """.trimIndent()
         }
+
+        return@withContext """
+            [MAIN TOPIC]
+            Failover Completed
+            
+            [SUMMARY]
+            We were unable to complete the analysis report because the selected AI provider failed and no fallback alternative was active or configured.
+            
+            Details: $lastErrorMessage
+            
+            Please verify your network connectivity or API settings inside the Browser's AI Settings.
+        """.trimIndent()
     }
 
     suspend fun chatSession(
-        chatHistory: List<Pair<String, String>>, // list of pair (role to message)
+        chatHistory: List<Pair<String, String>>,
         newMessage: String,
-        settingsManager: AISettingsManager
+        settingsManager: AISettingsManager,
+        context: Context
     ): String = withContext(Dispatchers.IO) {
-        val provider = settingsManager.defaultProvider
-        val selectedModel = settingsManager.defaultModel
-        val apiKey = settingsManager.getApiKey(provider)
+        var currentProvider = settingsManager.defaultProvider
+        var attempts = 0
+        val maxAttempts = 3
+        var lastErrorMessage = ""
 
-        if (apiKey.trim().isEmpty() && !provider.equals("Gemini", ignoreCase = true)) {
-            return@withContext "API Key missing. Please set your $provider API key in Browser Settings -> AI Settings."
-        }
-
-        val route = AIModelRouter.resolveRoute(provider, selectedModel, settingsManager)
-
-        try {
-            val jsonRequest = buildChatRequestBody(provider, route.resolvedModelName, chatHistory, newMessage)
-            val requestBuilder = Request.Builder()
-                .url(route.endpointUrl)
-                .post(jsonRequest.toString().toRequestBody(MEDIA_TYPE_JSON))
-
-            if (provider.equals("Gemini", ignoreCase = true)) {
-                requestBuilder.addHeader(route.apiKeyHeaderName, apiKey)
+        while (attempts < maxAttempts) {
+            attempts++
+            val selectedModel = if (currentProvider.equals(settingsManager.defaultProvider, ignoreCase = true)) {
+                settingsManager.defaultModel
             } else {
-                if (route.useBearerToken) {
-                    requestBuilder.addHeader("Authorization", "Bearer $apiKey")
+                "Default"
+            }
+            
+            val guestModeManager = AIGuestModeManager(context)
+            val accountManager = AIAccountManager(context)
+            val apiKey = settingsManager.getApiKey(currentProvider)
+            
+            if (apiKey.isEmpty() && 
+                !currentProvider.equals("Gemini", ignoreCase = true) && 
+                !guestModeManager.isGuestAllowed(currentProvider) && 
+                !accountManager.isLoggedIn(currentProvider)
+            ) {
+                lastErrorMessage = "Authentication credentials required for provider '$currentProvider'"
+                val next = AIProviderRouter.findFallbackProvider(currentProvider, context)
+                if (next != null && !next.equals(currentProvider, ignoreCase = true)) {
+                    currentProvider = next
+                    continue
                 } else {
+                    break
+                }
+            }
+
+            val route = AIModelRouter.resolveRoute(currentProvider, selectedModel, settingsManager)
+
+            try {
+                val jsonRequest = buildChatRequestBody(currentProvider, route.resolvedModelName, chatHistory, newMessage)
+                val requestBuilder = Request.Builder()
+                    .url(route.endpointUrl)
+                    .post(jsonRequest.toString().toRequestBody(MEDIA_TYPE_JSON))
+
+                if (currentProvider.equals("Gemini", ignoreCase = true)) {
                     requestBuilder.addHeader(route.apiKeyHeaderName, apiKey)
+                } else {
+                    if (route.useBearerToken) {
+                        requestBuilder.addHeader("Authorization", "Bearer $apiKey")
+                    } else {
+                        requestBuilder.addHeader(route.apiKeyHeaderName, apiKey)
+                    }
+                }
+
+                if (currentProvider.equals("Claude", ignoreCase = true)) {
+                    requestBuilder.addHeader("anthropic-version", "2023-06-01")
+                }
+
+                client.newCall(requestBuilder.build()).execute().use { response ->
+                    val bodyString = response.body?.string() ?: ""
+                    if (!response.isSuccessful) {
+                        lastErrorMessage = "HTTP ${response.code}: $bodyString"
+                        val next = AIProviderRouter.findFallbackProvider(currentProvider, context)
+                        if (next != null && !next.equals(currentProvider, ignoreCase = true)) {
+                            currentProvider = next
+                            // trigger next loop iteration
+                        } else {
+                            return@withContext "Error: HTTP ${response.code} from $currentProvider"
+                        }
+                    } else {
+                        return@withContext parseResponse(currentProvider, bodyString)
+                    }
+                }
+            } catch (e: Exception) {
+                lastErrorMessage = e.localizedMessage ?: "Timeout or response connection lost"
+                val next = AIProviderRouter.findFallbackProvider(currentProvider, context)
+                if (next != null && !next.equals(currentProvider, ignoreCase = true)) {
+                    currentProvider = next
+                    continue
+                } else {
+                    break
                 }
             }
-
-            if (provider.equals("Claude", ignoreCase = true)) {
-                requestBuilder.addHeader("anthropic-version", "2023-06-01")
-            }
-
-            client.newCall(requestBuilder.build()).execute().use { response ->
-                val bodyString = response.body?.string() ?: ""
-                if (!response.isSuccessful) {
-                    return@withContext "Error: HTTP ${response.code} - ${response.message}"
-                }
-                return@withContext parseResponse(provider, bodyString)
-            }
-        } catch (e: Exception) {
-            return@withContext "Network error: ${e.localizedMessage}"
         }
+
+        return@withContext "Failed to fetch response: $lastErrorMessage"
     }
 
     private fun buildRequestBody(provider: String, model: String, prompt: String): JSONObject {
         return when (provider) {
             "Gemini" -> {
                 val part = JSONObject().put("text", prompt)
-                val responseSchema = JSONObject()
                 val content = JSONObject().put("parts", JSONArray().put(part))
                 JSONObject().put("contents", JSONArray().put(content))
             }
@@ -180,7 +237,6 @@ object AISummaryEngine {
                     .put("messages", JSONArray().put(msg))
             }
             else -> {
-                // OpenAI / ChatGPT / DeepSeek / Mistral / Qwen / Llama / OpenRouter
                 val msg = JSONObject().put("role", "user").put("content", prompt)
                 JSONObject()
                     .put("model", model)
@@ -205,7 +261,6 @@ object AISummaryEngine {
                         .put("parts", JSONArray().put(JSONObject().put("text", text)))
                     contents.put(contentObj)
                 }
-                // Add the current message
                 val currentObj = JSONObject()
                     .put("role", "user")
                     .put("parts", JSONArray().put(JSONObject().put("text", message)))
@@ -255,7 +310,6 @@ object AISummaryEngine {
                         .getString("text")
                 }
                 else -> {
-                    // OpenAI, ChatGPT, DeepSeek, etc.
                     json.getJSONArray("choices")
                         .getJSONObject(0)
                         .getJSONObject("message")

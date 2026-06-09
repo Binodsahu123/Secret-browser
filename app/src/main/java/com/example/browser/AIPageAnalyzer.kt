@@ -9,7 +9,13 @@ object AIPageAnalyzer {
 
     fun prepareAnalysisPrompt(text: String, preferredLanguage: String, responseLength: String): String {
         val languageInstruction = if (preferredLanguage == "Same as Page") {
-            "Respond in the same language as the text of the webpage provided or currently translated page language."
+            """
+            Analyze the language of the provided text:
+            - If the page language is Hindi, you MUST respond in Hindi (हिंदी).
+            - If the page language is English, you MUST respond in English.
+            - If a translated page is active, you MUST respond in that translated language.
+            - Otherwise, default to the main language of the webpage text provided.
+            """.trimIndent()
         } else {
             "Respond strictly in the following language: $preferredLanguage."
         }

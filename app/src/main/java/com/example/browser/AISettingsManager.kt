@@ -22,6 +22,18 @@ class AISettingsManager(context: Context) {
         get() = prefs.getString("ai_response_length", "Medium")
         set(value) = prefs.setString("ai_response_length", value)
 
+    var guestModeEnabled: Boolean
+        get() = prefs.getBoolean("ai_guest_mode_enabled", true)
+        set(value) = prefs.setBoolean("ai_guest_mode_enabled", value)
+
+    var autoLoginEnabled: Boolean
+        get() = prefs.getBoolean("ai_auto_login_enabled", true)
+        set(value) = prefs.setBoolean("ai_auto_login_enabled", value)
+
+    var responseStyle: String
+        get() = prefs.getString("ai_response_style", "Balanced")
+        set(value) = prefs.setString("ai_response_style", value)
+
     fun getApiKey(provider: String): String {
         val storedKey = prefs.getString("ai_api_key_${provider.lowercase()}", "")
         if (storedKey.isEmpty() && provider.equals("Gemini", ignoreCase = true)) {

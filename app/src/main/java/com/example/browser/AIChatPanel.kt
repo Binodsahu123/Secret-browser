@@ -6,10 +6,12 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -138,6 +140,8 @@ fun parseAnalysis(raw: String): AIAnalysisResult {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AIChatPanel(
+    tabId: String,
+    url: String,
     pageText: String,
     onDismiss: () -> Unit
 ) {
@@ -145,33 +149,52 @@ fun AIChatPanel(
     val settingsManager = remember { AISettingsManager(context) }
     val scope = rememberCoroutineScope()
 
+    // Query active cached session for state persistence within the same tab/website
+    val cachedSession = remember(tabId, url) { AISessionManager.getSession(tabId) }
+
     var activeTab by remember { mutableStateOf("summary") } // "summary" or "chat"
     
-    // Summary states
-    var summaryLoading by remember { mutableStateOf(true) }
-    var analysisResult by remember { mutableStateOf<AIAnalysisResult?>(null) }
+    // Summary loading flag and loaded results
+    var summaryLoading by remember { mutableStateOf(cachedSession?.parsedSummary == null && pageText.isNotBlank()) }
+    var analysisResult by remember { mutableStateOf<AIAnalysisResult?>(cachedSession?.parsedSummary) }
     
-    // Chat states
-    var chatHistory = remember { mutableStateListOf<Pair<String, String>>() }
+    // Initialize stateful chat session histories
+    val chatHistory = remember { 
+        val list = mutableStateListOf<Pair<String, String>>()
+        cachedSession?.chatHistory?.let { list.addAll(it) }
+        list
+    }
+    
     var chatInputText by remember { mutableStateOf("") }
     var chalLoading by remember { mutableStateOf(false) }
     val chatListState = rememberLazyListState()
 
     // Trigger page summary once on open
-    LaunchedEffect(pageText) {
+    LaunchedEffect(pageText, tabId, url) {
+        // Reuse cached summary report if we are looking at the same page URL
+        if (cachedSession != null && cachedSession.websiteUrl == url && cachedSession.parsedSummary != null) {
+            analysisResult = cachedSession.parsedSummary
+            summaryLoading = false
+            return@LaunchedEffect
+        }
+
         if (pageText.isBlank()) {
             summaryLoading = false
             analysisResult = AIAnalysisResult(
                 mainTopic = "Empty Webpage",
                 summary = "The browser cannot extract any readable text on this blank page or system address page."
             )
+            AISessionManager.updateSessionPage(tabId, url, pageText, analysisResult)
             return@LaunchedEffect
         }
         
         summaryLoading = true
         try {
-            val result = AISummaryEngine.analyzePage(pageText, settingsManager)
-            analysisResult = parseAnalysis(result)
+            val result = AISummaryEngine.analyzePage(pageText, settingsManager, context)
+            val parsedResult = parseAnalysis(result)
+            analysisResult = parsedResult
+            // Store results in SessionManager Cache
+            AISessionManager.updateSessionPage(tabId, url, pageText, parsedResult)
         } catch (e: Exception) {
             analysisResult = AIAnalysisResult(
                 mainTopic = "Analysis Error",
@@ -185,19 +208,27 @@ fun AIChatPanel(
     fun postChatMessage(message: String) {
         if (message.isBlank()) return
         chatHistory.add("user" to message)
+        // Store user post in cached session storage
+        AISessionManager.updateChatHistory(tabId, chatHistory.toList())
         chatInputText = ""
         chalLoading = true
         
         scope.launch {
             // Scroll to end of list
-            chatListState.animateScrollToItem(chatHistory.size)
+            if (chatHistory.isNotEmpty()) {
+                chatListState.animateScrollToItem(chatHistory.size - 1)
+            }
             
-            val response = AISummaryEngine.chatSession(chatHistory.toList(), message, settingsManager)
+            val response = AISummaryEngine.chatSession(chatHistory.toList(), message, settingsManager, context)
             chatHistory.add("assistant" to response)
+            // Store assistant response in cached session storage
+            AISessionManager.updateChatHistory(tabId, chatHistory.toList())
             chalLoading = false
             
             // Scroll to end of list
-            chatListState.animateScrollToItem(chatHistory.size)
+            if (chatHistory.isNotEmpty()) {
+                chatListState.animateScrollToItem(chatHistory.size - 1)
+            }
         }
     }
 
@@ -307,7 +338,7 @@ fun AIChatPanel(
                             CircularProgressIndicator(modifier = Modifier.size(44.dp))
                             Spacer(modifier = Modifier.height(16.dp))
                             Text(
-                                text = "Extracting details and requesting AI synthesis...",
+                                text = "Extracting webpage context & initiating synthesis...",
                                 fontSize = 13.sp,
                                 color = Color.Gray,
                                 textAlign = TextAlign.Center
@@ -571,7 +602,7 @@ fun AIChatPanel(
                                                         text = if (role == "user") "You" else "Specialist",
                                                         fontWeight = FontWeight.Bold,
                                                         fontSize = 11.sp,
-                                                        color = if (role == "user") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary
+                                                        color = if (role == "user") MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.secondary
                                                     )
                                                     Spacer(modifier = Modifier.height(2.dp))
                                                     Text(message, fontSize = 13.sp, lineHeight = 18.sp)
@@ -606,28 +637,43 @@ fun AIChatPanel(
                             }
                         }
 
-                        // Short Suggestions Menu
+                        // Ten custom browser options for webpage actions
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+                                .horizontalScroll(rememberScrollState())
                                 .padding(horizontal = 12.dp, vertical = 6.dp),
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            val suggestions = listOf("Explain page", "Fact check stats", "Draft notes", "Translate page")
-                            suggestions.forEach { label ->
+                            val actionPrompts = listOf(
+                                "Summarize Page" to "Perform a clear, readable summary of this whole webpage.",
+                                "Explain Page" to "Explain this page in extremely clear terms to me as if explaining to a five-year-old child.",
+                                "Key Points" to "Extract the top 5 key takeaways/points from this webpage.",
+                                "Fact Check" to "Execute a thorough fact check of the core statistics and statements on this page.",
+                                "Important Facts" to "Identify all critical facts and important statistics on this webpage.",
+                                "Important People" to "List and describe all the important people and major entities mentioned on this website.",
+                                "Important Dates" to "List any important timeline dates mentioned on this webpage.",
+                                "Translate Summary" to "Translate the webpage summary into the active model's default output configuration.",
+                                "Create Notes" to "Draft a set of structured study notes or quick bullet points based on this page.",
+                                "Ask Questions" to "Generate a couple of great context-specific questions that I can follow up with on this webpage."
+                            )
+
+                            actionPrompts.forEach { (label, prompt) ->
                                 Card(
                                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                                     shape = RoundedCornerShape(8.dp),
                                     modifier = Modifier.clickable {
-                                        postChatMessage("Can you: $label inside this webpage?")
+                                        activeTab = "chat"
+                                        postChatMessage(prompt)
                                     }
                                 ) {
                                     Text(
                                         text = label,
-                                        fontSize = 11.sp,
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                        fontWeight = FontWeight.Medium
+                                        fontSize = 12.sp,
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.primary
                                     )
                                 }
                             }
@@ -676,8 +722,3 @@ fun AIChatPanel(
         }
     }
 }
-
-// Simple extension helper
-val ButtonDefaults.onColor: Color
-    @Composable
-    get() = if (MaterialTheme.colorScheme.primary == Color.White) Color.Black else Color.White
