@@ -7,13 +7,13 @@ import androidx.room.RoomDatabase
 object DatabaseCore {
     fun <T : RoomDatabase> buildDatabase(
         context: Context,
-        dbClass: Class<T>,
-        name: String
+        klass: Class<T>,
+        dbName: String
     ): T {
         return Room.databaseBuilder(
             context.applicationContext,
-            dbClass,
-            name
+            klass,
+            dbName
         )
         .fallbackToDestructiveMigration()
         .build()

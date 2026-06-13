@@ -1,71 +1,113 @@
 package com.example.downloadengine
 
 import android.content.Context
-import androidx.room.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
-
-@Entity(tableName = "engine_downloads")
-data class DownloadEntity(
-    @PrimaryKey val id: Long,
-    val fileName: String,
-    val url: String,
-    val status: String, // "PENDING", "DOWNLOADING", "COMPLETE", "FAILED"
-    val progress: Int = 0,
-    val mimeType: String = "application/octet-stream"
-)
-
-@Dao
-interface DownloadDao {
-    @Query("SELECT * FROM engine_downloads ORDER BY id DESC")
-    fun getAllDownloadsFlow(): Flow<List<DownloadEntity>>
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insert(download: DownloadEntity)
-
-    @Query("SELECT * FROM engine_downloads WHERE id = :id")
-    suspend fun getDownloadById(id: Long): DownloadEntity?
-}
-
-@Database(entities = [DownloadEntity::class], version = 1, exportSchema = false)
-abstract class DownloadLocalDatabase : RoomDatabase() {
-    abstract fun downloadDao(): DownloadDao
-}
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 
 interface DownloadEngine {
-    fun getDownloadsFlow(): Flow<List<DownloadEntity>>
-    suspend fun startDownload(url: String, fileName: String, mimeType: String): Long
-    suspend fun updateDownloadStatus(id: Long, status: String, progress: Int)
+    fun getDownloadsFlow(): Flow<List<DownloadItem>>
+    fun getDownloadsByCategory(category: String): Flow<List<DownloadItem>>
+    suspend fun startDownload(url: String, fileName: String, mimeType: String, threads: Int = 4): Long
+    suspend fun pauseDownload(id: Long)
+    suspend fun resumeDownload(id: Long)
+    suspend fun cancelDownload(id: Long)
+    suspend fun deleteDownload(id: Long)
+    fun setConfig(config: DownloadConfig)
+    fun getConfig(): DownloadConfig
 }
 
-class DownloadManager(private val context: Context) : DownloadEngine {
-    private val db: DownloadLocalDatabase by lazy {
-        com.example.databasecore.DatabaseCore.buildDatabase(
-            context,
-            DownloadLocalDatabase::class.java,
-            "orion_downloads_engine_database"
-        )
+class DownloadManagerImpl(private val context: Context) : DownloadEngine {
+    private val db = DownloadDatabase.getDatabase(context)
+    private val scope = CoroutineScope(Dispatchers.Default)
+    private var currentConfig = DownloadConfig()
+
+    init {
+        DownloadQueueManager.setProgressCallback { item ->
+            scope.launch {
+                db.downloadDao().insertDownload(item)
+            }
+        }
     }
 
-    override fun getDownloadsFlow(): Flow<List<DownloadEntity>> {
+    override fun getDownloadsFlow(): Flow<List<DownloadItem>> {
         return db.downloadDao().getAllDownloadsFlow()
     }
 
-    override suspend fun startDownload(url: String, fileName: String, mimeType: String): Long {
+    override fun getDownloadsByCategory(category: String): Flow<List<DownloadItem>> {
+        return db.downloadDao().getDownloadsByCategoryFlow(category)
+    }
+
+    override suspend fun startDownload(url: String, fileName: String, mimeType: String, threads: Int): Long {
         val id = System.currentTimeMillis()
-        db.downloadDao().insert(DownloadEntity(id, fileName, url, "DOWNLOADING", 0, mimeType))
+        val category = DownloadScheduler.getCategoryForMimeType(mimeType)
+        val initialItem = DownloadItem(
+            id = id,
+            title = fileName,
+            url = url,
+            mimeType = mimeType,
+            status = "PENDING",
+            progress = 0,
+            threads = threads,
+            category = category
+        )
+        db.downloadDao().insertDownload(initialItem)
+        
+        DownloadQueueManager.startDownloadTask(context, initialItem, currentConfig) { updated ->
+            db.downloadDao().insertDownload(updated)
+        }
         return id
     }
 
-    override suspend fun updateDownloadStatus(id: Long, status: String, progress: Int) {
+    override suspend fun pauseDownload(id: Long) {
         val existing = db.downloadDao().getDownloadById(id)
         if (existing != null) {
-            db.downloadDao().insert(existing.copy(status = status, progress = progress))
+            DownloadQueueManager.cancelTask(id)
+            val updated = existing.copy(status = "PAUSED", speed = "Paused")
+            db.downloadDao().insertDownload(updated)
         }
+    }
+
+    override suspend fun resumeDownload(id: Long) {
+        val existing = db.downloadDao().getDownloadById(id)
+        if (existing != null) {
+            val updated = existing.copy(status = "PENDING", speed = "Pending")
+            db.downloadDao().insertDownload(updated)
+            DownloadQueueManager.startDownloadTask(context, updated, currentConfig) { newest ->
+                db.downloadDao().insertDownload(newest)
+            }
+        }
+    }
+
+    override suspend fun cancelDownload(id: Long) {
+        val existing = db.downloadDao().getDownloadById(id)
+        if (existing != null) {
+            DownloadQueueManager.cancelTask(id)
+            val updated = existing.copy(status = "CANCELLED", speed = "Cancelled")
+            db.downloadDao().insertDownload(updated)
+        }
+    }
+
+    override suspend fun deleteDownload(id: Long) {
+        DownloadQueueManager.cancelTask(id)
+        db.downloadDao().deleteDownload(id)
+    }
+
+    override fun setConfig(config: DownloadConfig) {
+        currentConfig = config
+    }
+
+    override fun getConfig(): DownloadConfig {
+        return currentConfig
     }
 }
 
 class DownloadWorkers {
     fun enqueueDownloadCheck() {
-        // Job schedule placeholder
+        // Compatibility helper
     }
 }

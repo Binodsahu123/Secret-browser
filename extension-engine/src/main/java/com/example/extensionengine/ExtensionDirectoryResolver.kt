@@ -26,14 +26,7 @@ object ExtensionDirectoryResolver {
     }
 
     fun generateExtensionId(name: String): String {
-        val bytes = java.security.MessageDigest.getInstance("SHA-256").digest(name.toByteArray())
-        val codeAlphabet = "abcdefghijklmnopqrstuvwxyz"
-        val builder = java.lang.StringBuilder()
-        for (i in 0 until 32) {
-            val index = (bytes[i % bytes.size].toInt() and 0xFF) % 26
-            builder.append(codeAlphabet[index])
-        }
-        return builder.toString()
+        return NativeExtensionEngine.generateExtensionId(name)
     }
 
     fun getExtensionDir(context: Context, id: String, name: String? = null): File {
@@ -124,6 +117,65 @@ object ExtensionDirectoryResolver {
         }
     }
 
+    fun findFileCaseInsensitive(rootDir: File, relativePath: String): File? {
+        val cleanPath = relativePath.removePrefix("/")
+        val directFile = File(rootDir, cleanPath)
+        if (directFile.exists() && directFile.isFile) {
+            return directFile
+        }
+
+        // Try to decode URL-encoded components (e.g. %20, spaces, etc.)
+        val decodedPath = try {
+            java.net.URLDecoder.decode(cleanPath, "UTF-8")
+        } catch (e: Exception) {
+            cleanPath
+        }
+        val decodedFile = File(rootDir, decodedPath)
+        if (decodedFile.exists() && decodedFile.isFile) {
+            return decodedFile
+        }
+
+        // Fallback case-insensitive path segment matching
+        val segments = decodedPath.split('/', '\\').filter { it.isNotEmpty() }
+        if (segments.isEmpty()) return null
+
+        var currentDir = rootDir
+        for (i in segments.indices) {
+            val segment = segments[i]
+            val children = currentDir.listFiles() ?: return null
+            var foundChild: File? = null
+
+            // 1. Exact match
+            for (child in children) {
+                if (child.name == segment) {
+                    foundChild = child
+                    break
+                }
+            }
+
+            // 2. Case-insensitive match 
+            if (foundChild == null) {
+                for (child in children) {
+                    if (child.name.equals(segment, ignoreCase = true)) {
+                        foundChild = child
+                        break
+                    }
+                }
+            }
+
+            if (foundChild == null) {
+                return null // segment not found on disk
+            }
+
+            if (i == segments.size - 1) {
+                return if (foundChild.isFile) foundChild else null
+            } else {
+                currentDir = foundChild
+            }
+        }
+        return null
+    }
+
     var bootstrapProvider: ((String) -> String)? = null
 
     fun handleExtensionRequest(context: Context, urlStr: String): android.webkit.WebResourceResponse? {
@@ -134,13 +186,28 @@ object ExtensionDirectoryResolver {
                 val extensionId = uri.host ?: ""
                 val pathStr = uri.path ?: ""
                 if (extensionId.isNotBlank() && pathStr.isNotBlank() && !pathStr.contains("..")) {
+                    val cleanPath = pathStr.removePrefix("/")
+                    if (cleanPath.equals("_generated_background_page.html", ignoreCase = true)) {
+                        val headers = HashMap<String, String>()
+                        headers["Access-Control-Allow-Origin"] = "*"
+                        headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, PUT, DELETE"
+                        headers["Access-Control-Allow-Headers"] = "*"
+                        headers["Access-Control-Allow-Credentials"] = "true"
+                        headers["Content-Security-Policy"] = "default-src * 'unsafe-inline' 'unsafe-eval'; script-src * 'unsafe-inline' 'unsafe-eval'; style-src * 'unsafe-inline' 'unsafe-eval';"
+                        
+                        val bootJs = bootstrapProvider?.invoke(extensionId) ?: ""
+                        val scriptTag = "<script>\n$bootJs\n</script>"
+                        val injectedHtml = "<!DOCTYPE html>\n<html>\n<head>\n$scriptTag\n</head>\n<body></body>\n</html>"
+                        val inputStream = java.io.ByteArrayInputStream(injectedHtml.toByteArray(Charsets.UTF_8))
+                        return android.webkit.WebResourceResponse("text/html", "UTF-8", 200, "OK", headers, inputStream)
+                    }
                     val extensionDir = getExtensionDir(context, extensionId)
-                    val targetFile = File(extensionDir, pathStr.removePrefix("/"))
-                    if (targetFile.exists() && targetFile.isFile) {
+                    val targetFile = findFileCaseInsensitive(extensionDir, pathStr)
+                    if (targetFile != null && targetFile.exists() && targetFile.isFile) {
                         val extension = targetFile.extension.lowercase()
                         val mimeType = when (extension) {
                             "html", "htm" -> "text/html"
-                            "js" -> "application/javascript"
+                            "js", "mjs" -> "application/javascript"
                             "css" -> "text/css"
                             "json" -> "application/json"
                             "png" -> "image/png"
@@ -155,34 +222,53 @@ object ExtensionDirectoryResolver {
                             "eot" -> "application/vnd.ms-fontobject"
                             else -> "application/octet-stream"
                         }
-                        val encoding = if (extension in listOf("html", "js", "css", "json", "xml")) "UTF-8" else null
+                        val encoding = if (extension in listOf("html", "js", "mjs", "css", "json", "xml")) "UTF-8" else null
                         
-                        if (extension == "html" || extension == "htm") {
+                        // Prepare CORS and default parameters for high-fidelity responses
+                        val headers = HashMap<String, String>()
+                        headers["Access-Control-Allow-Origin"] = "*"
+                        headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, PUT, DELETE"
+                        headers["Access-Control-Allow-Headers"] = "*"
+                        headers["Access-Control-Allow-Credentials"] = "true"
+
+                        val response = if (extension == "html" || extension == "htm") {
                             try {
                                 val htmlContent = targetFile.readText(Charsets.UTF_8)
                                 val provider = bootstrapProvider
                                 val modifiedHtml = if (provider != null) {
                                     val bootJs = provider(extensionId)
                                     val scriptTag = "<script>\n$bootJs\n</script>"
-                                    if (htmlContent.contains("<head>", ignoreCase = true)) {
-                                        htmlContent.replace("<head>", "<head>\n$scriptTag", ignoreCase = true)
-                                    } else if (htmlContent.contains("<html>", ignoreCase = true)) {
-                                        htmlContent.replace("<html>", "<html>\n$scriptTag", ignoreCase = true)
-                                    } else {
-                                        "$scriptTag\n$htmlContent"
+                                    val patternHead = "(?i)<head[^>]*>".toRegex()
+                                    val patternHtml = "(?i)<html[^>]*>".toRegex()
+                                    val matchHead = patternHead.find(htmlContent)
+                                    val matchHtml = patternHtml.find(htmlContent)
+                                    when {
+                                        matchHead != null -> {
+                                            val tag = matchHead.value
+                                            htmlContent.replaceFirst(tag, "$tag\n$scriptTag")
+                                        }
+                                        matchHtml != null -> {
+                                            val tag = matchHtml.value
+                                            htmlContent.replaceFirst(tag, "$tag\n$scriptTag")
+                                        }
+                                        else -> "$scriptTag\n$htmlContent"
                                     }
                                 } else {
                                     htmlContent
                                 }
                                 val inputStream = java.io.ByteArrayInputStream(modifiedHtml.toByteArray(Charsets.UTF_8))
-                                return android.webkit.WebResourceResponse(mimeType, encoding, inputStream)
+                                android.webkit.WebResourceResponse(mimeType, encoding, 200, "OK", headers, inputStream)
                             } catch (e: Exception) {
                                 e.printStackTrace()
+                                val inputStream = java.io.FileInputStream(targetFile)
+                                android.webkit.WebResourceResponse(mimeType, encoding, 200, "OK", headers, inputStream)
                             }
+                        } else {
+                            val inputStream = java.io.FileInputStream(targetFile)
+                            android.webkit.WebResourceResponse(mimeType, encoding, 200, "OK", headers, inputStream)
                         }
-                        
-                        val inputStream = java.io.FileInputStream(targetFile)
-                        return android.webkit.WebResourceResponse(mimeType, encoding, inputStream)
+
+                        return response
                     }
                 }
             }

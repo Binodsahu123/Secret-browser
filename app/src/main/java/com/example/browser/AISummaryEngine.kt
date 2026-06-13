@@ -23,12 +23,91 @@ object AISummaryEngine {
 
     private val MEDIA_TYPE_JSON = "application/json; charset=utf-8".toMediaType()
 
+    private fun md5(input: String): String {
+        return try {
+            val md = java.security.MessageDigest.getInstance("MD5")
+            val bytes = md.digest(input.toByteArray())
+            bytes.joinToString("") { "%02x".format(it) }
+        } catch (e: Exception) {
+            input.hashCode().toString()
+        }
+    }
+
     suspend fun analyzePage(
+        pageText: String,
+        settingsManager: AISettingsManager,
+        context: Context
+    ): String {
+        AICacheEngine.initialize(context)
+        val contentHash = md5(pageText)
+        val cacheKey = "hash_${contentHash}_${settingsManager.defaultProvider}_${settingsManager.responseLength}"
+        val cached = AICacheEngine.getCachedResponse(cacheKey)
+        if (cached != null) {
+            Log.i(TAG, "Cached summary hit for MD5: $contentHash")
+            return cached.responseText
+        }
+        val result = analyzePageRaw(pageText, settingsManager, context)
+        if (!result.contains("Failover Completed") && !result.contains("We were unable to complete the analysis report")) {
+            AICacheEngine.cacheResponse(cacheKey, result, settingsManager.defaultProvider)
+        }
+        return result
+    }
+
+    suspend fun analyzePageRaw(
         pageText: String,
         settingsManager: AISettingsManager,
         context: Context
     ): String = withContext(Dispatchers.IO) {
         var currentProvider = settingsManager.defaultProvider
+
+        // Integrated AI Website Bridge Mode for ChatGPT and Gemini
+        if (currentProvider.equals("ChatGPT", ignoreCase = true) || currentProvider.equals("Gemini", ignoreCase = true)) {
+            val contextObj = try {
+                FastAIExtractor.parseJsonToContext(pageText)
+            } catch (e: Exception) {
+                FastPageContext(paragraphs = listOf(pageText))
+            }
+
+            // Detect language of the website
+            val sampleTextForLanguageDetection = if (contextObj.paragraphs.isNotEmpty()) {
+                contextObj.paragraphs.joinToString(" ").take(400)
+            } else {
+                pageText.take(400)
+            }
+            
+            val detectedCode = try {
+                com.example.translateengine.LanguageDetector().detectLanguage(sampleTextForLanguageDetection)
+            } catch (e: Exception) {
+                "en"
+            }
+
+            val detectedLanguageName = when (detectedCode.lowercase().substringBefore("-")) {
+                "en" -> "English"
+                "hi" -> "Hindi"
+                "ta" -> "Tamil"
+                "te" -> "Telugu"
+                "bn" -> "Bengali"
+                "es" -> "Spanish"
+                "fr" -> "French"
+                "de" -> "German"
+                "ja" -> "Japanese"
+                "zh" -> "Chinese"
+                "ar" -> "Arabic"
+                else -> "English"
+            }
+
+            val preferredLanguage = settingsManager.preferredLanguage
+            val responseLength = settingsManager.responseLength
+            val prompt = PageAnalyzer.prepareAnalysisPrompt(contextObj, preferredLanguage, detectedLanguageName, responseLength)
+            
+            try {
+                val bridgeResult = AIWebsiteBridgeSystem.getInstance(context).executePrompt(currentProvider, prompt)
+                return@withContext bridgeResult
+            } catch (e: Exception) {
+                Log.e(TAG, "Bridge execution for $currentProvider failed, trying fallback...", e)
+            }
+        }
+
         var attempts = 0
         val maxAttempts = 3
         var lastErrorMessage = ""
@@ -64,7 +143,41 @@ object AISummaryEngine {
                 }
             }
 
-            val prompt = AIPageAnalyzer.prepareAnalysisPrompt(pageText, preferredLanguage, responseLength)
+            val contextObj = try {
+                FastAIExtractor.parseJsonToContext(pageText)
+            } catch (e: Exception) {
+                FastPageContext(paragraphs = listOf(pageText))
+            }
+
+            // Detect language of the website
+            val sampleTextForLanguageDetection = if (contextObj.paragraphs.isNotEmpty()) {
+                contextObj.paragraphs.joinToString(" ").take(400)
+            } else {
+                pageText.take(400)
+            }
+            
+            val detectedCode = try {
+                com.example.translateengine.LanguageDetector().detectLanguage(sampleTextForLanguageDetection)
+            } catch (e: Exception) {
+                "en"
+            }
+
+            val detectedLanguageName = when (detectedCode.lowercase().substringBefore("-")) {
+                "en" -> "English"
+                "hi" -> "Hindi"
+                "ta" -> "Tamil"
+                "te" -> "Telugu"
+                "bn" -> "Bengali"
+                "es" -> "Spanish"
+                "fr" -> "French"
+                "de" -> "German"
+                "ja" -> "Japanese"
+                "zh" -> "Chinese"
+                "ar" -> "Arabic"
+                else -> "English"
+            }
+
+            val prompt = PageAnalyzer.prepareAnalysisPrompt(contextObj, preferredLanguage, detectedLanguageName, responseLength)
             val route = AIModelRouter.resolveRoute(currentProvider, selectedModel, settingsManager)
 
             try {
@@ -139,6 +252,17 @@ object AISummaryEngine {
         context: Context
     ): String = withContext(Dispatchers.IO) {
         var currentProvider = settingsManager.defaultProvider
+
+        // Integrated AI Website Bridge Mode for ChatGPT and Gemini Chat Session
+        if (currentProvider.equals("ChatGPT", ignoreCase = true) || currentProvider.equals("Gemini", ignoreCase = true)) {
+            try {
+                val bridgeResult = AIWebsiteBridgeSystem.getInstance(context).executePrompt(currentProvider, newMessage)
+                return@withContext bridgeResult
+            } catch (e: Exception) {
+                Log.e(TAG, "Bridge chat session for $currentProvider failed, trying fallback...", e)
+            }
+        }
+
         var attempts = 0
         val maxAttempts = 3
         var lastErrorMessage = ""

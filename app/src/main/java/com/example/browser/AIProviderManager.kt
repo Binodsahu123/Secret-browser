@@ -53,18 +53,18 @@ object AIProviderManager {
             models = listOf("mistral-large-latest", "mistral-medium-latest", "mistral-small-latest")
         ),
         AIProvider(
-            name = "Llama",
-            displayName = "Llama (Meta / Together)",
+            name = "Grok",
+            displayName = "Grok (xAI)",
             isGuestSupported = true,
             isLoginRequiredByDefault = false,
-            models = listOf("llama-3-70b-instruct", "llama-3-8b-instruct")
+            models = listOf("grok-2", "grok-beta")
         ),
         AIProvider(
-            name = "OpenRouter",
-            displayName = "OpenRouter Gateway",
+            name = "Custom Provider",
+            displayName = "Custom Provider",
             isGuestSupported = true,
             isLoginRequiredByDefault = false,
-            models = listOf("auto", "google/gemini-2.5-flash", "anthropic/claude-3.5-sonnet", "meta-llama/llama-3-8b")
+            models = listOf("custom-model-1", "custom-model-2")
         )
     )
 

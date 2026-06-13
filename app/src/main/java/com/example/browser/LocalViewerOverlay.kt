@@ -41,7 +41,69 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import android.content.Intent
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.graphics.graphicsLayer
+import java.util.Locale
 import java.io.File
+
+fun readFileContent(context: Context, filePath: String): String {
+    return try {
+        if (filePath.startsWith("content://")) {
+            val uri = android.net.Uri.parse(filePath)
+            context.contentResolver.openInputStream(uri)?.use { stream ->
+                stream.bufferedReader().readText()
+            } ?: ""
+        } else if (filePath.startsWith("file://")) {
+            val uri = android.net.Uri.parse(filePath)
+            val file = File(uri.path ?: filePath)
+            if (file.exists()) {
+                file.readText(Charsets.UTF_8)
+            } else {
+                context.contentResolver.openInputStream(uri)?.use { stream ->
+                    stream.bufferedReader().readText()
+                } ?: ""
+            }
+        } else {
+            val file = File(filePath)
+            if (file.exists()) {
+                file.readText(Charsets.UTF_8)
+            } else {
+                val uri = android.net.Uri.parse(filePath)
+                context.contentResolver.openInputStream(uri)?.use { stream ->
+                    stream.bufferedReader().readText()
+                } ?: "File not found: $filePath"
+            }
+        }
+    } catch (e: Exception) {
+        "Failed to read file contents: ${e.message}"
+    }
+}
+
+fun writeFileContent(context: Context, filePath: String, content: String): Boolean {
+    return try {
+        if (filePath.startsWith("content://")) {
+            val uri = android.net.Uri.parse(filePath)
+            context.contentResolver.openOutputStream(uri, "rwt")?.use { stream ->
+                stream.bufferedWriter().use { writer ->
+                    writer.write(content)
+                }
+            }
+        } else if (filePath.startsWith("file://")) {
+            val uri = android.net.Uri.parse(filePath)
+            val file = File(uri.path ?: filePath)
+            file.writeText(content, Charsets.UTF_8)
+        } else {
+            val file = File(filePath)
+            file.writeText(content, Charsets.UTF_8)
+        }
+        true
+    } catch (e: Exception) {
+        e.printStackTrace()
+        false
+    }
+}
 
 @Composable
 fun LocalViewerOverlay(
@@ -49,6 +111,24 @@ fun LocalViewerOverlay(
     viewModel: BrowserViewModel,
     onDismiss: () -> Unit
 ) {
+    val context = LocalContext.current
+    
+    val lowerName = activeFile.fileName.lowercase()
+    val lowerMime = activeFile.mimeType.lowercase()
+    val isTextOrCode = lowerName.endsWith(".java") || lowerName.endsWith(".kt") ||
+            lowerName.endsWith(".xml") || lowerName.endsWith(".json") ||
+            lowerName.endsWith(".txt") || lowerName.endsWith(".html") ||
+            lowerName.endsWith(".css") || lowerName.endsWith(".js") ||
+            lowerName.endsWith(".md") || lowerName.endsWith(".properties") ||
+            lowerName.endsWith(".gradle") || lowerName.endsWith(".kts") ||
+            lowerMime.startsWith("text/") || lowerMime.contains("javascript") ||
+            lowerMime.contains("json") || lowerMime.contains("xml")
+
+    var isEditing by remember { mutableStateOf(false) }
+    var codeText by remember(activeFile.filePath) {
+        mutableStateOf(if (isTextOrCode) readFileContent(context, activeFile.filePath) else "")
+    }
+
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(
@@ -107,6 +187,71 @@ fun LocalViewerOverlay(
                         }
                     }
 
+                    if (isTextOrCode) {
+                        // Edit Mode Toggle
+                        IconButton(
+                            onClick = { isEditing = !isEditing }
+                        ) {
+                            Icon(
+                                imageVector = if (isEditing) Icons.Default.Visibility else Icons.Default.Edit,
+                                contentDescription = if (isEditing) "View Mode" else "Edit Mode",
+                                tint = Color(0xFF38BDF8)
+                            )
+                        }
+
+                        // Save current code contents to source file
+                        IconButton(
+                            onClick = {
+                                val success = writeFileContent(context, activeFile.filePath, codeText)
+                                if (success) {
+                                    android.widget.Toast.makeText(context, "File saved successfully!", android.widget.Toast.LENGTH_SHORT).show()
+                                } else {
+                                    android.widget.Toast.makeText(context, "Error saving file changes.", android.widget.Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Save,
+                                contentDescription = "Save File",
+                                tint = Color(0xFF22C55E)
+                            )
+                        }
+
+                        // Save as PDF
+                        IconButton(
+                            onClick = {
+                                try {
+                                    PdfUtility.printTextToPdf(context, activeFile.fileName, codeText)
+                                } catch (e: Exception) {
+                                    android.widget.Toast.makeText(context, "Error printing to PDF: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PictureAsPdf,
+                                contentDescription = "Save to PDF",
+                                tint = Color(0xFFF43F5E)
+                            )
+                        }
+
+                        // Save as Image
+                        IconButton(
+                            onClick = {
+                                try {
+                                    ImageUtility.saveTextToImage(context, activeFile.fileName, codeText)
+                                } catch (e: Exception) {
+                                    android.widget.Toast.makeText(context, "Error saving as Image: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Image,
+                                contentDescription = "Save as Image",
+                                tint = Color(0xFFF59E0B)
+                            )
+                        }
+                    }
+
                     IconButton(onClick = onDismiss) {
                         Icon(
                             imageVector = Icons.Default.Close,
@@ -122,6 +267,17 @@ fun LocalViewerOverlay(
                         .weight(1f)
                         .fillMaxWidth()
                 ) {
+                    val lowerName = activeFile.fileName.lowercase()
+                    val lowerMime = activeFile.mimeType.lowercase()
+                    val isTextOrCode = lowerName.endsWith(".java") || lowerName.endsWith(".kt") ||
+                            lowerName.endsWith(".xml") || lowerName.endsWith(".json") ||
+                            lowerName.endsWith(".txt") || lowerName.endsWith(".html") ||
+                            lowerName.endsWith(".css") || lowerName.endsWith(".js") ||
+                            lowerName.endsWith(".md") || lowerName.endsWith(".properties") ||
+                            lowerName.endsWith(".gradle") || lowerName.endsWith(".kts") ||
+                            lowerMime.startsWith("text/") || lowerMime.contains("javascript") ||
+                            lowerMime.contains("json") || lowerMime.contains("xml")
+
                     when {
                         activeFile.mimeType.startsWith("video/") -> {
                             VideoPlayerView(filePath = activeFile.filePath)
@@ -135,6 +291,21 @@ fun LocalViewerOverlay(
                         }
                         activeFile.mimeType.contains("pdf") -> {
                             PdfRendererView(filePath = activeFile.filePath)
+                        }
+                        activeFile.mimeType.startsWith("image/") || isImageFile(activeFile.fileName) -> {
+                            ImageOfflineViewer(
+                                filePath = activeFile.filePath,
+                                fileName = activeFile.fileName,
+                                mimeType = activeFile.mimeType
+                            )
+                        }
+                        isTextOrCode -> {
+                            TextCodeRendererView(
+                                fileName = activeFile.fileName,
+                                codeText = codeText,
+                                isEditing = isEditing,
+                                onTextChange = { codeText = it }
+                            )
                         }
                         else -> {
                             Box(
@@ -244,7 +415,12 @@ fun VideoPlayerView(filePath: String) {
         AndroidView(
             factory = { ctx ->
                 VideoView(ctx).apply {
-                    setVideoPath(filePath)
+                    val uri = if (filePath.startsWith("content://") || filePath.startsWith("file://") || filePath.startsWith("http://") || filePath.startsWith("https://")) {
+                        android.net.Uri.parse(filePath)
+                    } else {
+                        android.net.Uri.fromFile(java.io.File(filePath))
+                    }
+                    setVideoURI(uri)
                     setOnPreparedListener { mp ->
                         duration = mp.duration
                         mp.isLooping = true
@@ -582,25 +758,32 @@ fun AudioPlayerView(
 
 @Composable
 fun PdfRendererView(filePath: String, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
     val bitmapList = remember(filePath) {
         val bitmaps = mutableStateListOf<Bitmap>()
         try {
-            val file = File(filePath)
-            val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
-            val renderer = PdfRenderer(pfd)
-            val pageCount = renderer.pageCount
-            for (i in 0 until pageCount) {
-                val page = renderer.openPage(i)
-                val scale = 2.0f
-                val w = (page.width * scale).toInt()
-                val h = (page.height * scale).toInt()
-                val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-                page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                bitmaps.add(bitmap)
-                page.close()
+            val uri = if (filePath.startsWith("content://") || filePath.startsWith("file://") || filePath.startsWith("http://") || filePath.startsWith("https://")) {
+                android.net.Uri.parse(filePath)
+            } else {
+                android.net.Uri.fromFile(File(filePath))
             }
-            renderer.close()
-            pfd.close()
+            val pfd = context.contentResolver.openFileDescriptor(uri, "r")
+            if (pfd != null) {
+                val renderer = PdfRenderer(pfd)
+                val pageCount = renderer.pageCount
+                for (i in 0 until pageCount) {
+                    val page = renderer.openPage(i)
+                    val scale = 2.0f
+                    val w = (page.width * scale).toInt()
+                    val h = (page.height * scale).toInt()
+                    val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                    page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                    bitmaps.add(bitmap)
+                    page.close()
+                }
+                renderer.close()
+                pfd.close()
+            }
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -642,4 +825,269 @@ private fun formatDuration(ms: Int): String {
     val mins = totalSecs / 60
     val secs = totalSecs % 60
     return String.format("%02d:%02d", mins, secs)
+}
+
+@Composable
+fun ImageOfflineViewer(
+    filePath: String,
+    fileName: String,
+    mimeType: String
+) {
+    val context = LocalContext.current
+    val bitmap = remember(filePath) {
+        try {
+            android.graphics.BitmapFactory.decodeFile(filePath)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    var scale by remember { mutableFloatStateOf(1f) }
+    var offset by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
+    var rotationState by remember { mutableFloatStateOf(0f) }
+    var showInfoDialog by remember { mutableStateOf(false) }
+
+    val file = remember(filePath) { File(filePath) }
+    val info = remember(filePath) {
+        val options = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeFile(filePath, options)
+        val resolution = if (options.outWidth > 0 && options.outHeight > 0) "${options.outWidth} x ${options.outHeight}" else "Unknown"
+        val format = options.outMimeType ?: mimeType
+        val sizeText = formatFileSize(file.length())
+        ImageInfo(resolution, sizeText, format)
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF0F172A)),
+        contentAlignment = Alignment.Center
+    ) {
+        if (bitmap == null) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(Icons.Default.BrokenImage, contentDescription = null, tint = Color.LightGray, modifier = Modifier.size(48.dp))
+                Spacer(modifier = Modifier.height(12.dp))
+                Text("Unable to load image", color = Color.White)
+            }
+        } else {
+            // Main zooming image display
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) {
+                        detectTransformGestures { _, pan, zoom, _ ->
+                            scale = (scale * zoom).coerceIn(1f, 5f)
+                            if (scale > 1f) {
+                                offset += pan
+                            } else {
+                                offset = androidx.compose.ui.geometry.Offset.Zero
+                            }
+                        }
+                    }
+                    .pointerInput(Unit) {
+                        detectTapGestures(
+                            onDoubleTap = {
+                                if (scale > 1f) {
+                                    scale = 1f
+                                    offset = androidx.compose.ui.geometry.Offset.Zero
+                                } else {
+                                    scale = 2.5f
+                                }
+                            }
+                        )
+                    }
+                    .wrapContentSize(Alignment.Center)
+            ) {
+                androidx.compose.foundation.Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = fileName,
+                    modifier = Modifier
+                        .graphicsLayer(
+                            scaleX = scale,
+                            scaleY = scale,
+                            translationX = offset.x,
+                            translationY = offset.y,
+                            rotationZ = rotationState
+                        ),
+                    contentScale = ContentScale.Fit
+                )
+            }
+
+            // Quick Actions Overlay (Bottom bar)
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.6f)),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(16.dp)
+                    .fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(8.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = { rotationState = (rotationState + 90f) % 360f }) {
+                        Icon(Icons.Default.RotateRight, contentDescription = "Rotate Clockwise", tint = Color.White)
+                    }
+                    IconButton(onClick = { showInfoDialog = true }) {
+                        Icon(Icons.Default.Info, contentDescription = "Image Details", tint = Color.White)
+                    }
+                    IconButton(onClick = {
+                        try {
+                            val uri = androidx.core.content.FileProvider.getUriForFile(
+                                context,
+                                "${context.packageName}.provider",
+                                file
+                            )
+                            val intent = Intent(Intent.ACTION_SEND).apply {
+                                type = mimeType
+                                putExtra(Intent.EXTRA_STREAM, uri)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            context.startActivity(Intent.createChooser(intent, "Share Image"))
+                        } catch (e: Exception) {
+                            android.widget.Toast.makeText(context, "Sharing failed", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    }) {
+                        Icon(Icons.Default.Share, contentDescription = "Share", tint = Color.White)
+                    }
+                    IconButton(onClick = {
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        val clip = android.content.ClipData.newPlainText("Image Path", file.absolutePath)
+                        clipboard.setPrimaryClip(clip)
+                        android.widget.Toast.makeText(context, "Copied file path to clipboard", android.widget.Toast.LENGTH_SHORT).show()
+                    }) {
+                        Icon(Icons.Default.ContentCopy, contentDescription = "Copy Path", tint = Color.White)
+                    }
+                }
+            }
+        }
+
+        // Info popup
+        if (showInfoDialog) {
+            AlertDialog(
+                onDismissRequest = { showInfoDialog = false },
+                confirmButton = {
+                    Button(onClick = { showInfoDialog = false }) {
+                        Text("OK")
+                    }
+                },
+                title = { Text("Image Information") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("File Name: $fileName", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                        Text("Resolution: ${info.resolution}", color = MaterialTheme.colorScheme.onSurface)
+                        Text("File Size: ${info.size}", color = MaterialTheme.colorScheme.onSurface)
+                        Text("Format: ${info.format}", color = MaterialTheme.colorScheme.onSurface)
+                        Text("Stored At: ${file.parent}", color = MaterialTheme.colorScheme.onSurface)
+                    }
+                }
+            )
+        }
+    }
+}
+
+data class ImageInfo(val resolution: String, val size: String, val format: String)
+
+private fun formatFileSize(bytes: Long): String {
+    if (bytes <= 0) return "0 B"
+    val units = arrayOf("B", "KB", "MB", "GB")
+    var value = bytes.toDouble()
+    var unitIdx = 0
+    while (value >= 1024 && unitIdx < units.size - 1) {
+        value /= 1024
+        unitIdx++
+    }
+    return String.format("%.2f %s", value, units[unitIdx])
+}
+
+private fun isImageFile(fileName: String): Boolean {
+    val extensions = listOf("jpg", "jpeg", "png", "webp", "gif", "svg", "bmp", "ico", "avif", "heic", "heif", "tiff")
+    val ext = fileName.substringAfterLast(".", "").lowercase(Locale.ROOT)
+    return extensions.contains(ext)
+}
+
+@Composable
+fun TextCodeRendererView(
+    fileName: String,
+    codeText: String,
+    isEditing: Boolean,
+    onTextChange: (String) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+    ) {
+        Surface(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            color = Color(0xFF0B0F19), // Dark developer canvas
+            border = BorderStroke(1.dp, Color(0xFF1E293B))
+        ) {
+            if (isEditing) {
+                TextField(
+                    value = codeText,
+                    onValueChange = onTextChange,
+                    modifier = Modifier.fillMaxSize(),
+                    textStyle = androidx.compose.ui.text.TextStyle(
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                    ),
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor = Color.Transparent,
+                        unfocusedContainerColor = Color.Transparent,
+                        disabledContainerColor = Color.Transparent,
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent
+                    ),
+                    placeholder = {
+                        Text(
+                            text = "Write or edit your text/code...",
+                            color = Color.White.copy(alpha = 0.3f),
+                            fontSize = 13.sp,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                        )
+                    }
+                )
+            } else {
+                Box(modifier = Modifier.fillMaxSize()) {
+                    val lines = remember(codeText) { codeText.split("\n") }
+                    androidx.compose.foundation.lazy.LazyColumn(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(12.dp)
+                    ) {
+                        itemsIndexed(lines) { index, line ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 1.dp)
+                            ) {
+                                Text(
+                                    text = (index + 1).toString().padStart(4, ' ') + "  ",
+                                    color = Color.White.copy(alpha = 0.35f),
+                                    fontSize = 11.sp,
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                    modifier = Modifier.width(38.dp)
+                                )
+                                Text(
+                                    text = line,
+                                    color = Color(0xFF38BDF8), // Tech cyan syntax
+                                    fontSize = 12.sp,
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

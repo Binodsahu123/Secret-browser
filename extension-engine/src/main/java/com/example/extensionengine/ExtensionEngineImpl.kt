@@ -3,6 +3,7 @@ package com.example.extensionengine
 import android.content.Context
 import android.net.Uri
 import android.webkit.WebView
+import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -40,6 +41,15 @@ class ExtensionEngineImpl(
     private val ioScope = CoroutineScope(Dispatchers.IO)
 
     init {
+        // Track storage changes and dispatch storage.onChanged event down through EventManager
+        storageManager.changeListener = { extensionId, area, changes ->
+            val data = org.json.JSONObject().apply {
+                put("changes", changes)
+                put("areaName", area)
+            }
+            eventManager.triggerEvent("storage.onChanged", data)
+        }
+
         // Initialize bootstrap provider for intercepting HTML page requests
         ExtensionDirectoryResolver.bootstrapProvider = { id ->
             compileBootstrapScript(id)
@@ -200,10 +210,68 @@ class ExtensionEngineImpl(
         )
     }
 
+    private fun loadExtensionMessagesJson(extensionId: String): String {
+        try {
+            val extensionDir = ExtensionDirectoryResolver.getExtensionDir(context, extensionId)
+            val localesDir = File(extensionDir, "_locales")
+            if (!localesDir.exists() || !localesDir.isDirectory) {
+                return "{}"
+            }
+
+            val currentLocale = java.util.Locale.getDefault()
+            val langCode = currentLocale.language
+            val country = currentLocale.country
+            val fullCode = if (country.isNotBlank()) "${langCode}_$country" else langCode
+
+            val candidateDirs = listOf(
+                fullCode,
+                fullCode.replace("_", "-"),
+                langCode,
+                "en",
+                "en-US",
+                "en_US"
+            )
+
+            var messagesFile: File? = null
+            for (cand in candidateDirs) {
+                val f = File(localesDir, cand + "/messages.json")
+                if (f.exists() && f.isFile) {
+                    messagesFile = f
+                    break
+                }
+            }
+
+            if (messagesFile == null) {
+                val subfolders = localesDir.listFiles { f -> f.isDirectory }
+                if (subfolders != null) {
+                    for (sub in subfolders) {
+                        val f = File(sub, "messages.json")
+                        if (f.exists() && f.isFile) {
+                            messagesFile = f
+                            break
+                        }
+                    }
+                }
+            }
+
+            if (messagesFile != null && messagesFile.exists()) {
+                val fileContent = messagesFile.readText()
+                // Validate it's correct JSON
+                val testObj = org.json.JSONObject(fileContent)
+                return testObj.toString()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return "{}"
+    }
+
     fun compileBootstrapScript(extensionId: String): String {
         val ext = registry.getExtension(extensionId)
         val manifestJsonSafe = ext?.manifestJson ?: "{}"
         val quotedManifest = org.json.JSONObject.quote(manifestJsonSafe)
+        val messagesJsonSafe = loadExtensionMessagesJson(extensionId)
+        val quotedMessages = org.json.JSONObject.quote(messagesJsonSafe)
 
         return """
             (function() {
@@ -211,6 +279,13 @@ class ExtensionEngineImpl(
                 
                 window._orionManifests = window._orionManifests || {};
                 window._orionManifests[extId] = $quotedManifest;
+
+                window._orionExtensionMessages = window._orionExtensionMessages || {};
+                try {
+                    window._orionExtensionMessages[extId] = JSON.parse($quotedMessages);
+                } catch(e) {
+                    window._orionExtensionMessages[extId] = {};
+                }
 
                 // Bind modern diagnostic listeners for uncaught errors and promise rejections
                 window.addEventListener("error", function(e) {
@@ -241,6 +316,10 @@ class ExtensionEngineImpl(
                         eventArgs = [intTabId, changeInfo, tab];
                     } else if (eventName === "tabs.onActivated") {
                         eventArgs = [data.activeInfo || {}];
+                    } else if (eventName === "storage.onChanged") {
+                        const changes = data.changes || {};
+                        const areaName = data.areaName || "local";
+                        eventArgs = [changes, areaName];
                     } else if (eventName === "webNavigation.onCompleted" || eventName === "webNavigation.onHistoryStateUpdated") {
                         eventArgs = [data.details || {}];
                     } else {
@@ -253,11 +332,24 @@ class ExtensionEngineImpl(
 
                 window._orionGetExtensionContext = window._orionGetExtensionContext || function(contextExtId) {
                     const bridgeCall = function(apiName, args) {
-                        return new Promise((resolve, reject) => {
+                        return new Promise((resolve) => {
                             const cbId = "cb_" + Math.random().toString(36).substring(2, 9) + "_" + Date.now();
+                            
+                            // Safety timeout (2.0 seconds) to prevent any popup script from freezing the UI
+                            const timeoutId = setTimeout(() => {
+                                if (window._extCallbacks[cbId]) {
+                                    delete window._extCallbacks[cbId];
+                                    console.warn("[BRIDGE_TIMEOUT] Api '" + apiName + "' timed out after 2000ms. Returning fallback empty response.");
+                                    resolve(null);
+                                }
+                            }, 2000);
+
                             window._extCallbacks[cbId] = function(res) {
+                                clearTimeout(timeoutId);
+                                delete window._extCallbacks[cbId];
                                 if (res && res.error) {
-                                    reject(new Error(res.error));
+                                    console.warn("[BRIDGE_WARN] Api '" + apiName + "' returned error: " + res.error + ". Gracefully resolving with null.");
+                                    resolve(null);
                                 } else {
                                     resolve(res);
                                 }
@@ -269,7 +361,9 @@ class ExtensionEngineImpl(
                                     args: args || []
                                 }), cbId);
                             } catch (e) {
-                                reject(e);
+                                clearTimeout(timeoutId);
+                                console.error("[BRIDGE_ERROR] Error posting message for '" + apiName + "':", e);
+                                resolve(null);
                             }
                         });
                     };
@@ -301,9 +395,62 @@ class ExtensionEngineImpl(
                         onConnect: []
                     };
 
+                    const dummyMethod = function(name) {
+                        return function() {
+                            console.log("[MOCK_API] Called: " + name, arguments);
+                            const lastArg = arguments[arguments.length - 1];
+                            if (typeof lastArg === "function") {
+                                setTimeout(() => { try { lastArg(); } catch(e){} }, 5);
+                            }
+                            return Promise.resolve();
+                        };
+                    };
+
+                    const actionMock = {
+                        setTitle: dummyMethod("action.setTitle"),
+                        getTitle: dummyMethod("action.getTitle"),
+                        setIcon: dummyMethod("action.setIcon"),
+                        setPopup: dummyMethod("action.setPopup"),
+                        getPopup: dummyMethod("action.getPopup"),
+                        setBadgeText: dummyMethod("action.setBadgeText"),
+                        getBadgeText: dummyMethod("action.getBadgeText"),
+                        setBadgeBackgroundColor: dummyMethod("action.setBadgeBackgroundColor"),
+                        getBadgeBackgroundColor: dummyMethod("action.getBadgeBackgroundColor"),
+                        enable: dummyMethod("action.enable"),
+                        disable: dummyMethod("action.disable"),
+                        onClicked: { addListener: function(cb){}, removeListener: function(cb){} }
+                    };
+
                     return {
+                        action: actionMock,
+                        browserAction: actionMock,
+                        pageAction: actionMock,
+                        contextMenus: {
+                            create: dummyMethod("contextMenus.create"),
+                            update: dummyMethod("contextMenus.update"),
+                            remove: dummyMethod("contextMenus.remove"),
+                            removeAll: dummyMethod("contextMenus.removeAll"),
+                            onClicked: { addListener: function(cb){}, removeListener: function(cb){} }
+                        },
                         runtime: {
                             id: contextExtId,
+                            lastError: null,
+                            getPlatformInfo: function(callback) {
+                                const info = { os: "android", arch: "arm", nacl_arch: "arm" };
+                                if (callback) callback(info);
+                                return Promise.resolve(info);
+                            },
+                            openOptionsPage: function(callback) {
+                                const manifest = window.browser.runtime.getManifest();
+                                const optionsPage = manifest.options_ui ? (manifest.options_ui.page || "") : (manifest.options_page || "options.html");
+                                const url = window.browser.runtime.getURL(optionsPage);
+                                const p = window.browser.tabs.create({ url: url });
+                                if (callback) p.then(callback);
+                                return p;
+                            },
+                            reload: function() {
+                                try { OrionExtensionBridge.postMessage(JSON.stringify({ api: "runtime.reload", extensionId: contextExtId, args: [] }), "reload_" + Date.now()); } catch(e){}
+                            },
                             getURL: function(path) {
                                 if (!path) return "chrome-extension://" + contextExtId + "/";
                                 if (path.startsWith("/")) path = path.substring(1);
@@ -408,6 +555,7 @@ class ExtensionEngineImpl(
                             }
                         },
                         storage: {
+                            onChanged: createEvent(contextExtId, "storage.onChanged"),
                             local: {
                                 get: function(keys, callback) {
                                     let resolvedKeys = keys;
@@ -483,11 +631,92 @@ class ExtensionEngineImpl(
                                     if (callback) p.then(callback);
                                     return p;
                                 }
+                            },
+                            session: {
+                                get: function(keys, callback) {
+                                    let resolvedKeys = keys;
+                                    let resolvedCallback = callback;
+                                    if (typeof keys === "function") {
+                                        resolvedCallback = keys;
+                                        resolvedKeys = null;
+                                    }
+                                    const p = bridgeCall("storage.get", ["local", resolvedKeys]);
+                                    if (resolvedCallback) p.then(resolvedCallback);
+                                    return p;
+                                },
+                                set: function(items, callback) {
+                                    let resolvedCallback = callback;
+                                    if (typeof items === "function") {
+                                        resolvedCallback = items;
+                                    }
+                                    const p = bridgeCall("storage.set", ["local", items]);
+                                    if (resolvedCallback) p.then(resolvedCallback);
+                                    return p;
+                                },
+                                remove: function(keys, callback) {
+                                    let resolvedKeys = keys;
+                                    let resolvedCallback = callback;
+                                    if (typeof keys === "function") {
+                                        resolvedCallback = keys;
+                                        resolvedKeys = null;
+                                    }
+                                    const p = bridgeCall("storage.remove", ["local", resolvedKeys]);
+                                    if (resolvedCallback) p.then(resolvedCallback);
+                                    return p;
+                                },
+                                clear: function(callback) {
+                                    const p = bridgeCall("storage.clear", ["local"]);
+                                    if (callback) p.then(callback);
+                                    return p;
+                                }
+                            },
+                            managed: {
+                                get: function(keys, callback) {
+                                    let resolvedKeys = keys;
+                                    let resolvedCallback = callback;
+                                    if (typeof keys === "function") {
+                                        resolvedCallback = keys;
+                                        resolvedKeys = null;
+                                    }
+                                    const p = bridgeCall("storage.get", ["local", resolvedKeys]);
+                                    if (resolvedCallback) p.then(resolvedCallback);
+                                    return p;
+                                },
+                                set: function(items, callback) {
+                                    let resolvedCallback = callback;
+                                    if (typeof items === "function") {
+                                        resolvedCallback = items;
+                                    }
+                                    const p = bridgeCall("storage.set", ["local", items]);
+                                    if (resolvedCallback) p.then(resolvedCallback);
+                                    return p;
+                                },
+                                remove: function(keys, callback) {
+                                    let resolvedKeys = keys;
+                                    let resolvedCallback = callback;
+                                    if (typeof keys === "function") {
+                                        resolvedCallback = keys;
+                                        resolvedKeys = null;
+                                    }
+                                    const p = bridgeCall("storage.remove", ["local", resolvedKeys]);
+                                    if (resolvedCallback) p.then(resolvedCallback);
+                                    return p;
+                                },
+                                clear: function(callback) {
+                                    const p = bridgeCall("storage.clear", ["local"]);
+                                    if (callback) p.then(callback);
+                                    return p;
+                                }
                             }
                         },
                         tabs: {
                             onUpdated: createEvent(contextExtId, "tabs.onUpdated"),
                             onActivated: createEvent(contextExtId, "tabs.onActivated"),
+                            get: function(tabId, callback) {
+                                const p = bridgeCall("tabs.get", [tabId]);
+                                if (callback) p.then(callback);
+                                return p;
+                            },
                             query: function(queryInfo, callback) {
                                 const p = bridgeCall("tabs.query", [queryInfo]);
                                 if (callback) p.then(callback);
@@ -548,6 +777,26 @@ class ExtensionEngineImpl(
                                 return port;
                             }
                         },
+                        scripting: {
+                            executeScript: function(spec, callback) {
+                                if (spec && spec.func && typeof spec.func === "function") {
+                                    spec.func = spec.func.toString();
+                                }
+                                const p = bridgeCall("scripting.executeScript", [spec]);
+                                if (callback) p.then(callback);
+                                return p;
+                            },
+                            insertCSS: function(spec, callback) {
+                                const p = bridgeCall("scripting.insertCSS", [spec]);
+                                if (callback) p.then(callback);
+                                return p;
+                            },
+                            removeCSS: function(spec, callback) {
+                                const p = bridgeCall("scripting.removeCSS", [spec]);
+                                if (callback) p.then(callback);
+                                return p;
+                            }
+                        },
                         notifications: {
                             create: function(id, options, callback) {
                                 const p = bridgeCall("notifications.create", [id, options]);
@@ -564,7 +813,413 @@ class ExtensionEngineImpl(
                         },
                         webNavigation: {
                             onCompleted: createEvent(contextExtId, "webNavigation.onCompleted"),
-                            onHistoryStateUpdated: createEvent(contextExtId, "webNavigation.onHistoryStateUpdated")
+                            onHistoryStateUpdated: createEvent(contextExtId, "webNavigation.onHistoryStateUpdated"),
+                            onBeforeNavigate: createEvent(contextExtId, "webNavigation.onBeforeNavigate"),
+                            onCommitted: createEvent(contextExtId, "webNavigation.onCommitted"),
+                            onDOMContentLoaded: createEvent(contextExtId, "webNavigation.onDOMContentLoaded"),
+                            onErrorOccurred: createEvent(contextExtId, "webNavigation.onErrorOccurred"),
+                            onCreatedNavigationTarget: createEvent(contextExtId, "webNavigation.onCreatedNavigationTarget"),
+                            onReferenceFragmentUpdated: createEvent(contextExtId, "webNavigation.onReferenceFragmentUpdated"),
+                            onTabReplaced: createEvent(contextExtId, "webNavigation.onTabReplaced")
+                        },
+                        i18n: {
+                            getMessage: function(messageName, substitutions) {
+                                const msgs = window._orionExtensionMessages[contextExtId] || {};
+                                const item = msgs[messageName] || msgs[messageName.toLowerCase()];
+                                if (!item) return messageName;
+                                let msg = item.message || "";
+                                if (!msg) return messageName;
+                                
+                                if (substitutions) {
+                                    if (!Array.isArray(substitutions)) {
+                                        substitutions = [substitutions];
+                                    }
+                                    substitutions.forEach((sub, i) => {
+                                        const phIndex = i + 1;
+                                        msg = msg.replace(new RegExp("\\$" + phIndex, "g"), String(sub));
+                                    });
+                                }
+                                
+                                if (item.placeholders) {
+                                    for (const phName in item.placeholders) {
+                                        const phObj = item.placeholders[phName];
+                                        const content = phObj.content || "";
+                                        let resolvedContent = content;
+                                        if (substitutions) {
+                                            substitutions.forEach((sub, i) => {
+                                                const phIndex = i + 1;
+                                                resolvedContent = resolvedContent.replace(new RegExp("\\$" + phIndex, "g"), String(sub));
+                                            });
+                                        }
+                                        msg = msg.split("$" + phName + "$").join(resolvedContent);
+                                        msg = msg.split("$" + phName.toLowerCase() + "$").join(resolvedContent);
+                                    }
+                                }
+                                return msg;
+                            },
+                            getAcceptLanguages: function(callback) {
+                                const langs = [navigator.language || "en-US"];
+                                if (callback) callback(langs);
+                                return Promise.resolve(langs);
+                            },
+                            getUILanguage: function() {
+                                return navigator.language || "en-US";
+                            },
+                            detectLanguage: function(text, callback) {
+                                const res = { isReliable: true, languages: [{ language: "en", percentage: 100 }] };
+                                if (callback) callback(res);
+                                return Promise.resolve(res);
+                            }
+                        },
+                        extension: {
+                            getURL: function(path) {
+                                return window.browser.runtime.getURL(path);
+                            },
+                            getBackgroundPage: function() {
+                                return window;
+                            },
+                            getViews: function(fetchProperties) {
+                                return [window];
+                            },
+                            isAllowedIncognitoAccess: function(callback) {
+                                if (callback) callback(false);
+                                return Promise.resolve(false);
+                            },
+                            isAllowedFileSchemeAccess: function(callback) {
+                                if (callback) callback(true);
+                                return Promise.resolve(true);
+                            },
+                            sendMessage: function(msg, cb) {
+                                return window.browser.runtime.sendMessage(msg, cb);
+                            },
+                            connect: function(info) {
+                                return window.browser.runtime.connect(info);
+                            },
+                            inIncognitoContext: false
+                        },
+                        action: {
+                            setIcon: function(details, callback) { if (callback) callback(); return Promise.resolve(); },
+                            setTitle: function(details, callback) { if (callback) callback(); return Promise.resolve(); },
+                            setPopup: function(details, callback) { if (callback) callback(); return Promise.resolve(); },
+                            setBadgeText: function(details, callback) { if (callback) callback(); return Promise.resolve(); },
+                            setBadgeBackgroundColor: function(details, callback) { if (callback) callback(); return Promise.resolve(); },
+                            getBadgeText: function(details, callback) { if (callback) callback(""); return Promise.resolve(""); },
+                            getBadgeBackgroundColor: function(details, callback) { if (callback) callback([0,0,0,0]); return Promise.resolve([0,0,0,0]); },
+                            getTitle: function(details, callback) { if (callback) callback(""); return Promise.resolve(""); },
+                            getPopup: function(details, callback) { if (callback) callback(""); return Promise.resolve(""); },
+                            enable: function(tabId, callback) { if (callback) callback(); return Promise.resolve(); },
+                            disable: function(tabId, callback) { if (callback) callback(); return Promise.resolve(); },
+                            onClicked: { addListener: function(cb) {}, removeListener: function(cb) {} }
+                        },
+                        browserAction: {
+                            setIcon: function(details, callback) { if (callback) callback(); return Promise.resolve(); },
+                            setTitle: function(details, callback) { if (callback) callback(); return Promise.resolve(); },
+                            setPopup: function(details, callback) { if (callback) callback(); return Promise.resolve(); },
+                            setBadgeText: function(details, callback) { if (callback) callback(); return Promise.resolve(); },
+                            setBadgeBackgroundColor: function(details, callback) { if (callback) callback(); return Promise.resolve(); },
+                            getBadgeText: function(details, callback) { if (callback) callback(""); return Promise.resolve(""); },
+                            getBadgeBackgroundColor: function(details, callback) { if (callback) callback([0,0,0,0]); return Promise.resolve([0,0,0,0]); },
+                            getTitle: function(details, callback) { if (callback) callback(""); return Promise.resolve(""); },
+                            getPopup: function(details, callback) { if (callback) callback(""); return Promise.resolve(""); },
+                            enable: function(tabId, callback) { if (callback) callback(); return Promise.resolve(); },
+                            disable: function(tabId, callback) { if (callback) callback(); return Promise.resolve(); },
+                            onClicked: { addListener: function(cb) {}, removeListener: function(cb) {} }
+                        },
+                        pageAction: {
+                            setIcon: function(details, callback) { if (callback) callback(); return Promise.resolve(); },
+                            setTitle: function(details, callback) { if (callback) callback(); return Promise.resolve(); },
+                            setPopup: function(details, callback) { if (callback) callback(); return Promise.resolve(); },
+                            getPopup: function(details, callback) { if (callback) callback(""); return Promise.resolve(""); },
+                            getTitle: function(details, callback) { if (callback) callback(""); return Promise.resolve(""); },
+                            enable: function(tabId, callback) { if (callback) callback(); return Promise.resolve(); },
+                            disable: function(tabId, callback) { if (callback) callback(); return Promise.resolve(); },
+                            onClicked: { addListener: function(cb) {}, removeListener: function(cb) {} }
+                        },
+                        cookies: {
+                            get: function(details, callback) {
+                                const cookie = {
+                                    name: details.name || "",
+                                    value: "",
+                                    domain: details.url ? (new URL(details.url)).hostname : "",
+                                    path: "/",
+                                    secure: true,
+                                    httpOnly: false,
+                                    session: false,
+                                    expirationDate: Math.floor(Date.now() / 1000) + 31536000
+                                };
+                                if (callback) callback(cookie);
+                                return Promise.resolve(cookie);
+                            },
+                            getAll: function(details, callback) {
+                                if (callback) callback([]);
+                                return Promise.resolve([]);
+                            },
+                            set: function(details, callback) {
+                                if (callback) callback(details);
+                                return Promise.resolve(details);
+                            },
+                            remove: function(details, callback) {
+                                if (callback) callback(details);
+                                return Promise.resolve(details);
+                            },
+                            onChanged: {
+                                addListener: function(cb) {},
+                                removeListener: function(cb) {}
+                            }
+                        },
+                        windows: {
+                            getCurrent: function(callback) {
+                                const win = { id: 1, focused: true, type: "normal", state: "normal" };
+                                if (callback) callback(win);
+                                return Promise.resolve(win);
+                            },
+                            getLastFocused: function(callback) {
+                                const win = { id: 1, focused: true, type: "normal", state: "normal" };
+                                if (callback) callback(win);
+                                return Promise.resolve(win);
+                            },
+                            getAll: function(callback) {
+                                const list = [{ id: 1, focused: true, type: "normal", state: "normal" }];
+                                if (callback) callback(list);
+                                return Promise.resolve(list);
+                            }
+                        },
+                        webRequest: {
+                            onBeforeRequest: { addListener: function(cb) {}, removeListener: function(cb) {} },
+                            onBeforeSendHeaders: { addListener: function(cb) {}, removeListener: function(cb) {} },
+                            onSendHeaders: { addListener: function(cb) {}, removeListener: function(cb) {} },
+                            onHeadersReceived: { addListener: function(cb) {}, removeListener: function(cb) {} },
+                            onAuthRequired: { addListener: function(cb) {}, removeListener: function(cb) {} },
+                            onResponseStarted: { addListener: function(cb) {}, removeListener: function(cb) {} },
+                            onBeforeRedirect: { addListener: function(cb) {}, removeListener: function(cb) {} },
+                            onCompleted: { addListener: function(cb) {}, removeListener: function(cb) {} },
+                            onErrorOccurred: { addListener: function(cb) {}, removeListener: function(cb) {} }
+                        },
+                        contextMenus: {
+                            create: function(details, callback) {
+                                if (callback) callback();
+                                return "menu_" + Math.random().toString(36).substring(2, 9);
+                            },
+                            update: function(id, details, callback) {
+                                if (callback) callback();
+                                return Promise.resolve();
+                            },
+                            remove: function(id, callback) {
+                                if (callback) callback();
+                                return Promise.resolve();
+                            },
+                            removeAll: function(callback) {
+                                if (callback) callback();
+                                return Promise.resolve();
+                            },
+                            onClicked: {
+                                addListener: function(cb) {},
+                                removeListener: function(cb) {}
+                            }
+                        },
+                        history: {
+                            search: function(query, callback) {
+                                if (callback) callback([]);
+                                return Promise.resolve([]);
+                            },
+                            addUrl: function(details, callback) {
+                                if (callback) callback();
+                                return Promise.resolve();
+                            },
+                            deleteUrl: function(details, callback) {
+                                if (callback) callback();
+                                return Promise.resolve();
+                            },
+                            deleteRange: function(range, callback) {
+                                if (callback) callback();
+                                return Promise.resolve();
+                            },
+                            deleteAll: function(callback) {
+                                if (callback) callback();
+                                return Promise.resolve();
+                            },
+                            onVisited: { addListener: function(cb) {}, removeListener: function(cb) {} },
+                            onVisitRemoved: { addListener: function(cb) {}, removeListener: function(cb) {} }
+                        },
+                        bookmarks: {
+                            get: function(idOrIdList, callback) {
+                                const list = [];
+                                if (callback) callback(list);
+                                return Promise.resolve(list);
+                            },
+                            getChildren: function(id, callback) {
+                                const list = [];
+                                if (callback) callback(list);
+                                return Promise.resolve(list);
+                            },
+                            getRecent: function(numberOfItems, callback) {
+                                const list = [];
+                                if (callback) callback(list);
+                                return Promise.resolve(list);
+                            },
+                            getTree: function(callback) {
+                                const list = [];
+                                if (callback) callback(list);
+                                return Promise.resolve(list);
+                            },
+                            getSubTree: function(id, callback) {
+                                const list = [];
+                                if (callback) callback(list);
+                                return Promise.resolve(list);
+                            },
+                            search: function(query, callback) {
+                                const list = [];
+                                if (callback) callback(list);
+                                return Promise.resolve(list);
+                            },
+                            create: function(bookmark, callback) {
+                                const item = { id: "1", title: bookmark.title || "", url: bookmark.url || "" };
+                                if (callback) callback(item);
+                                return Promise.resolve(item);
+                            },
+                            move: function(id, destination, callback) {
+                                if (callback) callback();
+                                return Promise.resolve();
+                            },
+                            update: function(id, changes, callback) {
+                                if (callback) callback();
+                                return Promise.resolve();
+                            },
+                            remove: function(id, callback) {
+                                if (callback) callback();
+                                return Promise.resolve();
+                            },
+                            removeTree: function(id, callback) {
+                                if (callback) callback();
+                                return Promise.resolve();
+                            },
+                            onCreated: { addListener: function(cb) {}, removeListener: function(cb) {} },
+                            onRemoved: { addListener: function(cb) {}, removeListener: function(cb) {} },
+                            onChanged: { addListener: function(cb) {}, removeListener: function(cb) {} },
+                            onMoved: { addListener: function(cb) {}, removeListener: function(cb) {} },
+                            onChildrenReordered: { addListener: function(cb) {}, removeListener: function(cb) {} },
+                            onImportStarted: { addListener: function(cb) {}, removeListener: function(cb) {} },
+                            onImportEnded: { addListener: function(cb) {}, removeListener: function(cb) {} }
+                        },
+                        idle: {
+                            queryState: function(detectionIntervalInSeconds, callback) {
+                                if (callback) callback("active");
+                                return Promise.resolve("active");
+                            },
+                            setDetectionInterval: function(intervalInSeconds) {},
+                            onStateChanged: { addListener: function(cb) {}, removeListener: function(cb) {} }
+                        },
+                        management: {
+                            get: function(id, callback) {
+                                const details = { id: id, name: "Extension", enabled: true };
+                                if (callback) callback(details);
+                                return Promise.resolve(details);
+                            },
+                            getSelf: function(callback) {
+                                const manifest = window.browser.runtime.getManifest();
+                                const details = {
+                                    id: contextExtId,
+                                    name: manifest.name || "Extension",
+                                    version: manifest.version || "1.0",
+                                    enabled: true,
+                                    type: "extension"
+                                };
+                                if (callback) callback(details);
+                                return Promise.resolve(details);
+                            },
+                            getAll: function(callback) {
+                                const list = [];
+                                for (let id in window._orionManifests) {
+                                    try {
+                                        const m = JSON.parse(window._orionManifests[id]);
+                                        list.push({ id: id, name: m.name || "Extension", enabled: true });
+                                    } catch(e) {}
+                                }
+                                if (callback) callback(list);
+                                return Promise.resolve(list);
+                            },
+                            setEnabled: function(id, enabled, callback) {
+                                if (callback) callback();
+                                return Promise.resolve();
+                            },
+                            onInstalled: { addListener: function(cb) {}, removeListener: function(cb) {} },
+                            onUninstalled: { addListener: function(cb) {}, removeListener: function(cb) {} },
+                            onEnabled: { addListener: function(cb) {}, removeListener: function(cb) {} },
+                            onDisabled: { addListener: function(cb) {}, removeListener: function(cb) {} }
+                        },
+                        declarativeContent: {
+                            onPageChanged: {
+                                addRules: function(rules, callback) { if (callback) callback(rules); return Promise.resolve(rules); },
+                                removeRules: function(rules, callback) { if (callback) callback(); return Promise.resolve(); },
+                                getRules: function(ruleIds, callback) { if (callback) callback([]); return Promise.resolve([]); },
+                                addListener: function(cb) {},
+                                removeListener: function(cb) {}
+                            },
+                            ShowPageAction: function() { return {}; },
+                            PageStateMatcher: function(props) { return props || {}; }
+                        },
+                        permissions: {
+                            contains: function(permissions, callback) {
+                                const res = { result: true };
+                                if (callback) callback(res);
+                                return Promise.resolve(res);
+                            },
+                            request: function(permissions, callback) {
+                                const res = { result: true };
+                                if (callback) callback(res);
+                                return Promise.resolve(res);
+                            },
+                            remove: function(permissions, callback) {
+                                const res = { result: true };
+                                if (callback) callback(res);
+                                return Promise.resolve(res);
+                            },
+                            getAll: function(callback) {
+                                const manifest = window._orionGetExtensionContext(contextExtId).runtime.getManifest();
+                                const res = {
+                                    permissions: manifest.permissions || [],
+                                    origins: manifest.host_permissions || []
+                                };
+                                if (callback) callback(res);
+                                return Promise.resolve(res);
+                            }
+                        },
+                        commands: {
+                            getAll: function(callback) {
+                                if (callback) callback([]);
+                                return Promise.resolve([]);
+                            },
+                            onCommand: { addListener: function(cb) {}, removeListener: function(cb) {} }
+                        },
+                        omnibox: {
+                            setDefaultSuggestion: function(suggestion) {},
+                            onInputStarted: { addListener: function(cb) {}, removeListener: function(cb) {} },
+                            onInputChanged: { addListener: function(cb) {}, removeListener: function(cb) {} },
+                            onInputEntered: { addListener: function(cb) {}, removeListener: function(cb) {} },
+                            onInputCancelled: { addListener: function(cb) {}, removeListener: function(cb) {} }
+                        },
+                        system: {
+                            cpu: {
+                                getInfo: function(callback) {
+                                    const info = { numOfProcessors: 4, processors: [], modelName: "ARM Processor" };
+                                    if (callback) callback(info);
+                                    return Promise.resolve(info);
+                                }
+                            },
+                            memory: {
+                                getInfo: function(callback) {
+                                    const info = { capacity: 4194304000, availableCapacity: 2097152000 };
+                                    if (callback) callback(info);
+                                    return Promise.resolve(info);
+                                }
+                            },
+                            storage: {
+                                getInfo: function(callback) {
+                                    const info = [{ id: "main", name: "Internal Storage", type: "fixed", capacity: 64424509440, availableCapacity: 32212254720 }];
+                                    if (callback) callback(info);
+                                    return Promise.resolve(info);
+                                }
+                            }
                         }
                     };
                 };

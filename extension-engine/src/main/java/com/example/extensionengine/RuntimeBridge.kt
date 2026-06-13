@@ -9,6 +9,8 @@ import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 
+private var lastExtensionToast: android.widget.Toast? = null
+
 interface BrowserDelegate {
     fun queryTabs(queryInfo: JSONObject): JSONArray
     fun createTab(url: String, active: Boolean)
@@ -60,6 +62,21 @@ class RuntimeBridge(
                 handleApiCall(api, extensionId, args, callbackId)
             } catch (e: Exception) {
                 e.printStackTrace()
+                com.example.extensionengine.ExtensionDebuggerEngine.instance.logError(
+                    extensionId,
+                    when (extensionId) {
+                        "ext_grok_automation" -> "Grok Automation"
+                        "ext_dark_reader" -> "Dark Reader"
+                        "ext_adblock" -> "AdBlock Plus"
+                        "ext_metamask" -> "MetaMask Wallet"
+                        "ext_grok_4" -> "Grok 4.0 AI"
+                        "ext_cookies" -> "I don't care about cookies"
+                        "ext_auto_translate" -> "Auto-Translate Extension"
+                        else -> "Extension '$extensionId'"
+                    },
+                    com.example.extensionengine.DebugErrorType.RUNTIME,
+                    "Runtime crash: ${e.message ?: e.toString()}"
+                )
                 sendErrorResponse(callbackId, e.localizedMessage ?: "Unknown bridge error")
             }
         }
@@ -145,6 +162,39 @@ class RuntimeBridge(
                 portManager.disconnect(channelId)
                 sendSuccessResponse(callbackId, JSONObject().put("status", "disconnected"))
             }
+            api == "runtime.reload" -> {
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    try {
+                        lastExtensionToast?.cancel()
+                        val t = android.widget.Toast.makeText(context, "Reloading extension: $extensionId", android.widget.Toast.LENGTH_SHORT)
+                        lastExtensionToast = t
+                        t.show()
+                    } catch (e: Exception) {}
+                }
+                sendSuccessResponse(callbackId, JSONObject().put("status", "reloading"))
+            }
+            api == "tabs.get" -> {
+                val tabIdRaw = args.optString(0, "")
+                val resolvedTabId = TabIdMapper.getUuidFromString(tabIdRaw)
+                val allTabs = delegate?.queryTabs(JSONObject()) ?: JSONArray()
+                var foundTab: JSONObject? = null
+                val intTargetId = tabIdRaw.toIntOrNull()
+                for (i in 0 until allTabs.length()) {
+                    val t = allTabs.optJSONObject(i)
+                    if (t != null) {
+                        val idVal = t.opt("id")
+                        if (idVal == intTargetId || (idVal != null && idVal.toString() == tabIdRaw) || (idVal != null && idVal.toString() == resolvedTabId)) {
+                            foundTab = t
+                            break
+                        }
+                    }
+                }
+                if (foundTab != null) {
+                    sendSuccessResponse(callbackId, foundTab)
+                } else {
+                    sendErrorResponse(callbackId, "Tab not found: $tabIdRaw")
+                }
+            }
             api == "tabs.query" -> {
                 val queryInfo = args.optJSONObject(0) ?: JSONObject()
                 val tabsArray = delegate?.queryTabs(queryInfo) ?: JSONArray()
@@ -203,11 +253,35 @@ class RuntimeBridge(
                 val tabIdRaw = target.optString("tabId", "")
                 val resolvedTabId = TabIdMapper.getUuidFromString(tabIdRaw)
                 val funcCode = spec.optString("func", "")
-                
-                if (resolvedTabId.isNotBlank() && funcCode.isNotBlank()) {
+                val files = spec.optJSONArray("files")
+
+                val codeToExecute = StringBuilder()
+                if (funcCode.isNotBlank()) {
+                    codeToExecute.append("($funcCode)();")
+                } else if (files != null && files.length() > 0) {
+                    val extensionDir = ExtensionDirectoryResolver.getExtensionDir(context, extensionId)
+                    for (i in 0 until files.length()) {
+                        val path = files.optString(i, "")
+                        if (path.isNotBlank()) {
+                            val cleanPath = path.removePrefix("./").removePrefix("/")
+                            val file = java.io.File(extensionDir, cleanPath)
+                            if (file.exists()) {
+                                codeToExecute.append(file.readText()).append("\n")
+                            } else {
+                                val fallbackFile = java.io.File(extensionDir, path.substringAfterLast("/"))
+                                if (fallbackFile.exists()) {
+                                    codeToExecute.append(fallbackFile.readText()).append("\n")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                val finalCode = codeToExecute.toString()
+                if (resolvedTabId.isNotBlank() && finalCode.isNotBlank()) {
                     val del = delegate
                     if (del != null) {
-                        del.executeScriptOnTab(resolvedTabId, "($funcCode)();") { res ->
+                        del.executeScriptOnTab(resolvedTabId, finalCode) { res ->
                             sendSuccessResponse(callbackId, JSONObject().put("result", res ?: ""))
                         }
                     } else {
@@ -215,6 +289,226 @@ class RuntimeBridge(
                     }
                 } else {
                     sendSuccessResponse(callbackId, JSONObject().put("status", "invalid_arguments"))
+                }
+            }
+            api == "scripting.insertCSS" -> {
+                val spec = args.optJSONObject(0) ?: JSONObject()
+                val target = spec.optJSONObject("target") ?: JSONObject()
+                val tabIdRaw = target.optString("tabId", "")
+                val resolvedTabId = TabIdMapper.getUuidFromString(tabIdRaw)
+                val css = spec.optString("css", "")
+                val files = spec.optJSONArray("files")
+
+                val cssToInject = StringBuilder()
+                if (css.isNotBlank()) {
+                    cssToInject.append(css)
+                } else if (files != null && files.length() > 0) {
+                    val extensionDir = ExtensionDirectoryResolver.getExtensionDir(context, extensionId)
+                    for (i in 0 until files.length()) {
+                        val path = files.optString(i, "")
+                        if (path.isNotBlank()) {
+                            val cleanPath = path.removePrefix("./").removePrefix("/")
+                            val file = java.io.File(extensionDir, cleanPath)
+                            if (file.exists()) {
+                                cssToInject.append(file.readText()).append("\n")
+                            } else {
+                                val fallbackFile = java.io.File(extensionDir, path.substringAfterLast("/"))
+                                if (fallbackFile.exists()) {
+                                    cssToInject.append(fallbackFile.readText()).append("\n")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                val finalCss = cssToInject.toString()
+                if (resolvedTabId.isNotBlank() && finalCss.isNotBlank()) {
+                    val del = delegate
+                    if (del != null) {
+                        val styleKey = "user_style_" + finalCss.hashCode()
+                        val injectionJS = """
+                            (function() {
+                                if (document.getElementById('$styleKey')) return;
+                                const style = document.createElement('style');
+                                style.id = '$styleKey';
+                                style.type = 'text/css';
+                                style.innerHTML = ${org.json.JSONObject.quote(finalCss)};
+                                (document.head || document.documentElement).appendChild(style);
+                            })();
+                        """.trimIndent()
+                        del.executeScriptOnTab(resolvedTabId, injectionJS) { res ->
+                            sendSuccessResponse(callbackId, JSONObject().put("status", "inserted"))
+                        }
+                    } else {
+                        sendSuccessResponse(callbackId, JSONObject().put("status", "no_delegate"))
+                    }
+                } else {
+                    sendSuccessResponse(callbackId, JSONObject().put("status", "invalid_arguments"))
+                }
+            }
+            api == "scripting.removeCSS" -> {
+                val spec = args.optJSONObject(0) ?: JSONObject()
+                val target = spec.optJSONObject("target") ?: JSONObject()
+                val tabIdRaw = target.optString("tabId", "")
+                val resolvedTabId = TabIdMapper.getUuidFromString(tabIdRaw)
+                val css = spec.optString("css", "")
+                val files = spec.optJSONArray("files")
+
+                val cssToInject = StringBuilder()
+                if (css.isNotBlank()) {
+                    cssToInject.append(css)
+                } else if (files != null && files.length() > 0) {
+                    val extensionDir = ExtensionDirectoryResolver.getExtensionDir(context, extensionId)
+                    for (i in 0 until files.length()) {
+                        val path = files.optString(i, "")
+                        if (path.isNotBlank()) {
+                            val cleanPath = path.removePrefix("./").removePrefix("/")
+                            val file = java.io.File(extensionDir, cleanPath)
+                            if (file.exists()) {
+                                cssToInject.append(file.readText()).append("\n")
+                            } else {
+                                val fallbackFile = java.io.File(extensionDir, path.substringAfterLast("/"))
+                                if (fallbackFile.exists()) {
+                                    cssToInject.append(fallbackFile.readText()).append("\n")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                val finalCss = cssToInject.toString()
+                if (resolvedTabId.isNotBlank() && finalCss.isNotBlank()) {
+                    val del = delegate
+                    if (del != null) {
+                        val styleKey = "user_style_" + finalCss.hashCode()
+                        val removalJS = """
+                            (function() {
+                                const style = document.getElementById('$styleKey');
+                                if (style) style.remove();
+                            })();
+                        """.trimIndent()
+                        del.executeScriptOnTab(resolvedTabId, removalJS) { res ->
+                            sendSuccessResponse(callbackId, JSONObject().put("status", "removed"))
+                        }
+                    } else {
+                        sendSuccessResponse(callbackId, JSONObject().put("status", "no_delegate"))
+                    }
+                } else {
+                    sendSuccessResponse(callbackId, JSONObject().put("status", "invalid_arguments"))
+                }
+            }
+            api.startsWith("cookies.") -> {
+                val cookieManager = android.webkit.CookieManager.getInstance()
+                when {
+                    api.endsWith(".get") -> {
+                        val details = args.optJSONObject(0) ?: JSONObject()
+                        val url = details.optString("url", "")
+                        val keyName = details.optString("name", "")
+                        if (url.isNotBlank()) {
+                            val cookiesStr = cookieManager.getCookie(url) ?: ""
+                            val cookiesMap = cookiesStr.split(";").associate {
+                                val parts = it.split("=", limit = 2)
+                                val k = parts.getOrNull(0)?.trim() ?: ""
+                                val v = parts.getOrNull(1)?.trim() ?: ""
+                                k to v
+                            }
+                            val cookieVal = cookiesMap[keyName]
+                            if (cookieVal != null) {
+                                val match = JSONObject().apply {
+                                    put("name", keyName)
+                                    put("value", cookieVal)
+                                    put("domain", java.net.URL(url).host)
+                                    put("path", "/")
+                                }
+                                sendSuccessResponse(callbackId, match)
+                            } else {
+                                sendErrorResponse(callbackId, "Cookie name '$keyName' not found for url: $url")
+                            }
+                        } else {
+                            sendErrorResponse(callbackId, "Url parameter is required")
+                        }
+                    }
+                    api.endsWith(".getAll") -> {
+                        val details = args.optJSONObject(0) ?: JSONObject()
+                        val url = details.optString("url", "")
+                        if (url.isNotBlank()) {
+                            val cookiesStr = cookieManager.getCookie(url) ?: ""
+                            val list = JSONArray()
+                            cookiesStr.split(";").forEach {
+                                val parts = it.split("=", limit = 2)
+                                val k = parts.getOrNull(0)?.trim() ?: ""
+                                val v = parts.getOrNull(1)?.trim() ?: ""
+                                if (k.isNotBlank()) {
+                                    list.put(JSONObject().apply {
+                                        put("name", k)
+                                        put("value", v)
+                                        put("domain", java.net.URL(url).host)
+                                        put("path", "/")
+                                    })
+                                }
+                            }
+                            sendSuccessResponse(callbackId, list)
+                        } else {
+                            sendErrorResponse(callbackId, "Url parameter is required")
+                        }
+                    }
+                    api.endsWith(".set") -> {
+                        val details = args.optJSONObject(0) ?: JSONObject()
+                        val url = details.optString("url", "")
+                        val keyName = details.optString("name", "")
+                        val value = details.optString("value", "")
+                        if (url.isNotBlank() && keyName.isNotBlank()) {
+                            cookieManager.setCookie(url, "$keyName=$value")
+                            cookieManager.flush()
+                            sendSuccessResponse(callbackId, JSONObject().apply {
+                                put("name", keyName)
+                                put("value", value)
+                                put("status", "success")
+                            })
+                        } else {
+                            sendErrorResponse(callbackId, "Url and name parameter is required")
+                        }
+                    }
+                    api.endsWith(".remove") -> {
+                        val details = args.optJSONObject(0) ?: JSONObject()
+                        val url = details.optString("url", "")
+                        val keyName = details.optString("name", "")
+                        if (url.isNotBlank() && keyName.isNotBlank()) {
+                            cookieManager.setCookie(url, "$keyName=; Max-Age=-99999999; expires=Thu, 01 Jan 1970 00:00:00 GMT")
+                            cookieManager.flush()
+                            sendSuccessResponse(callbackId, JSONObject().apply {
+                                put("name", keyName)
+                                put("status", "removed")
+                            })
+                        } else {
+                            sendErrorResponse(callbackId, "Url and name parameter is required")
+                        }
+                    }
+                    else -> sendErrorResponse(callbackId, "Unsupported cookies API")
+                }
+            }
+            api.startsWith("alarms.") -> {
+                when {
+                    api.endsWith(".create") -> {
+                        val name = args.optString(0, "default_alarm")
+                        val alarmInfo = args.optJSONObject(1) ?: JSONObject()
+                        val delayInMinutes = alarmInfo.optDouble("delayInMinutes", 1.0)
+                        val periodInMinutes = alarmInfo.optDouble("periodInMinutes", 0.0)
+                        
+                        val delayMs = (delayInMinutes * 60 * 1000).toLong()
+                        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                            eventManager.triggerEvent("alarms.onAlarm", JSONObject().apply {
+                                put("name", name)
+                                put("scheduledTime", System.currentTimeMillis() + delayMs)
+                            })
+                        }, delayMs)
+                        
+                        sendSuccessResponse(callbackId, JSONObject().put("status", "created"))
+                    }
+                    api.endsWith(".clear") -> {
+                        sendSuccessResponse(callbackId, JSONObject().put("status", "cleared"))
+                    }
+                    else -> sendErrorResponse(callbackId, "Unsupported alarms API")
                 }
             }
             api == "event.addListener" -> {
@@ -232,6 +526,21 @@ class RuntimeBridge(
                 sendSuccessResponse(callbackId, JSONObject().put("status", "removed"))
             }
             else -> {
+                com.example.extensionengine.ExtensionDebuggerEngine.instance.logError(
+                    extensionId,
+                    when (extensionId) {
+                        "ext_grok_automation" -> "Grok Automation"
+                        "ext_dark_reader" -> "Dark Reader"
+                        "ext_adblock" -> "AdBlock Plus"
+                        "ext_metamask" -> "MetaMask Wallet"
+                        "ext_grok_4" -> "Grok 4.0 AI"
+                        "ext_cookies" -> "I don't care about cookies"
+                        "ext_auto_translate" -> "Auto-Translate Extension"
+                        else -> "Extension '$extensionId'"
+                    },
+                    com.example.extensionengine.DebugErrorType.PERMISSION,
+                    "Calling unauthorized or unsupported API: $api"
+                )
                 sendErrorResponse(callbackId, "API $api is unsupported or missing permissions.")
             }
         }

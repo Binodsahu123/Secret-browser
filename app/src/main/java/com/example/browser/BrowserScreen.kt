@@ -42,6 +42,14 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import com.example.downloaduiengine.FloatingDownloadButton
+import com.example.downloaduiengine.MediaDownloadDialog
+import com.example.downloaduiengine.SwiftDownloadsScreen
+import com.example.downloaduiengine.MediaLinkResolver
+import com.example.downloaduiengine.ResolvedMediaStream
+import com.example.downloaduiengine.ResolutionPickerSheet
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
@@ -59,6 +67,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.PreferenceManager
 import androidx.activity.compose.BackHandler
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.data.Bookmark
 import com.example.data.HistoryItem
@@ -86,6 +95,14 @@ fun BrowserScreen(
     val focusManager = LocalFocusManager.current
     val keyboardController = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
     val coroutineScope = rememberCoroutineScope()
+
+    var isBrowserResolving by remember { mutableStateOf(false) }
+    var browserResolvedStreams by remember { mutableStateOf<List<ResolvedMediaStream>>(emptyList()) }
+    var showBrowserResolutionSelector by remember { mutableStateOf(false) }
+
+    var showYouTubeExtensionPanel by remember { mutableStateOf(false) }
+    var isYtResolving by remember { mutableStateOf(false) }
+    var ytResolvedStreams by remember { mutableStateOf<List<ResolvedMediaStream>>(emptyList()) }
 
     var showDelayedNotificationDialog by remember { mutableStateOf(false) }
 
@@ -240,7 +257,7 @@ fun BrowserScreen(
                         .padding(horizontal = 4.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // 1. Exit Search Back Arrow / Back Navigation Button
+                    // 1. Exit Search or Go Home Button (Chrome Style Position)
                     if (uiState.isSearchFocused) {
                         IconButton(
                             onClick = {
@@ -259,37 +276,18 @@ fun BrowserScreen(
                         }
                     } else {
                         IconButton(
-                            onClick = { viewModel.goBack() },
-                            enabled = activeTab?.canGoBack == true,
-                            modifier = Modifier.size(36.dp).testTag("omnibox_back")
+                            onClick = {
+                                focusManager.clearFocus()
+                                keyboardController?.hide()
+                                viewModel.goToHomepage()
+                            },
+                            modifier = Modifier.size(36.dp).testTag("omnibox_home")
                         ) {
                             Icon(
-                                imageVector = Icons.Default.ChevronLeft,
-                                contentDescription = "Back",
-                                tint = if (isGlass) {
-                                    if (activeTab?.canGoBack == true) Color.White else Color.White.copy(alpha = 0.3f)
-                                } else {
-                                    if (activeTab?.canGoBack == true) LocalContentColor.current else LocalContentColor.current.copy(alpha = 0.3f)
-                                },
-                                modifier = Modifier.size(24.dp)
-                            )
-                        }
-
-                        // 2. Forward Navigation Button
-                        IconButton(
-                            onClick = { viewModel.goForward() },
-                            enabled = activeTab?.canGoForward == true,
-                            modifier = Modifier.size(36.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.ChevronRight,
-                                contentDescription = "Forward",
-                                tint = if (isGlass) {
-                                    if (activeTab?.canGoForward == true) Color.White else Color.White.copy(alpha = 0.3f)
-                                } else {
-                                    if (activeTab?.canGoForward == true) LocalContentColor.current else LocalContentColor.current.copy(alpha = 0.3f)
-                                },
-                                modifier = Modifier.size(24.dp)
+                                imageVector = Icons.Default.Home,
+                                contentDescription = "Go Home",
+                                tint = if (isGlass) Color.White else LocalContentColor.current,
+                                modifier = Modifier.size(22.dp)
                             )
                         }
                     }
@@ -405,56 +403,29 @@ fun BrowserScreen(
                                 }
                             }
 
-                            // Stop / Reload button
-                            if (!uiState.isSearchFocused) {
-                                IconButton(
-                                    onClick = {
-                                        if (activeTab?.isLoading == true) {
-                                            viewModel.getOrCreateWebView(activeTab.id, context).stopLoading()
-                                        } else {
-                                            viewModel.reload()
-                                        }
-                                    },
-                                    modifier = Modifier.size(24.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = if (activeTab?.isLoading == true) Icons.Default.Close else Icons.Default.Refresh,
-                                        contentDescription = "Refresh",
-                                        tint = if (isGlass) Color.White.copy(alpha = 0.8f) else MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                }
-                            }
+
                         }
                     }
 
                     if (!uiState.isSearchFocused) {
-                        // 4. Home Button
-                        if (uiState.showHomeButton) {
-                            IconButton(
-                                onClick = { viewModel.goToHomepage() },
-                                modifier = Modifier.size(36.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Home,
-                                    contentDescription = "Go Home",
-                                    tint = if (isGlass) Color.White else LocalContentColor.current,
-                                    modifier = Modifier.size(22.dp)
-                                )
-                            }
-                        }
 
-                        // AI Assistant Summary Button (AutoAwesome Sparkles Icon)
+                        // AI Button placed beside tab counter and menu
                         IconButton(
                             onClick = {
-                                if (activeTab?.url?.startsWith("http") == true) {
-                                    viewModel.getActiveWebViewText { text ->
-                                        currentCapturedText = text
+                                val session = AISessionManager.getSession(activeTab?.id ?: "")
+                                if (activeTab?.url?.startsWith("http") == true && session != null && session.rawPageText.isNotEmpty()) {
+                                    currentCapturedText = session.rawPageText
+                                    showAIChatSheet = true
+                                } else {
+                                    if (activeTab?.url?.startsWith("http") == true) {
+                                        viewModel.getActiveWebViewText { text ->
+                                            currentCapturedText = text
+                                            showAIChatSheet = true
+                                        }
+                                    } else {
+                                        currentCapturedText = ""
                                         showAIChatSheet = true
                                     }
-                                } else {
-                                    currentCapturedText = ""
-                                    showAIChatSheet = true
                                 }
                             },
                             modifier = Modifier.size(36.dp).testTag("ai_star_btn")
@@ -503,6 +474,29 @@ fun BrowserScreen(
                             }
                         }
 
+                        // PDF Print Icon next to Options Menu
+                        val activeTabDetail = uiState.tabs.find { it.id == uiState.activeTabId }
+                        if (activeTabDetail != null) {
+                            IconButton(
+                                onClick = {
+                                    try {
+                                        val wv = viewModel.getOrCreateWebView(activeTabDetail.id, context)
+                                        PdfUtility.printWebView(context, wv, activeTabDetail.title)
+                                    } catch (e: Exception) {
+                                        Toast.makeText(context, "Cannot export PDF: ${e.message}", Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PictureAsPdf,
+                                    contentDescription = "Save Page to PDF",
+                                    tint = if (isGlass) Color.White.copy(alpha = 0.9f) else Color(0xFFF43F5E),
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                        }
+
                         // 6. Options Menu
                         Box(modifier = Modifier.size(36.dp), contentAlignment = Alignment.Center) {
                             IconButton(
@@ -524,11 +518,26 @@ fun BrowserScreen(
                             // First item: Quick row of status/actions
                             Row(
                                 modifier = Modifier
-                                    .width(220.dp)
+                                    .width(240.dp)
                                     .padding(horizontal = 8.dp, vertical = 2.dp),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                // Back Arrow
+                                IconButton(
+                                    onClick = {
+                                        showMenu = false
+                                        viewModel.goBack()
+                                    },
+                                    enabled = activeTab?.canGoBack == true
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                        contentDescription = "Back",
+                                        tint = if (activeTab?.canGoBack == true) LocalContentColor.current else LocalContentColor.current.copy(alpha = 0.3f)
+                                    )
+                                }
+
                                 // Forward Arrow
                                 IconButton(
                                     onClick = {
@@ -539,7 +548,25 @@ fun BrowserScreen(
                                 ) {
                                     Icon(
                                         imageVector = Icons.AutoMirrored.Filled.ArrowForward,
-                                        contentDescription = "Forward"
+                                        contentDescription = "Forward",
+                                        tint = if (activeTab?.canGoForward == true) LocalContentColor.current else LocalContentColor.current.copy(alpha = 0.3f)
+                                    )
+                                }
+
+                                // Refresh / Stop
+                                IconButton(
+                                    onClick = {
+                                        showMenu = false
+                                        if (activeTab?.isLoading == true) {
+                                            viewModel.getOrCreateWebView(activeTab.id, context).stopLoading()
+                                        } else {
+                                            viewModel.reload()
+                                        }
+                                    }
+                                ) {
+                                    Icon(
+                                        imageVector = if (activeTab?.isLoading == true) Icons.Default.Close else Icons.Default.Refresh,
+                                        contentDescription = "Refresh"
                                     )
                                 }
 
@@ -622,6 +649,15 @@ fun BrowserScreen(
                             )
 
                             DropdownMenuItem(
+                                text = { Text("Web Notifications") },
+                                leadingIcon = { Icon(Icons.Default.Notifications, contentDescription = null) },
+                                onClick = {
+                                    showMenu = false
+                                    viewModel.setWebNotificationsOpen(true)
+                                }
+                            )
+
+                            DropdownMenuItem(
                                 text = { Text("Recent tabs") },
                                 leadingIcon = { Icon(Icons.Default.Refresh, contentDescription = null) },
                                 onClick = {
@@ -656,6 +692,29 @@ fun BrowserScreen(
                                 onClick = {
                                     showMenu = false
                                     viewModel.triggerTranslationSelection()
+                                }
+                            )
+
+                            DropdownMenuItem(
+                                text = { Text("AI Page Assistant") },
+                                leadingIcon = { Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = Color(0xFF818CF8)) },
+                                onClick = {
+                                    showMenu = false
+                                    val session = AISessionManager.getSession(activeTab?.id ?: "")
+                                    if (activeTab?.url?.startsWith("http") == true && session != null && session.rawPageText.isNotEmpty()) {
+                                        currentCapturedText = session.rawPageText
+                                        showAIChatSheet = true
+                                    } else {
+                                        if (activeTab?.url?.startsWith("http") == true) {
+                                            viewModel.getActiveWebViewText { text ->
+                                                currentCapturedText = text
+                                                showAIChatSheet = true
+                                            }
+                                        } else {
+                                            currentCapturedText = ""
+                                            showAIChatSheet = true
+                                        }
+                                    }
                                 }
                             )
 
@@ -772,6 +831,15 @@ fun BrowserScreen(
                             HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
 
                             DropdownMenuItem(
+                                text = { Text("Developer Tools") },
+                                leadingIcon = { Icon(Icons.Default.Code, contentDescription = null) },
+                                onClick = {
+                                    showMenu = false
+                                    viewModel.setDevToolsOpen(true)
+                                }
+                            )
+
+                            DropdownMenuItem(
                                 text = { Text("Settings") },
                                 leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null) },
                                 onClick = {
@@ -781,7 +849,7 @@ fun BrowserScreen(
                             )
                         }
                     }
-                    }
+                }
                 }
 
                 // Web Loader linear progress indicator
@@ -818,7 +886,7 @@ fun BrowserScreen(
                     viewModel.exitFullscreen()
                 }
             }
-        }
+        } else {
         Column(modifier = Modifier.fillMaxSize().imePadding()) {
             // 1. Omnibox / Top Address Bar (Only when Tab Switcher & Reader Mode are inactive and toolbars are set to visible)
             androidx.compose.animation.AnimatedVisibility(
@@ -849,7 +917,12 @@ fun BrowserScreen(
                         onMergeTabs = { ids, name, color ->
                             ids.forEach { viewModel.moveTabToGroup(it, name, color) }
                         },
-                        onCloseSwitcher = { viewModel.setTabSwitcherOpen(false) }
+                        onCloseSwitcher = { viewModel.setTabSwitcherOpen(false) },
+                        onRenameGroup = { groupId, newName -> viewModel.renameGroup(groupId, newName) },
+                        onChangeGroupColor = { groupId, newColor -> viewModel.changeGroupColor(groupId, newColor) },
+                        onNewTabInGroup = { groupId, isIncogn -> viewModel.addNewTabInGroupById(groupId, isIncogn) },
+                        onUngroupTab = { tabId -> viewModel.removeTabFromGroup(tabId) },
+                        onCreateNewGroup = { name, color, isIncogn -> viewModel.createNewTabGroup(name, color, isIncogn) }
                     )
                 } else if (uiState.readerModeActive) {
                     ReaderModeScreen(
@@ -870,28 +943,162 @@ fun BrowserScreen(
                             onRefresh = { viewModel.refreshArticles() }
                         )
                     } else {
-                        AndroidView(
-                            factory = { ctx ->
-                                android.widget.FrameLayout(ctx).apply {
-                                    layoutParams = android.view.ViewGroup.LayoutParams(
-                                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                                        android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                        Box(modifier = Modifier.fillMaxSize()) {
+                            AndroidView(
+                                factory = { ctx ->
+                                    android.widget.FrameLayout(ctx).apply {
+                                        layoutParams = android.view.ViewGroup.LayoutParams(
+                                            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                                            android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                                        )
+                                    }
+                                },
+                                update = { frameLayout ->
+                                    val view = viewModel.getOrCreateWebView(activeTab.id, frameLayout.context)
+                                    if (activeTab.isWebViewDestroyed) {
+                                        view.loadUrl(activeTab.url)
+                                    }
+                                    if (view.parent != frameLayout) {
+                                        (view.parent as? android.view.ViewGroup)?.removeView(view)
+                                        frameLayout.removeAllViews()
+                                        frameLayout.addView(view)
+                                    }
+                                },
+                                modifier = Modifier.fillMaxSize().testTag("webview")
+                            )
+
+                            // YouTube Detection & Download Overlay
+                            val youtubeVideoInfo by viewModel.youtubeDetectionEngine.detectedVideo.collectAsState()
+                            
+                            if (youtubeVideoInfo != null) {
+                                var showYtDownloadSheet by remember { mutableStateOf(false) }
+                                
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .align(Alignment.TopCenter)
+                                        .padding(top = 16.dp, start = 16.dp, end = 16.dp)
+                                        .testTag("youtube_top_overlay")
+                                ) {
+                                    Card(
+                                        colors = CardDefaults.cardColors(
+                                            containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(8.dp).copy(alpha = 0.95f)
+                                        ),
+                                        shape = RoundedCornerShape(20.dp),
+                                        elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+                                        modifier = Modifier.fillMaxWidth().widthIn(max = 500.dp).align(Alignment.Center)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(12.dp).fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.weight(1f),
+                                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Image(
+                                                    painter = coil.compose.rememberAsyncImagePainter(youtubeVideoInfo!!.thumbnail),
+                                                    contentDescription = "Thumbnail",
+                                                    modifier = Modifier
+                                                        .size(50.dp, 35.dp)
+                                                        .clip(RoundedCornerShape(6.dp)),
+                                                    contentScale = ContentScale.Crop
+                                                )
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(
+                                                        text = youtubeVideoInfo!!.title,
+                                                        fontSize = 13.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                    Text(
+                                                        text = "YouTube Video Detected",
+                                                        fontSize = 11.sp,
+                                                        color = MaterialTheme.colorScheme.primary,
+                                                        fontWeight = FontWeight.SemiBold
+                                                    )
+                                                }
+                                            }
+                                            
+                                            Row(
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                FilledTonalButton(
+                                                    onClick = {
+                                                        showYtDownloadSheet = true
+                                                        viewModel.evaluateJavascriptOnActiveWebview("window.location.hash = '#download';")
+                                                    },
+                                                    shape = RoundedCornerShape(12.dp),
+                                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                                    colors = ButtonDefaults.filledTonalButtonColors(
+                                                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                                                    )
+                                                ) {
+                                                    Icon(imageVector = Icons.Default.Download, contentDescription = "Download", modifier = Modifier.size(16.dp))
+                                                    Spacer(modifier = Modifier.width(4.dp))
+                                                    Text("Download", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                                }
+                                                
+                                                FilledTonalButton(
+                                                    onClick = { 
+                                                        (context as? Activity)?.let { act ->
+                                                            YouTubePipController.enterPip(act)
+                                                        }
+                                                    },
+                                                    shape = RoundedCornerShape(12.dp),
+                                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                                                ) {
+                                                    Icon(imageVector = Icons.Default.PictureInPicture, contentDescription = "PIP", modifier = Modifier.size(16.dp))
+                                                    Spacer(modifier = Modifier.width(4.dp))
+                                                    Text("PIP", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if (showYtDownloadSheet) {
+                                    YouTubeDownloadBottomSheet(
+                                        videoInfo = youtubeVideoInfo!!,
+                                        onDismiss = { showYtDownloadSheet = false },
+                                        viewModel = viewModel
                                     )
                                 }
-                            },
-                            update = { frameLayout ->
-                                val view = viewModel.getOrCreateWebView(activeTab.id, frameLayout.context)
-                                if (activeTab.isWebViewDestroyed) {
-                                    view.loadUrl(activeTab.url)
+                            }
+
+                            // Instant Premium Loading Skeleton overlay
+                            if (activeTab.isLoading || activeTab.url == "about:blank") {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(MaterialTheme.colorScheme.background),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Column(
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.Center,
+                                        modifier = Modifier.padding(24.dp)
+                                    ) {
+                                        CircularProgressIndicator(
+                                            color = MaterialTheme.colorScheme.primary,
+                                            strokeWidth = 3.dp,
+                                            modifier = Modifier.size(48.dp)
+                                        )
+                                        Spacer(modifier = Modifier.height(16.dp))
+                                        Text(
+                                            text = "Loading Secure Connection...",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f)
+                                        )
+                                    }
                                 }
-                                if (view.parent != frameLayout) {
-                                    (view.parent as? android.view.ViewGroup)?.removeView(view)
-                                    frameLayout.removeAllViews()
-                                    frameLayout.addView(view)
-                                }
-                            },
-                            modifier = Modifier.fillMaxSize().testTag("webview")
-                        )
+                            }
+                        }
                     }
                 }
 
@@ -1158,7 +1365,11 @@ fun BrowserScreen(
                             )
                         }
 
-                        IconButton(onClick = { viewModel.goToHomepage() }) {
+                        IconButton(onClick = {
+                            focusManager.clearFocus()
+                            keyboardController?.hide()
+                            viewModel.goToHomepage()
+                        }) {
                             Icon(
                                 imageVector = Icons.Default.Home,
                                 contentDescription = "Go Home",
@@ -1169,14 +1380,21 @@ fun BrowserScreen(
                         // AI Assistant Summary Button (AutoAwesome Sparkles Icon)
                         IconButton(
                             onClick = {
-                                if (activeTab?.url?.startsWith("http") == true) {
-                                    viewModel.getActiveWebViewText { text ->
-                                        currentCapturedText = text
+                                val session = AISessionManager.getSession(activeTab?.id ?: "")
+                                if (activeTab?.url?.startsWith("http") == true && session != null && session.rawPageText.isNotEmpty()) {
+                                    currentCapturedText = session.rawPageText
+                                    showAIChatSheet = true
+                                } else {
+                                    if (activeTab?.url?.startsWith("http") == true) {
+                                        // Fallback if background extraction hasn't completed or isn't available
+                                        viewModel.getActiveWebViewText { text ->
+                                            currentCapturedText = text
+                                            showAIChatSheet = true
+                                        }
+                                    } else {
+                                        currentCapturedText = ""
                                         showAIChatSheet = true
                                     }
-                                } else {
-                                    currentCapturedText = ""
-                                    showAIChatSheet = true
                                 }
                             },
                             modifier = Modifier.testTag("ai_star_btn")
@@ -1525,6 +1743,7 @@ fun BrowserScreen(
                 }
             }
         }
+        }
 
         // --- dialog overlays ---
 
@@ -1595,15 +1814,446 @@ fun BrowserScreen(
 
         // Downloads list overlay dialog
         if (uiState.isDownloadsOpen) {
-            val downloadsList by viewModel.downloads.collectAsState()
-            DownloadsOverlay(
-                downloads = downloadsList,
-                onDismiss = { viewModel.setDownloadsOpen(false) },
-                onOpenFile = { path, name, mime ->
-                    viewModel.openLocalFile(path, name, mime)
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background)
+            ) {
+                SwiftDownloadsScreen(
+                    engine = viewModel.customDownloadEngine,
+                    onBack = { viewModel.setDownloadsOpen(false) },
+                    onOpenFile = { path, name, mime ->
+                        viewModel.openLocalFile(path, name, mime)
+                    },
+                    onNavigateToUrl = { url ->
+                        viewModel.navigateTo(url)
+                        viewModel.setDownloadsOpen(false)
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
+
+        // SwiftBrowser Advanced Professional Media Download Popup overlays
+        val detectedMediaCustomState = viewModel.detectedMediaCustom.value
+        val showDialogCustom = viewModel.showDownloadDialogCustom.value
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(bottom = 85.dp, end = 20.dp),
+            contentAlignment = Alignment.BottomEnd
+        ) {
+            FloatingDownloadButton(
+                detectedMedia = detectedMediaCustomState,
+                onClick = {
+                    val media = detectedMediaCustomState
+                    if (media != null) {
+                        if (media.quality == "Resolvables") {
+                            isBrowserResolving = true
+                            coroutineScope.launch(Dispatchers.IO) {
+                                try {
+                                    val streams = MediaLinkResolver.resolveMedia(media.url)
+                                    withContext(Dispatchers.Main) {
+                                        browserResolvedStreams = streams
+                                        isBrowserResolving = false
+                                        showBrowserResolutionSelector = true
+                                    }
+                                } catch (e: Exception) {
+                                    withContext(Dispatchers.Main) {
+                                        isBrowserResolving = false
+                                        Toast.makeText(context, "Failed to analyze URL: ${e.message}", Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                            }
+                        } else {
+                            viewModel.showDownloadDialogCustom.value = true
+                        }
+                    }
+                }
+            )
+        }
+
+        val isYouTubePage = remember(activeTab?.url) {
+            val urlStr = activeTab?.url ?: ""
+            urlStr.contains("youtube.com") || urlStr.contains("youtu.be")
+        }
+
+        if (isYouTubePage) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(bottom = 155.dp, end = 20.dp),
+                contentAlignment = Alignment.BottomEnd
+            ) {
+                val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+                val pulseScale by infiniteTransition.animateFloat(
+                    initialValue = 1f,
+                    targetValue = 1.05f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(1300, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+                        repeatMode = RepeatMode.Reverse
+                    ),
+                    label = "pulseBtn"
+                )
+
+                Button(
+                    onClick = {
+                        showYouTubeExtensionPanel = true
+                        isYtResolving = true
+                        val targetUrl = activeTab?.url ?: ""
+                        coroutineScope.launch(Dispatchers.IO) {
+                            try {
+                                val streams = MediaLinkResolver.resolveMedia(targetUrl)
+                                withContext(Dispatchers.Main) {
+                                    ytResolvedStreams = streams
+                                    isYtResolving = false
+                                }
+                            } catch (e: Exception) {
+                                withContext(Dispatchers.Main) {
+                                    isYtResolving = false
+                                    Toast.makeText(context, "Error exploring streams: ${e.message}", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }
+                    },
+                    shape = RoundedCornerShape(22.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFFE50914), // Premium YouTube Red
+                        contentColor = Color.White
+                    ),
+                    elevation = ButtonDefaults.buttonElevation(defaultElevation = 12.dp),
+                    modifier = Modifier
+                        .height(44.dp)
+                        .graphicsLayer {
+                            scaleX = pulseScale
+                            scaleY = pulseScale
+                        },
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Extension, // Extension puzzle logo
+                        contentDescription = "YouTube Pro Extension Assistant",
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "YT Pro Extension",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+
+        if (showYouTubeExtensionPanel) {
+            AlertDialog(
+                onDismissRequest = { showYouTubeExtensionPanel = false },
+                confirmButton = {},
+                dismissButton = {},
+                title = null,
+                text = {
+                    Surface(
+                        shape = RoundedCornerShape(24.dp),
+                        color = Color(0xFF0F0F13), // Pitch dark theme matching YouTube mobile app & modern Dark Mode
+                        border = BorderStroke(1.dp, Color(0xFF2E2E3C)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .padding(20.dp)
+                                .fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(16.dp)
+                        ) {
+                            // Branded header
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Star,
+                                        contentDescription = null,
+                                        tint = Color(0xFFFFCC00), // Gold Premium Accent
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                    Column {
+                                        Text(
+                                            text = "YouTube Pro Extension",
+                                            fontWeight = FontWeight.Black,
+                                            fontSize = 15.sp,
+                                            color = Color.White
+                                        )
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(6.dp)
+                                                    .background(Color(0xFF25D366), CircleShape) // Green Connected dot
+                                            )
+                                            Text(
+                                                text = "Observer Active v3.9.8",
+                                                color = Color.Gray,
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                        }
+                                    }
+                                }
+
+                                IconButton(
+                                    onClick = { showYouTubeExtensionPanel = false },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "Close",
+                                        tint = Color.Gray
+                                    )
+                                }
+                            }
+
+                            // Subtitle tip
+                            Text(
+                                text = "Deep link sniffer identified YouTube URL. Choose your preferred video resolution or audio format extraction below:",
+                                color = Color.Gray,
+                                fontSize = 11.sp,
+                                lineHeight = 15.sp
+                            )
+
+                            if (isYtResolving) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 24.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    CircularProgressIndicator(
+                                        color = Color(0xFFE50914),
+                                        modifier = Modifier.size(36.dp)
+                                    )
+                                    Text(
+                                        text = "Infiltrating media stream channels...",
+                                        color = Color.Gray,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            } else {
+                                val videos = remember(ytResolvedStreams) { ytResolvedStreams.filter { !it.isAudio } }
+                                val audios = remember(ytResolvedStreams) { ytResolvedStreams.filter { it.isAudio } }
+
+                                LazyColumn(
+                                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(max = 280.dp)
+                                ) {
+                                    // Video Resolutions Label
+                                    item {
+                                        Text(
+                                            text = "🎬 VIDEO RESOLUTIONS (MP4)",
+                                            color = Color(0xFFE50914),
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 11.sp,
+                                            modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
+                                        )
+                                    }
+
+                                    if (videos.isEmpty()) {
+                                        item {
+                                            Text(
+                                                text = "No direct MP4 resolutions identified. Attempting forced direct stream...",
+                                                color = Color.DarkGray,
+                                                fontSize = 10.sp,
+                                                modifier = Modifier.padding(start = 8.dp)
+                                            )
+                                        }
+                                    } else {
+                                        items(videos) { stream ->
+                                            YtStreamItemRow(stream = stream) { selectedStream ->
+                                                showYouTubeExtensionPanel = false
+                                                val safeFileName = "YTPro_Video_" + selectedStream.label.replace(" ", "_").replace("(", "").replace(")", "").replace("-", "") + "_" + System.currentTimeMillis() + "." + selectedStream.ext.lowercase(java.util.Locale.ROOT)
+                                                coroutineScope.launch {
+                                                    try {
+                                                        viewModel.customDownloadEngine.startDownload(selectedStream.url, safeFileName, selectedStream.mimeType, 4)
+                                                        Toast.makeText(context, "Direct media queue initiated!", Toast.LENGTH_SHORT).show()
+                                                    } catch (e: Exception) {
+                                                        Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_LONG).show()
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Audio Formats Label
+                                    item {
+                                        Text(
+                                            text = "🎵 AUDIO STREAM EXTRACTOR (MP3 / AAC)",
+                                            color = Color(0xFF38BDF8),
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 11.sp,
+                                            modifier = Modifier.padding(top = 10.dp, bottom = 2.dp)
+                                        )
+                                    }
+
+                                    if (audios.isEmpty()) {
+                                        item {
+                                            Text(
+                                                text = "No audio formats registered. Fallback converting MP4 track to MP3.",
+                                                color = Color.DarkGray,
+                                                fontSize = 10.sp,
+                                                modifier = Modifier.padding(start = 8.dp)
+                                            )
+                                        }
+                                    } else {
+                                        items(audios) { stream ->
+                                            YtStreamItemRow(stream = stream) { selectedStream ->
+                                                showYouTubeExtensionPanel = false
+                                                val safeFileName = "YTPro_Audio_" + selectedStream.label.replace(" ", "_").replace("(", "").replace(")", "").replace("-", "") + "_" + System.currentTimeMillis() + "." + selectedStream.ext.lowercase(java.util.Locale.ROOT)
+                                                coroutineScope.launch {
+                                                    try {
+                                                        viewModel.customDownloadEngine.startDownload(selectedStream.url, safeFileName, selectedStream.mimeType, 4)
+                                                        Toast.makeText(context, "Direct audio queue initiated!", Toast.LENGTH_SHORT).show()
+                                                    } catch (e: Exception) {
+                                                        Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_LONG).show()
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Footer Status Info
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(Color(0xFF16161F), RoundedCornerShape(12.dp))
+                                    .padding(12.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Shield,
+                                    contentDescription = null,
+                                    tint = Color(0xFF25D366),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Text(
+                                    text = "Equipped with automated Ad Skipper & deep Web-SABR request bypass filters.",
+                                    color = Color.Gray,
+                                    fontSize = 10.sp,
+                                    lineHeight = 14.sp,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
+                    }
+                }
+            )
+        }
+
+        if (isBrowserResolving) {
+            AlertDialog(
+                onDismissRequest = { isBrowserResolving = false },
+                confirmButton = {},
+                dismissButton = {},
+                title = null,
+                text = {
+                    Surface(
+                        shape = RoundedCornerShape(22.dp),
+                        color = Color(0xFF101014),
+                        border = BorderStroke(1.dp, Color(0xFF22222E)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(16.dp)
+                        ) {
+                            CircularProgressIndicator(
+                                color = Color(0xFFFF2E2E),
+                                modifier = Modifier.size(44.dp)
+                            )
+                            Text(
+                                text = "Analyzing Media Sources...",
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp
+                            )
+                            Text(
+                                text = "Resolving high quality video channels & audio format conversion options. Please hold on...",
+                                color = Color.Gray,
+                                fontSize = 11.sp,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                        }
+                    }
+                }
+            )
+        }
+
+        if (showBrowserResolutionSelector && detectedMediaCustomState != null) {
+            ResolutionPickerSheet(
+                url = detectedMediaCustomState.url,
+                resolvedStreams = browserResolvedStreams,
+                onDismiss = {
+                    showBrowserResolutionSelector = false
                 },
-                viewModel = viewModel,
-                isGlass = isGlass
+                onConfirmStream = { stream ->
+                    showBrowserResolutionSelector = false
+                    val safeFileName = "VidMate_" + stream.label.replace(" ", "_").replace("(", "").replace(")", "").replace("-", "") + "_" + System.currentTimeMillis() + "." + stream.ext.lowercase(java.util.Locale.ROOT)
+                    coroutineScope.launch {
+                        try {
+                            viewModel.customDownloadEngine.startDownload(stream.url, safeFileName, stream.mimeType, 4)
+                            Toast.makeText(context, "Started background download for: ${stream.label}", Toast.LENGTH_SHORT).show()
+                        } catch (e: Exception) {
+                            Toast.makeText(context, "Error queueing download: ${e.message}", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
+            )
+        }
+
+        if (detectedMediaCustomState != null) {
+            val scopeCustom = rememberCoroutineScope()
+            MediaDownloadDialog(
+                show = showDialogCustom,
+                detectedMedia = detectedMediaCustomState,
+                onDismiss = { viewModel.showDownloadDialogCustom.value = false },
+                onConfirmDownload = { fileName, threadsCount ->
+                    viewModel.showDownloadDialogCustom.value = false
+                    scopeCustom.launch {
+                        viewModel.customDownloadEngine.startDownload(
+                            url = detectedMediaCustomState.url,
+                            fileName = fileName,
+                            mimeType = detectedMediaCustomState.mimeType,
+                            threads = threadsCount
+                        )
+                    }
+                }
+            )
+        }
+
+        // Web Notifications overlay
+        if (uiState.isWebNotificationsOpen) {
+            com.example.notificationengine.NotificationCenterScreen(
+                onBack = { viewModel.setWebNotificationsOpen(false) },
+                onOpenUrl = { url ->
+                    viewModel.navigateTo(url)
+                    viewModel.setWebNotificationsOpen(false)
+                },
+                modifier = Modifier.fillMaxSize()
             )
         }
 
@@ -1623,6 +2273,17 @@ fun BrowserScreen(
                 pageText = currentCapturedText,
                 onDismiss = { showAIChatSheet = false }
             )
+        }
+
+        // Offscreen WebView mounts for warm AI website sessions
+        Box(
+            modifier = Modifier
+                .size(1.dp)
+                .alpha(0f)
+        ) {
+            val bridgeSystem = remember { AIWebsiteBridgeSystem.getInstance(context) }
+            AndroidView(factory = { bridgeSystem.getOrCreateWebView("ChatGPT") })
+            AndroidView(factory = { bridgeSystem.getOrCreateWebView("Gemini") })
         }
 
         // Chrome Extensions overlay Dialog
@@ -1705,6 +2366,19 @@ fun BrowserScreen(
             }
         }
 
+        // Developer Tools Inspector Panel Overlay
+        if (uiState.isDevToolsOpen) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.BottomCenter) // Safe overlay layout in Box
+            ) {
+                com.example.developertoolsengine.DeveloperPanelComponent(
+                    onClose = { viewModel.setDevToolsOpen(false) }
+                )
+            }
+        }
+
         // D. SSL Certificate Connection Info Overlay
         if (showSslDialog && activeTab != null) {
             val domain = remember(activeTab.url) {
@@ -1759,14 +2433,10 @@ fun BrowserScreen(
                     viewModel.addNewTab(url = url, isIncognito = false)
                 },
                 onOpenInNewTabGroup = { url ->
-                    viewModel.addNewTab(url = url, isIncognito = false)
                     if (activeTab != null) {
-                        val activeGrp = activeTab.groupName
-                        val activeColor = activeTab.groupColor ?: 0xFF818CF8
-                        if (activeGrp != null) {
-                            val newActiveId = viewModel.uiState.value.activeTabId
-                            viewModel.moveTabToGroup(newActiveId, activeGrp, activeColor)
-                        }
+                        viewModel.addNewTabInGroup(activeTab.id, url)
+                    } else {
+                        viewModel.addNewTab(url = url, isIncognito = false)
                     }
                 },
                 onOpenInIncognito = { url ->
@@ -2065,6 +2735,16 @@ fun pinWebpageShortcut(context: Context, url: String, title: String) {
     }
 }
 
+sealed interface TabGridItem {
+    data class SingleTab(val tab: TabState) : TabGridItem
+    data class TabGroup(
+        val groupId: String,
+        val groupName: String,
+        val groupColor: Long,
+        val tabs: List<TabState>
+    ) : TabGridItem
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TabSwitcherLayout(
@@ -2074,12 +2754,20 @@ fun TabSwitcherLayout(
     onNewTab: (Boolean) -> Unit,
     onReopenClosedTab: (TabState) -> Unit,
     onMergeTabs: (List<String>, String, Long) -> Unit,
-    onCloseSwitcher: () -> Unit
+    onCloseSwitcher: () -> Unit,
+    onRenameGroup: (String, String) -> Unit,
+    onChangeGroupColor: (String, Long) -> Unit,
+    onNewTabInGroup: (String, Boolean) -> Unit,
+    onUngroupTab: (String) -> Unit,
+    onCreateNewGroup: (String, Long, Boolean) -> Unit
 ) {
     val context = LocalContext.current
     var searchQuery by remember { mutableStateOf("") }
     var isSelectionMode by remember { mutableStateOf(false) }
     val selectedTabIds = remember { mutableStateListOf<String>() }
+    var showNewGroupDialog by remember { mutableStateOf(false) }
+    var showMoveNewGroupDialog by remember { mutableStateOf(false) }
+    var selectedTabForMoveGroup by remember { mutableStateOf<TabState?>(null) }
 
     val activeTabInstance = remember(state.tabs, state.activeTabId) {
         state.tabs.find { it.id == state.activeTabId }
@@ -2099,6 +2787,37 @@ fun TabSwitcherLayout(
             }
         }
     }
+
+    // Grouping logic for the tab list
+    val gridItems = remember(filteredTabs) {
+        val items = mutableListOf<TabGridItem>()
+        val groups = filteredTabs.groupBy { it.groupId }
+        
+        // Add ungrouped tabs
+        groups[null]?.forEach { tab ->
+            items.add(TabGridItem.SingleTab(tab))
+        }
+        
+        // Add tab groups
+        groups.forEach { (groupId, tabsInGroup) ->
+            if (groupId != null && tabsInGroup.isNotEmpty()) {
+                val groupName = tabsInGroup.first().groupName ?: "Group"
+                val groupColor = tabsInGroup.first().groupColor ?: 0xFF818CF8
+                items.add(TabGridItem.TabGroup(groupId, groupName, groupColor, tabsInGroup))
+            }
+        }
+        
+        // Sort items by last active time to show latest interactions first
+        items.sortByDescending {
+            when (it) {
+                is TabGridItem.SingleTab -> it.tab.lastActiveTime
+                is TabGridItem.TabGroup -> it.tabs.maxOfOrNull { t -> t.lastActiveTime } ?: 0L
+            }
+        }
+        items
+    }
+
+    var activeGroupToDetail by remember { mutableStateOf<TabGridItem.TabGroup?>(null) }
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
@@ -2193,13 +2912,38 @@ fun TabSwitcherLayout(
         },
         floatingActionButton = {
             if (!isSelectionMode) {
-                FloatingActionButton(
-                    onClick = { onNewTab(isShowingIncognitoFilter) },
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = MaterialTheme.colorScheme.onPrimary,
-                    modifier = Modifier.testTag("new_tab_fab")
-                ) {
-                    Icon(imageVector = Icons.Default.Add, contentDescription = "Add New Tab")
+                var showFabMenu by remember { mutableStateOf(false) }
+                Box {
+                    FloatingActionButton(
+                        onClick = { showFabMenu = true },
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.testTag("new_tab_fab")
+                    ) {
+                        Icon(imageVector = Icons.Default.Add, contentDescription = "Add options")
+                    }
+                    
+                    DropdownMenu(
+                        expanded = showFabMenu,
+                        onDismissRequest = { showFabMenu = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("New Tab") },
+                            leadingIcon = { Icon(Icons.Default.Add, null) },
+                            onClick = {
+                                showFabMenu = false
+                                onNewTab(isShowingIncognitoFilter)
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("New Tab Group") },
+                            leadingIcon = { Icon(Icons.Default.GroupWork, null) },
+                            onClick = {
+                                showFabMenu = false
+                                showNewGroupDialog = true
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -2264,168 +3008,391 @@ fun TabSwitcherLayout(
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                items(filteredTabs) { tab ->
-                    val isActive = tab.id == state.activeTabId
-                    val isSelected = selectedTabIds.contains(tab.id)
-                    
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .aspectRatio(0.75f)
-                            .clickable {
-                                if (isSelectionMode) {
-                                    if (isSelected) selectedTabIds.remove(tab.id) else selectedTabIds.add(tab.id)
-                                } else {
-                                    onTabSelect(tab.id)
-                                }
-                            }
-                            .testTag("tab_card_${tab.id}"),
-                        colors = CardDefaults.cardColors(
-                            containerColor = if (isSelected) {
-                                MaterialTheme.colorScheme.primaryContainer
-                            } else if (isActive) {
-                                MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f)
-                            } else {
-                                MaterialTheme.colorScheme.surface
-                            }
-                        ),
-                        border = BorderStroke(
-                            width = if (isSelected) 3.dp else if (isActive) 2.dp else 0.5.dp,
-                            color = if (isSelected) {
-                                MaterialTheme.colorScheme.primary
-                            } else if (isActive) {
-                                MaterialTheme.colorScheme.secondary
-                            } else {
-                                MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
-                            }
-                        )
-                    ) {
-                        Box(modifier = Modifier.fillMaxSize()) {
-                            Column(modifier = Modifier.fillMaxSize()) {
-                                // Header of each tab card
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(8.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Row(
-                                        modifier = Modifier.weight(1f),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        if (tab.favicon != null) {
-                                            Image(
-                                                bitmap = tab.favicon.asImageBitmap(),
-                                                contentDescription = null,
-                                                modifier = Modifier.size(16.dp)
-                                            )
+                items(gridItems) { gridItem ->
+                    when (gridItem) {
+                        is TabGridItem.SingleTab -> {
+                            val tab = gridItem.tab
+                            val isActive = tab.id == state.activeTabId
+                            val isSelected = selectedTabIds.contains(tab.id)
+                            
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .aspectRatio(0.75f)
+                                    .clickable {
+                                        if (isSelectionMode) {
+                                            if (isSelected) selectedTabIds.remove(tab.id) else selectedTabIds.add(tab.id)
                                         } else {
-                                            Icon(
-                                                imageVector = Icons.Default.Language,
-                                                contentDescription = null,
-                                                modifier = Modifier.size(16.dp),
-                                                tint = MaterialTheme.colorScheme.primary
-                                            )
+                                            onTabSelect(tab.id)
                                         }
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Column {
-                                            if (!tab.groupName.isNullOrEmpty()) {
-                                                Text(
-                                                    text = tab.groupName,
-                                                    fontSize = 9.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = Color(tab.groupColor ?: 0xFF818CF8)
+                                    }
+                                    .testTag("tab_card_${tab.id}"),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = if (isSelected) {
+                                        MaterialTheme.colorScheme.primaryContainer
+                                    } else if (isActive) {
+                                        MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f)
+                                    } else {
+                                        MaterialTheme.colorScheme.surface
+                                    }
+                                ),
+                                border = BorderStroke(
+                                    width = if (isSelected) 3.dp else if (isActive) 2.dp else 0.5.dp,
+                                    color = if (isSelected) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else if (isActive) {
+                                        MaterialTheme.colorScheme.secondary
+                                    } else {
+                                        MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+                                    }
+                                )
+                            ) {
+                                Box(modifier = Modifier.fillMaxSize()) {
+                                    Column(modifier = Modifier.fillMaxSize()) {
+                                        // Header of each tab card
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(8.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.weight(1f),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                if (tab.favicon != null) {
+                                                    Image(
+                                                        bitmap = tab.favicon.asImageBitmap(),
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(16.dp)
+                                                    )
+                                                } else {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Language,
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(16.dp),
+                                                        tint = MaterialTheme.colorScheme.primary
+                                                    )
+                                                }
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Column {
+                                                    if (!tab.groupName.isNullOrEmpty()) {
+                                                        Text(
+                                                            text = tab.groupName,
+                                                            fontSize = 9.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            color = Color(tab.groupColor ?: 0xFF818CF8)
+                                                        )
+                                                    }
+                                                    Text(
+                                                        text = tab.title,
+                                                        fontSize = 11.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = MaterialTheme.colorScheme.onSurface,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                }
+                                            }
+
+                                            if (!isSelectionMode) {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    var showTabMenu by remember { mutableStateOf(false) }
+                                                    IconButton(
+                                                        onClick = { showTabMenu = true },
+                                                        modifier = Modifier.size(24.dp)
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.MoreVert,
+                                                            contentDescription = "Options",
+                                                            modifier = Modifier.size(14.dp)
+                                                        )
+                                                    }
+                                                    
+                                                    DropdownMenu(
+                                                        expanded = showTabMenu,
+                                                        onDismissRequest = { showTabMenu = false }
+                                                    ) {
+                                                        DropdownMenuItem(
+                                                            text = { Text("Move to New Group") },
+                                                            leadingIcon = { Icon(Icons.Default.GroupWork, null, modifier = Modifier.size(18.dp)) },
+                                                            onClick = {
+                                                                showTabMenu = false
+                                                                selectedTabForMoveGroup = tab
+                                                                showMoveNewGroupDialog = true
+                                                            }
+                                                        )
+                                                        state.tabs.mapNotNull { it.groupName }.distinct().forEach { existingGroupName ->
+                                                            DropdownMenuItem(
+                                                                text = { Text("Add to: $existingGroupName") },
+                                                                leadingIcon = { Icon(Icons.Default.Group, null, modifier = Modifier.size(18.dp)) },
+                                                                onClick = {
+                                                                    showTabMenu = false
+                                                                    val matchedTab = state.tabs.find { it.groupName == existingGroupName }
+                                                                    if (matchedTab != null) {
+                                                                        onMergeTabs(listOf(tab.id), existingGroupName, matchedTab.groupColor ?: 0xFF818CF8)
+                                                                    }
+                                                                }
+                                                            )
+                                                        }
+                                                        DropdownMenuItem(
+                                                            text = { Text("Close Tab") },
+                                                            leadingIcon = { Icon(Icons.Default.Close, null, modifier = Modifier.size(18.dp)) },
+                                                            onClick = {
+                                                                showTabMenu = false
+                                                                onTabClose(tab.id)
+                                                            }
+                                                        )
+                                                    }
+                                                    
+                                                    IconButton(
+                                                        onClick = { onTabClose(tab.id) },
+                                                        modifier = Modifier.size(24.dp).testTag("close_tab_btn_${tab.id}")
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.Close,
+                                                            contentDescription = "Close tab",
+                                                            modifier = Modifier.size(14.dp)
+                                                        )
+                                                    }
+                                                }
+                                            } else {
+                                                Checkbox(
+                                                    checked = isSelected,
+                                                    onCheckedChange = { checked ->
+                                                        if (checked == true) selectedTabIds.add(tab.id) else selectedTabIds.remove(tab.id)
+                                                    },
+                                                    modifier = Modifier.size(24.dp)
                                                 )
                                             }
-                                            Text(
-                                                text = tab.title,
-                                                fontSize = 11.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = MaterialTheme.colorScheme.onSurface,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
                                         }
-                                    }
 
-                                    if (!isSelectionMode) {
-                                        IconButton(
-                                            onClick = { onTabClose(tab.id) },
-                                            modifier = Modifier.size(24.dp).testTag("close_tab_btn_${tab.id}")
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Default.Close,
-                                                contentDescription = "Close tab",
-                                                modifier = Modifier.size(14.dp)
-                                            )
-                                        }
-                                    } else {
-                                        Checkbox(
-                                            checked = isSelected,
-                                            onCheckedChange = { checked ->
-                                                if (checked == true) selectedTabIds.add(tab.id) else selectedTabIds.remove(tab.id)
-                                            },
-                                            modifier = Modifier.size(24.dp)
-                                        )
-                                    }
-                                }
+                                        Divider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.1f))
 
-                                Divider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.1f))
-
-                                // Screenshot/Preview box below header
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .fillMaxWidth()
-                                        .background(MaterialTheme.colorScheme.surfaceVariant),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    if (tab.url == "orion://newtab" || tab.url == "orion://newtab-incognito") {
+                                        // Screenshot/Preview box below header
                                         Box(
                                             modifier = Modifier
-                                                .fillMaxSize()
-                                                .frostedGlassBackground(state.newTabWallpaper),
+                                                .weight(1f)
+                                                .fillMaxWidth()
+                                                .background(MaterialTheme.colorScheme.surfaceVariant),
                                             contentAlignment = Alignment.Center
                                         ) {
-                                            Text(
-                                                text = if (tab.isIncognito) "Private Tab" else "New Tab",
-                                                color = Color.White.copy(alpha = 0.6f),
-                                                fontSize = 12.sp,
-                                                fontWeight = FontWeight.Medium
-                                            )
-                                        }
-                                    } else if (tab.screenshot != null) {
-                                        Image(
-                                            bitmap = tab.screenshot.asImageBitmap(),
-                                            contentDescription = tab.title,
-                                            modifier = Modifier.fillMaxSize(),
-                                            contentScale = ContentScale.Crop
-                                        )
-                                    } else {
-                                        Column(
-                                            horizontalAlignment = Alignment.CenterHorizontally,
-                                            verticalArrangement = Arrangement.Center
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Default.Web,
-                                                contentDescription = null,
-                                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                                                modifier = Modifier.size(28.dp)
-                                            )
-                                            Spacer(modifier = Modifier.height(4.dp))
-                                            val domainStr = try {
-                                                android.net.Uri.parse(tab.url).host ?: ""
-                                            } catch (e: Exception) {
-                                                ""
+                                            if (tab.url == "orion://newtab" || tab.url == "orion://newtab-incognito") {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .fillMaxSize()
+                                                        .frostedGlassBackground(state.newTabWallpaper),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    Text(
+                                                        text = if (tab.isIncognito) "Private Tab" else "New Tab",
+                                                        color = Color.White.copy(alpha = 0.6f),
+                                                        fontSize = 12.sp,
+                                                        fontWeight = FontWeight.Medium
+                                                    )
+                                                }
+                                            } else if (tab.screenshot != null) {
+                                                Image(
+                                                    bitmap = tab.screenshot.asImageBitmap(),
+                                                    contentDescription = tab.title,
+                                                    modifier = Modifier.fillMaxSize(),
+                                                    contentScale = ContentScale.Crop
+                                                )
+                                            } else {
+                                                Column(
+                                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                                    verticalArrangement = Arrangement.Center
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Web,
+                                                        contentDescription = null,
+                                                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                                                        modifier = Modifier.size(28.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.height(4.dp))
+                                                    val domainStr = try {
+                                                        android.net.Uri.parse(tab.url).host ?: ""
+                                                    } catch (e: Exception) {
+                                                        ""
+                                                    }
+                                                    Text(
+                                                        text = domainStr.ifEmpty { "No Preview" },
+                                                        fontSize = 9.sp,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                }
                                             }
-                                            Text(
-                                                text = domainStr.ifEmpty { "No Preview" },
-                                                fontSize = 9.sp,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        is TabGridItem.TabGroup -> {
+                            val group = gridItem
+                            val hasActiveMember = group.tabs.any { it.id == state.activeTabId }
+                            
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .aspectRatio(0.75f)
+                                    .clickable {
+                                        if (!isSelectionMode) {
+                                            activeGroupToDetail = group
+                                        }
+                                    },
+                                colors = CardDefaults.cardColors(
+                                    containerColor = if (hasActiveMember) {
+                                        MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f)
+                                    } else {
+                                        MaterialTheme.colorScheme.surface
+                                    }
+                                ),
+                                border = BorderStroke(
+                                    width = if (hasActiveMember) 2.dp else 1.5.dp,
+                                    color = Color(group.groupColor)
+                                )
+                            ) {
+                                Box(modifier = Modifier.fillMaxSize()) {
+                                    Column(modifier = Modifier.fillMaxSize()) {
+                                        // Tab Group Header Page Card
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(6.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.weight(1f),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(10.dp)
+                                                        .background(Color(group.groupColor), CircleShape)
+                                                )
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text(
+                                                    text = group.groupName,
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = Color(group.groupColor),
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                                Spacer(modifier = Modifier.width(4.dp))
+                                                Text(
+                                                    text = "(${group.tabs.size} tabs)",
+                                                    fontSize = 9.sp,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+
+                                            if (!isSelectionMode) {
+                                                IconButton(
+                                                    onClick = {
+                                                        // Close group (close all child tabs)
+                                                        group.tabs.forEach { onTabClose(it.id) }
+                                                    },
+                                                    modifier = Modifier.size(20.dp)
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Close,
+                                                        contentDescription = "Close Group",
+                                                        modifier = Modifier.size(12.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+
+                                        Divider(color = Color(group.groupColor).copy(alpha = 0.2f))
+
+                                        // Collage representing tabs in group
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .fillMaxWidth()
+                                                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+                                                .padding(6.dp)
+                                        ) {
+                                            val displayTabs = group.tabs.take(4)
+                                            when (displayTabs.size) {
+                                                1 -> {
+                                                    val t = displayTabs[0]
+                                                    if (t.screenshot != null) {
+                                                        Image(bitmap = t.screenshot.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                                    } else {
+                                                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                                            Icon(Icons.Default.Web, null, modifier = Modifier.size(24.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                                                        }
+                                                    }
+                                                }
+                                                2 -> {
+                                                    Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                        displayTabs.forEach { t ->
+                                                            Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                                                                if (t.screenshot != null) {
+                                                                    Image(bitmap = t.screenshot.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                                                } else {
+                                                                    Icon(Icons.Default.Language, null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                3 -> {
+                                                    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                        Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                            listOf(displayTabs[0], displayTabs[1]).forEach { t ->
+                                                                Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                                                                    if (t.screenshot != null) {
+                                                                        Image(bitmap = t.screenshot.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                                                    } else {
+                                                                        Icon(Icons.Default.Language, null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                                                            val t = displayTabs[2]
+                                                            if (t.screenshot != null) {
+                                                                Image(bitmap = t.screenshot.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                                            } else {
+                                                                Icon(Icons.Default.Language, null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                else -> { // 4 or more
+                                                    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                        Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                            listOf(displayTabs[0], displayTabs[1]).forEach { t ->
+                                                                Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                                                                    if (t.screenshot != null) {
+                                                                        Image(bitmap = t.screenshot.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                                                    } else {
+                                                                        Icon(Icons.Default.Language, null, modifier = Modifier.size(12.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                            listOf(displayTabs[2], displayTabs[3]).forEach { t ->
+                                                                Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                                                                    if (t.screenshot != null) {
+                                                                        Image(bitmap = t.screenshot.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                                                    } else {
+                                                                        Icon(Icons.Default.Language, null, modifier = Modifier.size(12.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -2497,6 +3464,363 @@ fun TabSwitcherLayout(
             }
         }
     }
+
+    // Tab Group nested details popup overlay dialog (Chrome-like experience!)
+    if (activeGroupToDetail != null) {
+        val group = activeGroupToDetail!!
+        var localGroupName by remember(group.groupId) { mutableStateOf(group.groupName) }
+        var showColorPicker by remember { mutableStateOf(false) }
+        
+        Dialog(
+            onDismissRequest = { activeGroupToDetail = null }
+        ) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fillMaxHeight(0.8f),
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 8.dp
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(16.dp)
+                ) {
+                    // Header of Group sheet dialog
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            // Colored circle indicator picker toggler
+                            Box(
+                                modifier = Modifier
+                                    .size(20.dp)
+                                    .background(Color(group.groupColor), CircleShape)
+                                    .clickable { showColorPicker = !showColorPicker }
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            
+                            OutlinedTextField(
+                                value = localGroupName,
+                                onValueChange = {
+                                    localGroupName = it
+                                    onRenameGroup(group.groupId, it)
+                                },
+                                textStyle = MaterialTheme.typography.titleMedium.copy(
+                                    fontWeight = FontWeight.Bold
+                                ),
+                                singleLine = true,
+                                modifier = Modifier.weight(1f),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = Color(group.groupColor),
+                                    unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+                                )
+                            )
+                        }
+                        
+                        IconButton(onClick = { activeGroupToDetail = null }) {
+                            Icon(Icons.Default.Close, contentDescription = "Close details")
+                        }
+                    }
+                    
+                    // Group Color Selection Row
+                    if (showColorPicker) {
+                        val colorsGroup = listOf(0xFFF87171, 0xFF60A5FA, 0xFF34D399, 0xFFFBBF24, 0xFFA78BFA, 0xFFF472B6, 0xFF2DD4BF, 0xFFFB7185)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 10.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            colorsGroup.forEach { col ->
+                                Box(
+                                    modifier = Modifier
+                                        .size(28.dp)
+                                        .background(Color(col), CircleShape)
+                                        .border(
+                                            width = if (group.groupColor == col) 2.5.dp else 0.dp,
+                                            color = if (group.groupColor == col) MaterialTheme.colorScheme.onSurface else Color.Transparent,
+                                            shape = CircleShape
+                                        )
+                                        .clickable {
+                                            onChangeGroupColor(group.groupId, col)
+                                        }
+                                )
+                            }
+                        }
+                    }
+                    
+                    Divider(
+                        color = MaterialTheme.colorScheme.outlineVariant,
+                        modifier = Modifier.padding(vertical = 12.dp)
+                    )
+                    
+                    // Group Management Toolbar
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "${group.tabs.size} items",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            // Add Tab inside Group Button
+                            TextButton(
+                                onClick = {
+                                    onNewTabInGroup(group.groupId, isShowingIncognitoFilter)
+                                    activeGroupToDetail = null
+                                }
+                            ) {
+                                Icon(Icons.Default.Add, contentDescription = "Add inline", modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Add tab")
+                            }
+                            
+                            // Ungroup group button
+                            TextButton(
+                                onClick = {
+                                    group.tabs.forEach { onUngroupTab(it.id) }
+                                    activeGroupToDetail = null
+                                }
+                            ) {
+                                Text("Ungroup All")
+                            }
+                        }
+                    }
+                    
+                    Spacer(modifier = Modifier.height(10.dp))
+                    
+                    // Inner group grid of tabs
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(2),
+                        modifier = Modifier.weight(1f),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        items(group.tabs) { tab ->
+                            val isActive = tab.id == state.activeTabId
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .aspectRatio(0.85f)
+                                    .clickable {
+                                        onTabSelect(tab.id)
+                                        activeGroupToDetail = null
+                                    },
+                                colors = CardDefaults.cardColors(
+                                    containerColor = if (isActive) {
+                                        MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)
+                                    } else {
+                                        MaterialTheme.colorScheme.surface
+                                    }
+                                ),
+                                border = BorderStroke(
+                                    width = if (isActive) 2.dp else 0.5.dp,
+                                    color = if (isActive) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
+                                )
+                            ) {
+                                Box(modifier = Modifier.fillMaxSize()) {
+                                    Column(modifier = Modifier.fillMaxSize()) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(6.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.weight(1f),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                if (tab.favicon != null) {
+                                                    Image(
+                                                        bitmap = tab.favicon.asImageBitmap(),
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(14.dp)
+                                                    )
+                                                } else {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Language,
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(14.dp),
+                                                        tint = MaterialTheme.colorScheme.primary
+                                                    )
+                                                }
+                                                Spacer(modifier = Modifier.width(4.dp))
+                                                Text(
+                                                    text = tab.title,
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+                                            
+                                            IconButton(
+                                                onClick = {
+                                                    onTabClose(tab.id)
+                                                    val nextTabs = group.tabs.filter { it.id != tab.id }
+                                                    if (nextTabs.isEmpty()) {
+                                                        activeGroupToDetail = null
+                                                    } else {
+                                                        activeGroupToDetail = group.copy(tabs = nextTabs)
+                                                    }
+                                                },
+                                                modifier = Modifier.size(18.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Close,
+                                                    contentDescription = "Close tab inline",
+                                                    modifier = Modifier.size(11.dp)
+                                                )
+                                            }
+                                        }
+                                        
+                                        Divider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.1f))
+                                        
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .fillMaxWidth()
+                                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                        ) {
+                                            if (tab.screenshot != null) {
+                                                Image(
+                                                    bitmap = tab.screenshot.asImageBitmap(),
+                                                    contentDescription = tab.title,
+                                                    modifier = Modifier.fillMaxSize(),
+                                                    contentScale = ContentScale.Crop
+                                                )
+                                            } else {
+                                                Box(
+                                                    modifier = Modifier.fillMaxSize(),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Web,
+                                                        contentDescription = null,
+                                                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
+                                                        modifier = Modifier.size(22.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (showNewGroupDialog) {
+        CreateGroupDialog(
+            initialGroupName = "My Group",
+            onDismiss = { showNewGroupDialog = false },
+            onConfirm = { name, color ->
+                showNewGroupDialog = false
+                onCreateNewGroup(name, color, isShowingIncognitoFilter)
+            }
+        )
+    }
+
+    if (showMoveNewGroupDialog && selectedTabForMoveGroup != null) {
+        CreateGroupDialog(
+            initialGroupName = "New Group",
+            onDismiss = {
+                showMoveNewGroupDialog = false
+                selectedTabForMoveGroup = null
+            },
+            onConfirm = { name, color ->
+                showMoveNewGroupDialog = false
+                if (selectedTabForMoveGroup != null) {
+                    onMergeTabs(listOf(selectedTabForMoveGroup!!.id), name, color)
+                    selectedTabForMoveGroup = null
+                }
+            }
+        )
+    }
+}
+
+@Composable
+fun CreateGroupDialog(
+    initialGroupName: String = "My Group",
+    initialColor: Long = 0xFF60A5FA,
+    onDismiss: () -> Unit,
+    onConfirm: (String, Long) -> Unit
+) {
+    var groupName by remember { mutableStateOf(initialGroupName) }
+    var selectedColor by remember { mutableStateOf(initialColor) }
+    val colorsGroup = listOf(0xFFF87171, 0xFF60A5FA, 0xFF34D399, 0xFFFBBF24, 0xFFA78BFA, 0xFFF472B6, 0xFF2DD4BF, 0xFFFB7185)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Create Tab Group", fontWeight = FontWeight.Bold, fontSize = 18.sp) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                OutlinedTextField(
+                    value = groupName,
+                    onValueChange = { groupName = it },
+                    label = { Text("Group Name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                
+                Column {
+                    Text("Select Group Color:", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        colorsGroup.forEach { col ->
+                            Box(
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .background(Color(col), CircleShape)
+                                    .border(
+                                        width = if (selectedColor == col) 3.dp else 0.dp,
+                                        color = if (selectedColor == col) MaterialTheme.colorScheme.onSurface else Color.Transparent,
+                                        shape = CircleShape
+                                    )
+                                    .clickable { selectedColor = col }
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (groupName.isNotBlank()) {
+                        onConfirm(groupName, selectedColor)
+                    }
+                }
+            ) {
+                Text("Create")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
 }
 
 @Composable
@@ -5738,6 +7062,63 @@ fun TranslationProgressSection(
                     Text("Retry", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 }
             }
+        }
+    }
+}
+
+@Composable
+fun YtStreamItemRow(
+    stream: ResolvedMediaStream,
+    onSelect: (ResolvedMediaStream) -> Unit
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF16161F)),
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, Color(0xFF23232E)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onSelect(stream) }
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
+                val icon = if (stream.isAudio) Icons.Default.MusicNote else Icons.Default.PlayArrow
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = if (stream.isAudio) Color(0xFF38BDF8) else Color(0xFFFF2E2E),
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Column {
+                    Text(
+                        text = stream.label,
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "Format: ${stream.ext.uppercase()} | Mime: ${stream.mimeType}",
+                        color = Color.Gray,
+                        fontSize = 9.sp
+                    )
+                }
+            }
+            Text(
+                text = stream.size,
+                color = Color(0xFF25D366),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(start = 8.dp)
+            )
         }
     }
 }

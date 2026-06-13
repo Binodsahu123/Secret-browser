@@ -10,11 +10,12 @@ object AIProviderRouter {
     private val fallbackChain = listOf(
         "ChatGPT",
         "Gemini",
+        "Claude",
         "DeepSeek",
         "Qwen",
         "Mistral",
-        "Llama",
-        "OpenRouter"
+        "Grok",
+        "Custom Provider"
     )
 
     /**

@@ -231,12 +231,80 @@ fun WebContextMenuBottomSheet(
                                 }
                             )
                         } else {
-                            // Standalone Image Actions
+                            // Unified Contextual Image Actions
+                            
+                            // 1. If image is nested inside an anchor link, display its linked options
+                            if (state.isImageLink) {
+                                Text(
+                                    text = "Link Actions (Anchor)",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
+                                )
+                                ContextMenuItem(
+                                    icon = Icons.Default.OpenInNew,
+                                    text = "Open Link",
+                                    onClick = {
+                                        onOpenInNewTab(state.url)
+                                        onDismiss()
+                                    }
+                                )
+                                ContextMenuItem(
+                                    icon = Icons.Default.GroupWork,
+                                    text = "Open in new tab group",
+                                    onClick = {
+                                        onOpenInNewTabGroup(state.url)
+                                        onDismiss()
+                                    }
+                                )
+                                ContextMenuItem(
+                                    icon = Icons.Default.ContentCopy,
+                                    text = "Copy Link",
+                                    onClick = {
+                                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                        clipboard.setPrimaryClip(ClipData.newPlainText("Copied Link", state.url))
+                                        Toast.makeText(context, "Link copied!", Toast.LENGTH_SHORT).show()
+                                        onDismiss()
+                                    }
+                                )
+                                ContextMenuItem(
+                                    icon = Icons.Default.Download,
+                                    text = "Download Link",
+                                    onClick = {
+                                        onDownloadLink(state.url)
+                                        onDismiss()
+                                    }
+                                )
+                                HorizontalDivider(
+                                    modifier = Modifier.padding(vertical = 8.dp),
+                                    color = MaterialTheme.colorScheme.outlineVariant
+                                )
+                            }
+
+                            // 2. Continuous Image-Specific Operations
+                            val targetImageUrl = state.imageUrl.ifBlank { state.url }
+                            
+                            Text(
+                                text = "Image Actions",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(bottom = 6.dp)
+                            )
                             ContextMenuItem(
-                                icon = Icons.Default.OpenInNew,
+                                icon = Icons.Default.Image,
+                                text = "Open Image",
+                                onClick = {
+                                    onOpenInNewTab(targetImageUrl)
+                                    onDismiss()
+                                }
+                            )
+                            ContextMenuItem(
+                                icon = Icons.Default.OpenInBrowser,
                                 text = "Open image in new tab",
                                 onClick = {
-                                    onOpenInNewTab(state.url)
+                                    onOpenInNewTab(targetImageUrl)
                                     onDismiss()
                                 }
                             )
@@ -244,17 +312,7 @@ fun WebContextMenuBottomSheet(
                                 icon = Icons.Default.Download,
                                 text = "Download image",
                                 onClick = {
-                                    onDownloadLink(state.url)
-                                    onDismiss()
-                                }
-                            )
-                            ContextMenuItem(
-                                icon = Icons.Default.ContentCopy,
-                                text = "Copy image link",
-                                onClick = {
-                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                    clipboard.setPrimaryClip(ClipData.newPlainText("Image Link", state.url))
-                                    Toast.makeText(context, "Image url copied!", Toast.LENGTH_SHORT).show()
+                                    onDownloadLink(targetImageUrl)
                                     onDismiss()
                                 }
                             )
@@ -264,12 +322,61 @@ fun WebContextMenuBottomSheet(
                                 onClick = {
                                     val shareIntent = Intent(Intent.ACTION_SEND).apply {
                                         type = "text/plain"
-                                        putExtra(Intent.EXTRA_TEXT, state.url)
+                                        putExtra(Intent.EXTRA_TEXT, targetImageUrl)
                                     }
-                                    context.startActivity(Intent.createChooser(shareIntent, "Share Image Link"))
+                                    context.startActivity(Intent.createChooser(shareIntent, "Share Image link"))
                                     onDismiss()
                                 }
                             )
+                            ContextMenuItem(
+                                icon = Icons.Default.ContentCopy,
+                                text = "Copy image URL",
+                                onClick = {
+                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    clipboard.setPrimaryClip(ClipData.newPlainText("Image URL", targetImageUrl))
+                                    Toast.makeText(context, "Image URL copied!", Toast.LENGTH_SHORT).show()
+                                    onDismiss()
+                                }
+                            )
+                            ContextMenuItem(
+                                icon = Icons.Default.Search,
+                                text = "Search Google for image",
+                                onClick = {
+                                    val searchUrl = "https://images.google.com/searchbyimage?image_url=${android.net.Uri.encode(targetImageUrl)}"
+                                    onOpenInNewTab(searchUrl)
+                                    onDismiss()
+                                }
+                            )
+                            
+                            var showImageInfoDialog by remember { mutableStateOf(false) }
+                            ContextMenuItem(
+                                icon = Icons.Default.Info,
+                                text = "Image Information",
+                                onClick = {
+                                    showImageInfoDialog = true
+                                }
+                            )
+
+                            if (showImageInfoDialog) {
+                                val fileName = targetImageUrl.substringAfterLast("/", "image.jpg").substringBefore("?")
+                                val extType = fileName.substringAfterLast(".", "jpg").uppercase()
+                                AlertDialog(
+                                    onDismissRequest = { showImageInfoDialog = false },
+                                    confirmButton = {
+                                        TextButton(onClick = { showImageInfoDialog = false; onDismiss() }) {
+                                            Text("Close")
+                                        }
+                                    },
+                                    title = { Text("Image Information") },
+                                    text = {
+                                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            Text("Name: $fileName", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                            Text("Format Type: $extType", fontSize = 12.sp)
+                                            Text("Resource Address: $targetImageUrl", fontSize = 11.sp, color = Color.Gray, maxLines = 6)
+                                        }
+                                    }
+                                )
+                            }
                         }
                     }
                 }

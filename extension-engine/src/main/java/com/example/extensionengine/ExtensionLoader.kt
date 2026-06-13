@@ -354,26 +354,28 @@ class ExtensionLoader(
         }
 
         // Step 7: Verify files exist (Write extracted files to filesystem & scan)
-        val keys = extractedFiles.keys.toList()
         var commonPrefix = ""
-        if (keys.isNotEmpty()) {
-            val firstPath = keys.first()
-            val firstSlash = firstPath.indexOf('/')
-            if (firstSlash != -1) {
-                val candidatePrefix = firstPath.substring(0, firstSlash + 1)
-                val allShare = keys.all { it.startsWith(candidatePrefix) }
-                if (allShare) {
-                    commonPrefix = candidatePrefix
-                }
+        val manifestKey = extractedFiles.keys.firstOrNull { key ->
+            val cleanKey = key.replace("\\", "/")
+            !cleanKey.contains("__MACOSX") && cleanKey.substringAfterLast("/").equals("manifest.json", ignoreCase = true)
+        }
+        if (manifestKey != null) {
+            val cleanManifestKey = manifestKey.replace("\\", "/")
+            if (cleanManifestKey.contains("/")) {
+                commonPrefix = cleanManifestKey.substringBeforeLast("/") + "/"
             }
         }
 
         try {
             extractedFiles.forEach { (relativePath, data) ->
-                val cleanPath = if (commonPrefix.isNotEmpty() && relativePath.startsWith(commonPrefix)) {
-                    relativePath.substring(commonPrefix.length)
+                val cleanRelativePath = relativePath.replace("\\", "/")
+                if (cleanRelativePath.contains("__MACOSX")) {
+                    return@forEach // skip OS metadata
+                }
+                val cleanPath = if (commonPrefix.isNotEmpty() && cleanRelativePath.startsWith(commonPrefix)) {
+                    cleanRelativePath.substring(commonPrefix.length)
                 } else {
-                    relativePath
+                    cleanRelativePath
                 }
                 if (cleanPath.isNotEmpty()) {
                     val destFile = File(extensionDir, cleanPath)

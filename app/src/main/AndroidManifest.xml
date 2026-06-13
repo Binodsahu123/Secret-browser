@@ -26,6 +26,9 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
 
     <application
         android:name=".BrowserApplication"
@@ -69,11 +72,35 @@
                 <data android:mimeType="text/html" />
             </intent-filter>
 
+            <!-- File viewer filters for Code/Text files (Java, Kotlin, Web, etc.) -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="file" />
+                <data android:scheme="content" />
+                <data android:mimeType="text/*" />
+                <data android:mimeType="application/json" />
+                <data android:mimeType="application/javascript" />
+                <data android:mimeType="application/xml" />
+                <data android:mimeType="application/x-javascript" />
+            </intent-filter>
+
             <!-- Shared URLs and shared content (e.g., YouTube share links) -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="text/plain" />
+            </intent-filter>
+
+            <!-- Shared file handlers (e.g., PDF, Video, Audio, Images) -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/pdf" />
+                <data android:mimeType="video/*" />
+                <data android:mimeType="audio/*" />
+                <data android:mimeType="image/*" />
             </intent-filter>
         </activity>
 
@@ -86,6 +113,27 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths"/>
         </provider>
+
+        <receiver android:name="com.example.notificationengine.NotificationReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
+
+        <receiver android:name="com.example.medianotificationengine.MediaNotificationReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="ACTION_PLAY_PAUSE" />
+                <action android:name="ACTION_NEXT" />
+                <action android:name="ACTION_PREVIOUS" />
+                <action android:name="ACTION_CLOSE" />
+            </intent-filter>
+        </receiver>
+
+        <service
+            android:name="com.example.browser.BackgroundPlaybackService"
+            android:foregroundServiceType="mediaPlayback"
+            android:exported="false" />
     </application>
 
 </manifest>

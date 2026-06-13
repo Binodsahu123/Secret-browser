@@ -1,12 +1,6 @@
 pluginManagement {
   repositories {
-    google {
-      content {
-        includeGroupByRegex("com\\.android.*")
-        includeGroupByRegex("com\\.google.*")
-        includeGroupByRegex("androidx.*")
-      }
-    }
+    google()
     mavenCentral()
     gradlePluginPortal()
   }
@@ -47,3 +41,11 @@ include(":database-core")
 include(":network-core")
 include(":analytics-core")
 include(":ui-core")
+include(":image-engine")
+include(":video-engine")
+include(":audio-engine")
+include(":developer-tools-engine")
+include(":media-notification-engine")
+include(":media-detector-engine")
+include(":download-ui-engine")
+include(":download-notification-engine")

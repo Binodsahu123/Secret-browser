@@ -17,20 +17,8 @@ object DomExtractionEngine {
                     var temp = el;
                     while (temp && temp !== document.body) {
                         var s = window.getComputedStyle(temp);
-                        if (s.display === 'none' || s.visibility === 'hidden') {
-                            var cls = temp.className;
-                            if (typeof cls === 'string') {
-                                cls = cls.toLowerCase();
-                                if (isDesktopMode) {
-                                    if (cls.indexOf('mobile') >= 0 || cls.indexOf('hidden-lg') >= 0 || cls.indexOf('hidden-xl') >= 0 || cls.indexOf('visible-xs') >= 0 || cls.indexOf('visible-sm') >= 0) {
-                                        return false;
-                                    }
-                                } else {
-                                    if (cls.indexOf('desktop') >= 0 || cls.indexOf('hidden-xs') >= 0 || cls.indexOf('hidden-sm') >= 0 || cls.indexOf('visible-lg') >= 0 || cls.indexOf('visible-xl') >= 0) {
-                                        return false;
-                                    }
-                                }
-                            }
+                        if (s && (s.display === 'none' || s.visibility === 'hidden')) {
+                            return false;
                         }
                         temp = temp.parentElement;
                     }

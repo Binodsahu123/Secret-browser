@@ -35,14 +35,24 @@ data class ParsedExtension(
 class ManifestParser {
 
     fun parse(manifestJsonStr: String): ParsedExtension {
-        val root = JSONObject(manifestJsonStr)
+        val root = try {
+            JSONObject(manifestJsonStr)
+        } catch (e: Exception) {
+            ExtensionDebuggerEngine.instance.logError(
+                "unknown",
+                "CRX Package",
+                DebugErrorType.MANIFEST,
+                "Fatal manifest parse error: ${e.message}"
+            )
+            throw e
+        }
         val name = root.optString("name", "Unnamed Extension")
         val version = root.optString("version", "1.0")
         val description = root.optString("description", "")
         val manifestVersion = root.optInt("manifest_version", 2)
 
         // Predictable hashing based on name to generate fixed extension IDs
-        val id = generateExtensionId(name)
+        val id = NativeExtensionEngine.generateExtensionId(name)
 
         // Parse permissions
         val permissions = mutableListOf<String>()
@@ -145,17 +155,5 @@ class ManifestParser {
             optionsPage = optionsPage,
             manifestJson = manifestJsonStr
         )
-    }
-
-    private fun generateExtensionId(name: String): String {
-        val bytes = MessageDigest.getInstance("SHA-256").digest(name.toByteArray())
-        val codeAlphabet = "abcdefghijklmnopqrstuvwxyz"
-        val builder = StringBuilder()
-        // Take 32 characters in abc-p range like original chrome extensions format
-        for (i in 0 until 32) {
-            val index = (bytes[i % bytes.size].toInt() and 0xFF) % 26
-            builder.append(codeAlphabet[index])
-        }
-        return builder.toString()
     }
 }

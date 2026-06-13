@@ -124,4 +124,41 @@ dependencies {
   implementation(project(":permission-engine"))
   implementation(project(":adblock-engine"))
   implementation(project(":translate-engine"))
+  implementation(project(":notification-engine"))
+  implementation(project(":image-engine"))
+  implementation(project(":video-engine"))
+  implementation(project(":audio-engine"))
+  implementation(project(":developer-tools-engine"))
+  implementation(project(":media-notification-engine"))
+  implementation(project(":download-engine"))
+  implementation(project(":media-detector-engine"))
+  implementation(project(":download-ui-engine"))
+  implementation(project(":download-notification-engine"))
 }
+
+tasks.register("copyApkToOutputs") {
+    val targetRootDir = rootDir
+    val targetBuildDir = layout.buildDirectory.get().asFile
+    
+    doLast {
+        val apkFile = File(targetBuildDir, "outputs/apk/debug/app-debug.apk")
+        if (apkFile.exists()) {
+            val visibleDir = File(targetRootDir, "build-outputs")
+            val hiddenDir = File(targetRootDir, ".build-outputs")
+            
+            visibleDir.mkdirs()
+            hiddenDir.mkdirs()
+            
+            apkFile.copyTo(File(visibleDir, "app-debug.apk"), overwrite = true)
+            apkFile.copyTo(File(hiddenDir, "app-debug.apk"), overwrite = true)
+            logger.lifecycle("APK copied to visible 'build-outputs' and hidden '.build-outputs' directories.")
+        } else {
+            logger.lifecycle("APK file not found at: ${apkFile.absolutePath}")
+        }
+    }
+}
+
+tasks.matching { it.name == "assembleDebug" }.configureEach {
+    finalizedBy("copyApkToOutputs")
+}
+
