@@ -91,6 +91,9 @@ fun BrowserScreen(
     val pendingPermissionRequest by viewModel.pendingPermissionRequest.collectAsState()
     val pendingGeolocationPrompt by viewModel.pendingGeolocationPrompt.collectAsState()
 
+    val detectedVideo by viewModel.youtubeDetectionEngine.detectedVideo.collectAsState()
+    var showYouTubeDownloadBottomSheet by remember { mutableStateOf(false) }
+
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
     val keyboardController = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
@@ -100,9 +103,7 @@ fun BrowserScreen(
     var browserResolvedStreams by remember { mutableStateOf<List<ResolvedMediaStream>>(emptyList()) }
     var showBrowserResolutionSelector by remember { mutableStateOf(false) }
 
-    var showYouTubeExtensionPanel by remember { mutableStateOf(false) }
-    var isYtResolving by remember { mutableStateOf(false) }
-    var ytResolvedStreams by remember { mutableStateOf<List<ResolvedMediaStream>>(emptyList()) }
+
 
     var showDelayedNotificationDialog by remember { mutableStateOf(false) }
 
@@ -728,7 +729,7 @@ fun BrowserScreen(
                             )
 
                             // List enabled extensions
-                            getFullExtensionsList(viewModel).forEach { ext ->
+                            for (ext in getFullExtensionsList(viewModel)) {
                                 val isInstalled = isExtensionInstalled(viewModel, ext.id)
                                 val isEnabled = viewModel.isExtensionEnabled(ext.id)
                                 if (isInstalled && isEnabled) {
@@ -967,109 +968,7 @@ fun BrowserScreen(
                                 modifier = Modifier.fillMaxSize().testTag("webview")
                             )
 
-                            // YouTube Detection & Download Overlay
-                            val youtubeVideoInfo by viewModel.youtubeDetectionEngine.detectedVideo.collectAsState()
-                            
-                            if (youtubeVideoInfo != null) {
-                                var showYtDownloadSheet by remember { mutableStateOf(false) }
-                                
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .align(Alignment.TopCenter)
-                                        .padding(top = 16.dp, start = 16.dp, end = 16.dp)
-                                        .testTag("youtube_top_overlay")
-                                ) {
-                                    Card(
-                                        colors = CardDefaults.cardColors(
-                                            containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(8.dp).copy(alpha = 0.95f)
-                                        ),
-                                        shape = RoundedCornerShape(20.dp),
-                                        elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
-                                        modifier = Modifier.fillMaxWidth().widthIn(max = 500.dp).align(Alignment.Center)
-                                    ) {
-                                        Row(
-                                            modifier = Modifier.padding(12.dp).fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Row(
-                                                modifier = Modifier.weight(1f),
-                                                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                Image(
-                                                    painter = coil.compose.rememberAsyncImagePainter(youtubeVideoInfo!!.thumbnail),
-                                                    contentDescription = "Thumbnail",
-                                                    modifier = Modifier
-                                                        .size(50.dp, 35.dp)
-                                                        .clip(RoundedCornerShape(6.dp)),
-                                                    contentScale = ContentScale.Crop
-                                                )
-                                                Column(modifier = Modifier.weight(1f)) {
-                                                    Text(
-                                                        text = youtubeVideoInfo!!.title,
-                                                        fontSize = 13.sp,
-                                                        fontWeight = FontWeight.Bold,
-                                                        maxLines = 1,
-                                                        overflow = TextOverflow.Ellipsis
-                                                    )
-                                                    Text(
-                                                        text = "YouTube Video Detected",
-                                                        fontSize = 11.sp,
-                                                        color = MaterialTheme.colorScheme.primary,
-                                                        fontWeight = FontWeight.SemiBold
-                                                    )
-                                                }
-                                            }
-                                            
-                                            Row(
-                                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                FilledTonalButton(
-                                                    onClick = {
-                                                        showYtDownloadSheet = true
-                                                        viewModel.evaluateJavascriptOnActiveWebview("window.location.hash = '#download';")
-                                                    },
-                                                    shape = RoundedCornerShape(12.dp),
-                                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                                                    colors = ButtonDefaults.filledTonalButtonColors(
-                                                        containerColor = MaterialTheme.colorScheme.primaryContainer,
-                                                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer
-                                                    )
-                                                ) {
-                                                    Icon(imageVector = Icons.Default.Download, contentDescription = "Download", modifier = Modifier.size(16.dp))
-                                                    Spacer(modifier = Modifier.width(4.dp))
-                                                    Text("Download", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                                                }
-                                                
-                                                FilledTonalButton(
-                                                    onClick = { 
-                                                        (context as? Activity)?.let { act ->
-                                                            YouTubePipController.enterPip(act)
-                                                        }
-                                                    },
-                                                    shape = RoundedCornerShape(12.dp),
-                                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                                                ) {
-                                                    Icon(imageVector = Icons.Default.PictureInPicture, contentDescription = "PIP", modifier = Modifier.size(16.dp))
-                                                    Spacer(modifier = Modifier.width(4.dp))
-                                                    Text("PIP", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
 
-                                if (showYtDownloadSheet) {
-                                    YouTubeDownloadBottomSheet(
-                                        videoInfo = youtubeVideoInfo!!,
-                                        onDismiss = { showYtDownloadSheet = false },
-                                        viewModel = viewModel
-                                    )
-                                }
-                            }
 
                             // Instant Premium Loading Skeleton overlay
                             if (activeTab.isLoading || activeTab.url == "about:blank") {
@@ -1609,7 +1508,7 @@ fun BrowserScreen(
                                 )
 
                                 // List enabled extensions
-                                getFullExtensionsList(viewModel).forEach { ext ->
+                                for (ext in getFullExtensionsList(viewModel)) {
                                     val isInstalled = isExtensionInstalled(viewModel, ext.id)
                                     val isEnabled = viewModel.isExtensionEnabled(ext.id)
                                     if (isInstalled && isEnabled) {
@@ -1838,330 +1737,7 @@ fun BrowserScreen(
         val detectedMediaCustomState = viewModel.detectedMediaCustom.value
         val showDialogCustom = viewModel.showDownloadDialogCustom.value
 
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(bottom = 85.dp, end = 20.dp),
-            contentAlignment = Alignment.BottomEnd
-        ) {
-            FloatingDownloadButton(
-                detectedMedia = detectedMediaCustomState,
-                onClick = {
-                    val media = detectedMediaCustomState
-                    if (media != null) {
-                        if (media.quality == "Resolvables") {
-                            isBrowserResolving = true
-                            coroutineScope.launch(Dispatchers.IO) {
-                                try {
-                                    val streams = MediaLinkResolver.resolveMedia(media.url)
-                                    withContext(Dispatchers.Main) {
-                                        browserResolvedStreams = streams
-                                        isBrowserResolving = false
-                                        showBrowserResolutionSelector = true
-                                    }
-                                } catch (e: Exception) {
-                                    withContext(Dispatchers.Main) {
-                                        isBrowserResolving = false
-                                        Toast.makeText(context, "Failed to analyze URL: ${e.message}", Toast.LENGTH_LONG).show()
-                                    }
-                                }
-                            }
-                        } else {
-                            viewModel.showDownloadDialogCustom.value = true
-                        }
-                    }
-                }
-            )
-        }
 
-        val isYouTubePage = remember(activeTab?.url) {
-            val urlStr = activeTab?.url ?: ""
-            urlStr.contains("youtube.com") || urlStr.contains("youtu.be")
-        }
-
-        if (isYouTubePage) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(bottom = 155.dp, end = 20.dp),
-                contentAlignment = Alignment.BottomEnd
-            ) {
-                val infiniteTransition = rememberInfiniteTransition(label = "pulse")
-                val pulseScale by infiniteTransition.animateFloat(
-                    initialValue = 1f,
-                    targetValue = 1.05f,
-                    animationSpec = infiniteRepeatable(
-                        animation = tween(1300, easing = androidx.compose.animation.core.FastOutSlowInEasing),
-                        repeatMode = RepeatMode.Reverse
-                    ),
-                    label = "pulseBtn"
-                )
-
-                Button(
-                    onClick = {
-                        showYouTubeExtensionPanel = true
-                        isYtResolving = true
-                        val targetUrl = activeTab?.url ?: ""
-                        coroutineScope.launch(Dispatchers.IO) {
-                            try {
-                                val streams = MediaLinkResolver.resolveMedia(targetUrl)
-                                withContext(Dispatchers.Main) {
-                                    ytResolvedStreams = streams
-                                    isYtResolving = false
-                                }
-                            } catch (e: Exception) {
-                                withContext(Dispatchers.Main) {
-                                    isYtResolving = false
-                                    Toast.makeText(context, "Error exploring streams: ${e.message}", Toast.LENGTH_SHORT).show()
-                                }
-                            }
-                        }
-                    },
-                    shape = RoundedCornerShape(22.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFFE50914), // Premium YouTube Red
-                        contentColor = Color.White
-                    ),
-                    elevation = ButtonDefaults.buttonElevation(defaultElevation = 12.dp),
-                    modifier = Modifier
-                        .height(44.dp)
-                        .graphicsLayer {
-                            scaleX = pulseScale
-                            scaleY = pulseScale
-                        },
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Extension, // Extension puzzle logo
-                        contentDescription = "YouTube Pro Extension Assistant",
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "YT Pro Extension",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-        }
-
-        if (showYouTubeExtensionPanel) {
-            AlertDialog(
-                onDismissRequest = { showYouTubeExtensionPanel = false },
-                confirmButton = {},
-                dismissButton = {},
-                title = null,
-                text = {
-                    Surface(
-                        shape = RoundedCornerShape(24.dp),
-                        color = Color(0xFF0F0F13), // Pitch dark theme matching YouTube mobile app & modern Dark Mode
-                        border = BorderStroke(1.dp, Color(0xFF2E2E3C)),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 4.dp)
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .padding(20.dp)
-                                .fillMaxWidth(),
-                            verticalArrangement = Arrangement.spacedBy(16.dp)
-                        ) {
-                            // Branded header
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Star,
-                                        contentDescription = null,
-                                        tint = Color(0xFFFFCC00), // Gold Premium Accent
-                                        modifier = Modifier.size(24.dp)
-                                    )
-                                    Column {
-                                        Text(
-                                            text = "YouTube Pro Extension",
-                                            fontWeight = FontWeight.Black,
-                                            fontSize = 15.sp,
-                                            color = Color.White
-                                        )
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                        ) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .size(6.dp)
-                                                    .background(Color(0xFF25D366), CircleShape) // Green Connected dot
-                                            )
-                                            Text(
-                                                text = "Observer Active v3.9.8",
-                                                color = Color.Gray,
-                                                fontSize = 10.sp,
-                                                fontWeight = FontWeight.Medium
-                                            )
-                                        }
-                                    }
-                                }
-
-                                IconButton(
-                                    onClick = { showYouTubeExtensionPanel = false },
-                                    modifier = Modifier.size(28.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Close,
-                                        contentDescription = "Close",
-                                        tint = Color.Gray
-                                    )
-                                }
-                            }
-
-                            // Subtitle tip
-                            Text(
-                                text = "Deep link sniffer identified YouTube URL. Choose your preferred video resolution or audio format extraction below:",
-                                color = Color.Gray,
-                                fontSize = 11.sp,
-                                lineHeight = 15.sp
-                            )
-
-                            if (isYtResolving) {
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(vertical = 24.dp),
-                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                                ) {
-                                    CircularProgressIndicator(
-                                        color = Color(0xFFE50914),
-                                        modifier = Modifier.size(36.dp)
-                                    )
-                                    Text(
-                                        text = "Infiltrating media stream channels...",
-                                        color = Color.Gray,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                }
-                            } else {
-                                val videos = remember(ytResolvedStreams) { ytResolvedStreams.filter { !it.isAudio } }
-                                val audios = remember(ytResolvedStreams) { ytResolvedStreams.filter { it.isAudio } }
-
-                                LazyColumn(
-                                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .heightIn(max = 280.dp)
-                                ) {
-                                    // Video Resolutions Label
-                                    item {
-                                        Text(
-                                            text = "🎬 VIDEO RESOLUTIONS (MP4)",
-                                            color = Color(0xFFE50914),
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 11.sp,
-                                            modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
-                                        )
-                                    }
-
-                                    if (videos.isEmpty()) {
-                                        item {
-                                            Text(
-                                                text = "No direct MP4 resolutions identified. Attempting forced direct stream...",
-                                                color = Color.DarkGray,
-                                                fontSize = 10.sp,
-                                                modifier = Modifier.padding(start = 8.dp)
-                                            )
-                                        }
-                                    } else {
-                                        items(videos) { stream ->
-                                            YtStreamItemRow(stream = stream) { selectedStream ->
-                                                showYouTubeExtensionPanel = false
-                                                val safeFileName = "YTPro_Video_" + selectedStream.label.replace(" ", "_").replace("(", "").replace(")", "").replace("-", "") + "_" + System.currentTimeMillis() + "." + selectedStream.ext.lowercase(java.util.Locale.ROOT)
-                                                coroutineScope.launch {
-                                                    try {
-                                                        viewModel.customDownloadEngine.startDownload(selectedStream.url, safeFileName, selectedStream.mimeType, 4)
-                                                        Toast.makeText(context, "Direct media queue initiated!", Toast.LENGTH_SHORT).show()
-                                                    } catch (e: Exception) {
-                                                        Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_LONG).show()
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // Audio Formats Label
-                                    item {
-                                        Text(
-                                            text = "🎵 AUDIO STREAM EXTRACTOR (MP3 / AAC)",
-                                            color = Color(0xFF38BDF8),
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 11.sp,
-                                            modifier = Modifier.padding(top = 10.dp, bottom = 2.dp)
-                                        )
-                                    }
-
-                                    if (audios.isEmpty()) {
-                                        item {
-                                            Text(
-                                                text = "No audio formats registered. Fallback converting MP4 track to MP3.",
-                                                color = Color.DarkGray,
-                                                fontSize = 10.sp,
-                                                modifier = Modifier.padding(start = 8.dp)
-                                            )
-                                        }
-                                    } else {
-                                        items(audios) { stream ->
-                                            YtStreamItemRow(stream = stream) { selectedStream ->
-                                                showYouTubeExtensionPanel = false
-                                                val safeFileName = "YTPro_Audio_" + selectedStream.label.replace(" ", "_").replace("(", "").replace(")", "").replace("-", "") + "_" + System.currentTimeMillis() + "." + selectedStream.ext.lowercase(java.util.Locale.ROOT)
-                                                coroutineScope.launch {
-                                                    try {
-                                                        viewModel.customDownloadEngine.startDownload(selectedStream.url, safeFileName, selectedStream.mimeType, 4)
-                                                        Toast.makeText(context, "Direct audio queue initiated!", Toast.LENGTH_SHORT).show()
-                                                    } catch (e: Exception) {
-                                                        Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_LONG).show()
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Footer Status Info
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(Color(0xFF16161F), RoundedCornerShape(12.dp))
-                                    .padding(12.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Shield,
-                                    contentDescription = null,
-                                    tint = Color(0xFF25D366),
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Text(
-                                    text = "Equipped with automated Ad Skipper & deep Web-SABR request bypass filters.",
-                                    color = Color.Gray,
-                                    fontSize = 10.sp,
-                                    lineHeight = 14.sp,
-                                    modifier = Modifier.weight(1f)
-                                )
-                            }
-                        }
-                    }
-                }
-            )
-        }
 
         if (isBrowserResolving) {
             AlertDialog(
@@ -4665,13 +4241,13 @@ fun HistoryOverlay(
     history: List<HistoryItem>,
     onDismiss: () -> Unit,
     onNavigate: (String) -> Unit,
-    onDelete: (Int) -> Unit,
+    onDelete: (Long) -> Unit,
     onClearAll: () -> Unit,
     onClearBrowsingData: (Boolean, Boolean, Boolean, Int) -> Unit,
     isGlass: Boolean = false
 ) {
     var searchQuery by remember { mutableStateOf("") }
-    val selectedIds = remember { mutableStateListOf<Int>() }
+    val selectedIds = remember { mutableStateListOf<Long>() }
     var showLocalClearDataDialog by remember { mutableStateOf(false) }
 
     val filteredHistory = remember(history, searchQuery) {

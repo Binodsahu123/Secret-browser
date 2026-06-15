@@ -395,29 +395,14 @@ class BrowserViewModel(
             e.printStackTrace()
         }
 
-        // Sync settings from PreferenceManager
-        viewModelScope.launch {
-            combine(
-                prefs.isJavaScriptEnabled,
-                prefs.isHardwareAccelerationEnabled,
-                prefs.newTabWallpaper,
-                prefs.readerFontSize
-            ) { js, hw, bg, size ->
-                _uiState.update {
-                    it.copy(
-                        isJavaScriptEnabled = js,
-                        isHardwareAccelerationEnabled = hw,
-                        newTabWallpaper = bg,
-                        readerFontSize = size
-                    )
-                }
-                // Apply update to active WebViews
-                _uiState.value.tabs.forEach { tab ->
-                    webViewMap[tab.id]?.let { webView ->
-                        applyWebViewSettings(webView, js, hw, tab.isDesktopMode)
-                    }
-                }
-            }.collect()
+        // Sync settings from PreferenceManager on startup
+        _uiState.update {
+            it.copy(
+                isJavaScriptEnabled = prefs.isJavaScriptEnabled,
+                isHardwareAccelerationEnabled = prefs.isHardwareAccelerationEnabled,
+                newTabWallpaper = prefs.newTabWallpaper,
+                readerFontSize = prefs.readerFontSize
+            )
         }
 
         // Register Media Notification Receiver listener to respond dynamically to system/notification media intents
@@ -1168,6 +1153,28 @@ class BrowserViewModel(
                 ): WebResourceResponse? {
                     return try {
                         val urlStr = request?.url?.toString()
+                        if (urlStr != null && urlStr.contains("youtube.com/ytpro_cdn/")) {
+                            var modifiedUrl = urlStr
+                            if (urlStr.contains("youtube.com/ytpro_cdn/esm")) {
+                                modifiedUrl = urlStr.replace("youtube.com/ytpro_cdn/esm", "esm.sh")
+                            } else if (urlStr.contains("youtube.com/ytpro_cdn/npm")) {
+                                modifiedUrl = urlStr.replace("youtube.com/ytpro_cdn", "cdn.jsdelivr.net")
+                            }
+                            android.util.Log.d("YTProIntercept", "Intercepted YTPro stream CDN URL: $urlStr -> $modifiedUrl")
+                            
+                            val conn = java.net.URL(modifiedUrl).openConnection() as java.net.HttpURLConnection
+                            conn.requestMethod = "GET"
+                            conn.connectTimeout = 10000
+                            conn.readTimeout = 15000
+                            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                            val mimeType = if (urlStr.endsWith(".js") || urlStr.contains(".js") || urlStr.contains("/npm/")) "application/javascript" else "text/html"
+                            return WebResourceResponse(
+                                mimeType,
+                                "UTF-8",
+                                conn.inputStream
+                            )
+                        }
+
                         if (urlStr != null && (urlStr.startsWith("chrome-extension://") || urlStr.startsWith("orion-extension://"))) {
                             val interceptRes = com.example.extensionengine.ExtensionDirectoryResolver.handleExtensionRequest(context, urlStr)
                             if (interceptRes != null) return interceptRes
@@ -1393,18 +1400,6 @@ class BrowserViewModel(
 
                         // Inject Simulated Chrome/User extensions upon page load complete
                         if (view != null && url != null && !url.startsWith("orion://") && url != "about:blank") {
-                            // YouTube Detection observer injection
-                            if (youtubeDetectionEngine.isYouTubeUrl(url)) {
-                                try {
-                                    view.post {
-                                        view.evaluateJavascript(youtubeDetectionEngine.getInjectionJs(), null)
-                                        view.evaluateJavascript(com.example.browser.YTProJS.getScript(getApplication()), null)
-                                    }
-                                } catch (e: Exception) {
-                                    e.printStackTrace()
-                                }
-                            }
-
                             // SwiftBrowser Advanced Professional Media Detection
                             try {
                                 view.post {
@@ -2336,6 +2331,11 @@ class BrowserViewModel(
                 YTProAndroidBridge(context, this, customDownloadEngine),
                 "Android"
             )
+
+            addJavascriptInterface(
+                YouTubeVideoDownloaderBridge(context),
+                "YouTubeVideoDownloader"
+            )
             
             // Register native Web Notification Bridge
             addJavascriptInterface(
@@ -2981,7 +2981,7 @@ class BrowserViewModel(
         }
     }
 
-    fun deleteHistoryItem(id: Int) {
+    fun deleteHistoryItem(id: Long) {
         viewModelScope.launch {
             repository.deleteHistoryItem(id)
         }
@@ -3533,7 +3533,7 @@ class BrowserViewModel(
             results.addAll(matches)
             
             // 2. Call Gemini API to query online CWS recommendations dynamically if API key is present
-            val apiKey = com.example.BuildConfig.GEMINI_API_KEY
+            val apiKey = com.example.browser.BuildConfig.GEMINI_API_KEY
             if (apiKey.isNotBlank() && apiKey != "placeholder_gemini_key") {
                 try {
                     val prompt = """

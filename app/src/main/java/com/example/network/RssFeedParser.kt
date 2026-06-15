@@ -6,7 +6,6 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.xmlpull.v1.XmlPullParser
 import java.io.StringReader
-import java.security.MessageDigest
 
 object RssFeedParser {
     fun fetchAndParseRss(
@@ -14,125 +13,72 @@ object RssFeedParser {
         url: String,
         category: String
     ): List<ArticleCacheEntity> {
-        val request = Request.Builder()
-            .url(url)
-            .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36")
-            .build()
-        val list = mutableListOf<ArticleCacheEntity>()
+        val resultList = mutableListOf<ArticleCacheEntity>()
         try {
+            val request = Request.Builder().url(url).build()
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return emptyList()
-                val xmlData = response.body?.string() ?: return emptyList()
-                
+                val bodyStr = response.body?.string() ?: return emptyList()
+
                 val parser = Xml.newPullParser()
-                parser.setInput(StringReader(xmlData))
+                parser.setInput(StringReader(bodyStr))
                 var eventType = parser.eventType
-                
-                var currentItemTitle = ""
-                var currentItemLink = ""
-                var currentItemPubDate = ""
-                var currentItemDesc = ""
-                var currentItemImg = ""
-                var currentItemSource = ""
-                
-                var inItem = false
-                
+
+                var currentTitle = ""
+                var currentLink = ""
+                var currentDescription = ""
+                var currentPubDate = ""
+                var currentImgUrl: String? = null
+
+                var insideItem = false
+
                 while (eventType != XmlPullParser.END_DOCUMENT) {
-                    val name = parser.name
+                    val tagName = parser.name
                     when (eventType) {
                         XmlPullParser.START_TAG -> {
-                            if (name.equals("item", ignoreCase = true)) {
-                                inItem = true
-                                currentItemTitle = ""
-                                currentItemLink = ""
-                                currentItemPubDate = ""
-                                currentItemDesc = ""
-                                currentItemImg = ""
-                                currentItemSource = ""
-                            } else if (inItem) {
-                                when (name.lowercase()) {
-                                    "title" -> currentItemTitle = parser.nextText()
-                                    "link" -> currentItemLink = parser.nextText()
-                                    "pubdate" -> currentItemPubDate = parser.nextText()
-                                    "description" -> {
-                                        val rawDesc = parser.nextText() ?: ""
-                                        if (currentItemImg.isEmpty()) {
-                                            val imgRegex = Regex("<img[^>]+src=(?:\"([^\"]+)\"|'([^']+)'|([^\\s>]+))", RegexOption.IGNORE_CASE)
-                                            val match = imgRegex.find(rawDesc)
-                                            if (match != null) {
-                                                val url = (match.groupValues[1].ifBlank { match.groupValues[2].ifBlank { match.groupValues[3] } }).trim()
-                                                if (url.isNotEmpty()) {
-                                                    currentItemImg = if (url.startsWith("//")) "https:$url" else url
-                                                }
-                                            }
-                                        }
-                                        currentItemDesc = stripHtml(rawDesc)
+                            if (tagName.equals("item", ignoreCase = true)) {
+                                insideItem = true
+                                currentTitle = ""
+                                currentLink = ""
+                                currentDescription = ""
+                                currentPubDate = ""
+                                currentImgUrl = null
+                            } else if (insideItem) {
+                                when {
+                                    tagName.equals("title", ignoreCase = true) -> {
+                                        currentTitle = parser.nextText().trim()
                                     }
-                                    "source" -> currentItemSource = parser.nextText()
-                                    "enclosure" -> {
-                                        var attrUrl: String? = null
-                                        for (i in 0 until parser.attributeCount) {
-                                            if (parser.getAttributeName(i).lowercase() == "url") {
-                                                attrUrl = parser.getAttributeValue(i)
-                                                break
-                                            }
-                                        }
-                                        if (!attrUrl.isNullOrEmpty()) {
-                                            currentItemImg = if (attrUrl.startsWith("//")) "https:$attrUrl" else attrUrl
-                                        }
+                                    tagName.equals("link", ignoreCase = true) -> {
+                                        currentLink = parser.nextText().trim()
                                     }
-                                    "media:content", "content", "media:thumbnail", "thumbnail", "media:image", "image" -> {
-                                        var attrUrl: String? = null
-                                        for (i in 0 until parser.attributeCount) {
-                                            if (parser.getAttributeName(i).lowercase() == "url") {
-                                                attrUrl = parser.getAttributeValue(i)
-                                                break
-                                            }
-                                        }
-                                        if (!attrUrl.isNullOrEmpty()) {
-                                            currentItemImg = if (attrUrl.startsWith("//")) "https:$attrUrl" else attrUrl
-                                        }
+                                    tagName.equals("description", ignoreCase = true) -> {
+                                        currentDescription = parser.nextText().trim().replace("<[^>]*>".toRegex(), " ").trim()
                                     }
-                                    "content:encoded", "encoded" -> {
-                                        val rawContent = parser.nextText() ?: ""
-                                        if (currentItemImg.isEmpty()) {
-                                            val imgRegex = Regex("<img[^>]+src=(?:\"([^\"]+)\"|'([^']+)'|([^\\s>]+))", RegexOption.IGNORE_CASE)
-                                            val match = imgRegex.find(rawContent)
-                                            if (match != null) {
-                                                val url = (match.groupValues[1].ifBlank { match.groupValues[2].ifBlank { match.groupValues[3] } }).trim()
-                                                if (url.isNotEmpty()) {
-                                                    currentItemImg = if (url.startsWith("//")) "https:$url" else url
-                                                }
-                                            }
+                                    tagName.equals("pubDate", ignoreCase = true) -> {
+                                        currentPubDate = parser.nextText().trim()
+                                    }
+                                    tagName.equals("media:content", ignoreCase = true) || tagName.equals("enclosure", ignoreCase = true) -> {
+                                        val urlAttr = parser.getAttributeValue(null, "url")
+                                        if (!urlAttr.isNullOrBlank()) {
+                                            currentImgUrl = urlAttr
                                         }
                                     }
                                 }
                             }
                         }
                         XmlPullParser.END_TAG -> {
-                            if (name.equals("item", ignoreCase = true)) {
-                                inItem = false
-                                if (currentItemTitle.isNotBlank()) {
-                                    val cleanedTitle = cleanTitle(currentItemTitle)
-                                    val sourceName = if (currentItemSource.isNotBlank()) {
-                                        currentItemSource
-                                    } else {
-                                        extractSourceFromTitle(currentItemTitle)
-                                    }
-                                    
-                                    val id = md5(currentItemLink.ifBlank { cleanedTitle })
-                                    
-                                    list.add(
+                            if (tagName.equals("item", ignoreCase = true)) {
+                                insideItem = false
+                                if (currentLink.isNotBlank() && currentTitle.isNotBlank()) {
+                                    resultList.add(
                                         ArticleCacheEntity(
-                                            id = id,
-                                            title = cleanedTitle,
-                                            description = currentItemDesc.take(200),
-                                            imageUrl = currentItemImg,
-                                            sourceUrl = currentItemLink,
-                                            sourceName = sourceName,
-                                            publishedAt = formatPubDate(currentItemPubDate),
+                                            url = currentLink,
+                                            title = currentTitle,
+                                            description = currentDescription,
+                                            imageUrl = currentImgUrl,
                                             category = category,
-                                            cachedAt = System.currentTimeMillis()
+                                            publishedAt = currentPubDate,
+                                            source = getDomain(currentLink)
                                         )
                                     )
                                 }
@@ -145,34 +91,19 @@ object RssFeedParser {
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        return list
+        return resultList
     }
 
-    private fun stripHtml(html: String): String {
-        return html.replace(Regex("<[^>]*>"), "").trim()
-    }
-
-    private fun cleanTitle(title: String): String {
-        val index = title.lastIndexOf(" - ")
-        return if (index != -1) title.substring(0, index).trim() else title.trim()
-    }
-
-    private fun extractSourceFromTitle(title: String): String {
-        val index = title.lastIndexOf(" - ")
-        return if (index != -1) title.substring(index + 3).trim() else "Google News"
-    }
-
-    private fun formatPubDate(pubDate: String): String {
+    private fun getDomain(urlStr: String): String {
         return try {
-            if (pubDate.length > 16) pubDate.substring(0, 16) else pubDate
+            val uri = java.net.URI(urlStr)
+            var domain = uri.host ?: ""
+            if (domain.startsWith("www.")) {
+                domain = domain.substring(4)
+            }
+            domain
         } catch (e: Exception) {
-            pubDate
+            "Unknown Source"
         }
-    }
-
-    private fun md5(input: String): String {
-        val md = MessageDigest.getInstance("MD5")
-        val digest = md.digest(input.toByteArray())
-        return digest.joinToString("") { "%02x".format(it) }
     }
 }

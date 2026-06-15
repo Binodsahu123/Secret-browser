@@ -1,6 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">SwiftBrowser</string>
-    <string name="attribution_ads_label">SwiftBrowser Ads Attribution</string>
-    <string name="attribution_location_label">SwiftBrowser Location Attribution</string>
-    <string name="attribution_sensor_label">SwiftBrowser Sensors Attribution</string>
 </resources>

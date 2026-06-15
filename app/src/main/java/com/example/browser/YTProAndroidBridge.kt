@@ -43,6 +43,8 @@ class YTProAndroidBridge(
     private val scope = CoroutineScope(Dispatchers.IO)
     private val activeStreams = java.util.concurrent.ConcurrentHashMap<String, FileOutputStream>()
     private val activePorts = java.util.concurrent.ConcurrentHashMap<String, WebMessagePort>()
+    private val chunkBuffers = java.util.concurrent.ConcurrentHashMap<String, FileOutputStream>()
+    private val downloadIds = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     @JavascriptInterface
     fun getAllCookies(url: String): String {
@@ -213,16 +215,55 @@ class YTProAndroidBridge(
 
                     javaPort.setWebMessageCallback(object : WebMessagePort.WebMessageCallback() {
                         override fun onMessage(port: WebMessagePort?, message: WebMessage?) {
-                            val data = message?.data
+                            if (message == null) return
+                            
+                            val data = try { message.data } catch(e: Exception) { null }
                             if (data == "END") {
                                 Log.d("YTProBridge", "Received end of stream for $fileName")
                                 cleanupStream(fileName, file, downloadId)
                                 javaPort.close()
                                 activePorts.remove(fileName)
-                            } else if (data != null) {
+                                return
+                            }
+
+                            try {
+                                if (Build.VERSION.SDK_INT >= 34) {
+                                    val buffer = try {
+                                        val method = message.javaClass.getMethod("getArrayBuffer")
+                                        method.invoke(message) as? java.nio.ByteBuffer
+                                    } catch(e: Exception) { null }
+                                    if (buffer != null) {
+                                        val bytes = ByteArray(buffer.remaining())
+                                        buffer.get(bytes)
+                                        fos.write(bytes)
+                                        fos.flush()
+
+                                        val currentLength = file.length()
+                                        val now = System.currentTimeMillis()
+                                        if (currentLength - lastUpdateBytes > 1024 * 512 || now - lastUpdateTime > 1000) {
+                                            lastUpdateBytes = currentLength
+                                            lastUpdateTime = now
+                                            scope.launch {
+                                                val updated = initialItem.copy(
+                                                    status = "RUNNING",
+                                                    downloadedSize = currentLength,
+                                                    speed = "Downloading..."
+                                                )
+                                                db.downloadDao().insertDownload(updated)
+                                            }
+                                        }
+                                        return
+                                    }
+                                }
+                            } catch(e: Throwable) {
+                                e.printStackTrace()
+                            }
+
+                            if (data != null) {
                                 try {
                                     val bytes = Base64.decode(data, Base64.DEFAULT)
                                     fos.write(bytes)
+                                    fos.flush()
 
                                     val currentLength = file.length()
                                     val now = System.currentTimeMillis()
@@ -241,6 +282,7 @@ class YTProAndroidBridge(
                                 } catch (e: Exception) {
                                     try {
                                         fos.write(data.toByteArray())
+                                        fos.flush()
                                     } catch (ex: Exception) {
                                         ex.printStackTrace()
                                     }
@@ -249,9 +291,17 @@ class YTProAndroidBridge(
                         }
                     })
 
+                    val activeUrl = webView.url ?: "https://m.youtube.com"
+                    val parsedOrigin = try {
+                        val parsed = Uri.parse(activeUrl)
+                        "${parsed.scheme}://${parsed.host}"
+                    } catch(e: Exception) {
+                        "https://m.youtube.com"
+                    }
+
                     webView.postWebMessage(
                         WebMessage("PORT_FOR:$fileName", arrayOf(jsPort)),
-                        Uri.parse("https://m.youtube.com")
+                        Uri.parse(parsedOrigin)
                     )
                 } catch (e: Exception) {
                     e.printStackTrace()
@@ -292,6 +342,108 @@ class YTProAndroidBridge(
             } catch (e: Exception) {
                 e.printStackTrace()
             }
+        }
+    }
+
+    @JavascriptInterface
+    fun writeChunk(fileName: String, base64Chunk: String) {
+        try {
+            val bytes = android.util.Base64.decode(base64Chunk, android.util.Base64.DEFAULT)
+            val folder = DownloadScheduler.getDownloadDirectory(context, "Videos")
+            val file = File(folder, fileName)
+            val fos = chunkBuffers.getOrPut(fileName) {
+                if (file.exists()) {
+                    file.delete()
+                }
+                FileOutputStream(file)
+            }
+            fos.write(bytes)
+            fos.flush()
+
+            // Database progress/registration
+            val downloadId = downloadIds.getOrPut(fileName) {
+                System.currentTimeMillis() + (fileName.hashCode().toLong() and 0x00FFFFFFL)
+            }
+            val db = DownloadDatabase.getDatabase(context)
+            val category = if (fileName.contains("_audio")) "Audio" else "Videos"
+            val mime = if (fileName.endsWith(".mp4")) "video/mp4" else if (fileName.endsWith(".webm")) "video/webm" else "audio/mpeg"
+
+            scope.launch {
+                val currentLength = file.length()
+                val item = DownloadItem(
+                    id = downloadId,
+                    title = fileName,
+                    url = "https://www.youtube.com/watch",
+                    mimeType = mime,
+                    status = "RUNNING",
+                    progress = 0,
+                    downloadedSize = currentLength,
+                    totalSize = 0L,
+                    speed = "Downloading...",
+                    category = category,
+                    filePath = file.absolutePath
+                )
+                db.downloadDao().insertDownload(item)
+            }
+        } catch (e: java.lang.Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    @JavascriptInterface
+    fun finishFile(fileName: String) {
+        try {
+            chunkBuffers.remove(fileName)?.close()
+            val downloadId = downloadIds.remove(fileName) ?: (System.currentTimeMillis() + (fileName.hashCode().toLong() and 0x00FFFFFFL))
+            val folder = DownloadScheduler.getDownloadDirectory(context, "Videos")
+            val file = File(folder, fileName)
+            val db = DownloadDatabase.getDatabase(context)
+            scope.launch {
+                val item = DownloadItem(
+                    id = downloadId,
+                    title = fileName,
+                    url = "https://www.youtube.com/watch",
+                    mimeType = if (fileName.endsWith(".mp4")) "video/mp4" else if (fileName.endsWith(".webm")) "video/webm" else "audio/mpeg",
+                    status = "COMPLETED",
+                    progress = 100,
+                    downloadedSize = file.length(),
+                    totalSize = file.length(),
+                    speed = "Completed",
+                    category = if (fileName.contains("_audio")) "Audio" else "Videos",
+                    filePath = file.absolutePath
+                )
+                db.downloadDao().insertDownload(item)
+            }
+            handler.post {
+                Toast.makeText(context, "Downloaded: $fileName", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: java.lang.Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    @JavascriptInterface
+    fun onDownloadProgress(fileName: String, mbDownloaded: Int) {
+        val downloadId = downloadIds[fileName] ?: return
+        val folder = DownloadScheduler.getDownloadDirectory(context, "Videos")
+        val file = File(folder, fileName)
+        val db = DownloadDatabase.getDatabase(context)
+        scope.launch {
+            val currentLength = file.length()
+            val item = DownloadItem(
+                id = downloadId,
+                title = fileName,
+                url = "https://www.youtube.com/watch",
+                mimeType = if (fileName.endsWith(".mp4")) "video/mp4" else if (fileName.endsWith(".webm")) "video/webm" else "audio/mpeg",
+                status = "RUNNING",
+                progress = 0,
+                downloadedSize = currentLength,
+                totalSize = 0L,
+                speed = "$mbDownloaded MB",
+                category = if (fileName.contains("_audio")) "Audio" else "Videos",
+                filePath = file.absolutePath
+            )
+            db.downloadDao().insertDownload(item)
         }
     }
 

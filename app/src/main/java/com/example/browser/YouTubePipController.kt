@@ -6,23 +6,29 @@ import android.os.Build
 import android.util.Rational
 
 object YouTubePipController {
-    
     fun enterPip(activity: Activity) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             try {
-                val aspectRatio = Rational(16, 9)
                 val params = PictureInPictureParams.Builder()
-                    .setAspectRatio(aspectRatio)
+                    .setAspectRatio(Rational(16, 9))
                     .build()
                 activity.enterPictureInPictureMode(params)
             } catch (e: Exception) {
                 e.printStackTrace()
+                try {
+                    @Suppress("DEPRECATION")
+                    activity.enterPictureInPictureMode()
+                } catch (ex: Exception) {
+                    ex.printStackTrace()
+                }
+            }
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            try {
+                @Suppress("DEPRECATION")
+                activity.enterPictureInPictureMode()
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         }
-    }
-
-    fun isPipSupported(activity: Activity): Boolean {
-        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-                activity.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_PICTURE_IN_PICTURE)
     }
 }
