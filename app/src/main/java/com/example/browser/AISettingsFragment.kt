@@ -166,23 +166,17 @@ fun AISettingsFragment(
                             )
                             Column {
                                 Text(
-                                    text = "Orion Assistant",
+                                    text = "Orion Voice Assistant",
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 14.sp
                                 )
                                 Text(
-                                    text = "Say \"Hello Orion\" to open the assistant offline. Status: ${if (isOrionAssistantEnabled) "ACTIVE" else "INACTIVE"}",
+                                    text = "Simplified Mode active. Tapping the mic button on the address bar starts voice commands.",
                                     fontSize = 11.sp,
                                     color = Color.Gray
                                 )
                             }
                         }
-                        Switch(
-                            checked = isOrionAssistantEnabled,
-                            onCheckedChange = {
-                                viewModel.toggleOrionWakeWord()
-                            }
-                        )
                     }
                 }
             }

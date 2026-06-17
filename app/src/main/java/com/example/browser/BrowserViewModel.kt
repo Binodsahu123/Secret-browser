@@ -341,11 +341,12 @@ class BrowserViewModel(
     var afterSpeakAction: (() -> Unit)? = null
     var lastVoiceCommandType: String? = null
     var conversationalFollowUpType: String? = null
-    private var assistantActivationManager: com.example.browser.voiceengine.AssistantActivationManager? = null
+    lateinit var orionVoiceEngine: com.example.browser.voiceengine.OrionVoiceEngine
     private var activeSessionJob: kotlinx.coroutines.Job? = null
-    private var sessionEndTime: Long = 0L
-    private var isActiveSessionRunning = false
+    var sessionEndTime: Long = 0L
+    var isActiveSessionRunning = false
     private val sslDomainsToIgnore = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    private var recognitionRestartJob: kotlinx.coroutines.Job? = null
 
     init {
         // Route background extension service worker console logs to developer tools inspector
@@ -508,23 +509,7 @@ class BrowserViewModel(
         refreshSettings()
         loadOrionVoiceState()
 
-        try {
-            assistantActivationManager = com.example.browser.voiceengine.AssistantActivationManager(application) { command ->
-                viewModelScope.launch(Dispatchers.Main) {
-                    // Enter Mode 2 (Active Listening Mode) immediately
-                    startOrionVoiceListening(application)
-
-                    if (command != null && command.trim().isNotEmpty()) {
-                        val parsed = com.example.browser.voiceengine.IntentEngine.determineIntent(command)
-                        val actionRouter = com.example.browser.voiceengine.ActionRouter(this@BrowserViewModel)
-                        actionRouter.executeIntent(parsed)
-                    }
-                }
-            }
-            assistantActivationManager?.startListening()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        orionVoiceEngine = com.example.browser.voiceengine.OrionVoiceEngine(application, this)
     }
 
     fun refreshSettings() {
@@ -5548,32 +5533,21 @@ class BrowserViewModel(
     }
 
     // --- ORION VOICE INTELLIGENCE ENGINE V3 SYSTEM ---
-    private var speechRecognizer: android.speech.SpeechRecognizer? = null
     private var wakeWordJob: kotlinx.coroutines.Job? = null
 
     fun startOrionVoiceListening(context: android.content.Context) {
-        Log.i("OrionVoiceV3", "Entering Active Listening Mode (Mode 2) for 60-second session.")
+        Log.i("OrionVoiceV3", "Entering Direct User-Triggered Voice Listening Mode (Single Turn).")
         isActiveSessionRunning = true
-        sessionEndTime = System.currentTimeMillis() + 60000L
         
-        // Coordinated stop of Hotword Service (Mode 1) to completely free microphone
+        // Coordinated stop of any background engines/services to ensure mic access
         try {
             com.example.browser.voiceengine.OrionHotwordService.stopService(context)
         } catch (e: Exception) {
             e.printStackTrace()
         }
 
-        // Run the 60 seconds monitor
         activeSessionJob?.cancel()
-        activeSessionJob = viewModelScope.launch(Dispatchers.Main) {
-            while (isActiveSessionRunning) {
-                kotlinx.coroutines.delay(1000L)
-                if (System.currentTimeMillis() > sessionEndTime) {
-                    Log.i("OrionVoiceV3", "Active session 60-seconds window timed out. Going back to sleep.")
-                    dismissOrionVoiceOverlay()
-                }
-            }
-        }
+        activeSessionJob = null
 
         startActiveSpeechRecognizer(context)
     }
@@ -5585,7 +5559,7 @@ class BrowserViewModel(
         _uiState.update {
             it.copy(
                 isOrionListening = true,
-                orionTranscript = if (it.orionVoiceActiveMode == "Chat") "Speak to Orion Chat..." else "Listening (60s session)...",
+                orionTranscript = "Listening...",
                 orionErrorMessage = null,
                 isOrionOverlayVisible = true,
                 orionRmsdB = 0f
@@ -5593,196 +5567,138 @@ class BrowserViewModel(
         }
 
         try {
-            val recognizer = android.speech.SpeechRecognizer.createSpeechRecognizer(context)
-            speechRecognizer = recognizer
-
-            val intent = android.content.Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(android.speech.RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                val langCode = _uiState.value.orionVoiceActiveLanguageCode
-                putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, langCode)
-                putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, langCode)
-                putExtra(android.speech.RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, langCode)
-            }
-
-            recognizer.setRecognitionListener(object : android.speech.RecognitionListener {
-                override fun onReadyForSpeech(params: android.os.Bundle?) {
+            val langCode = _uiState.value.orionVoiceActiveLanguageCode
+            orionVoiceEngine.speechRecognitionModule.startListening(
+                languageCode = langCode,
+                onReady = {
                     val promptText = when (_uiState.value.orionVoiceActiveMode) {
                         "Notes" -> "Dictate your note..."
                         "Chat" -> "Orion is listening..."
                         else -> "How can Orion help you?"
                     }
                     _uiState.update { it.copy(orionTranscript = promptText, orionRmsdB = 0.1f) }
-                }
-
-                override fun onBeginningOfSpeech() {
+                },
+                onHearing = {
                     _uiState.update { it.copy(orionTranscript = "Hearing...") }
-                }
+                },
+                onVolumeChanged = { volumeValue ->
+                    _uiState.update { it.copy(orionRmsdB = volumeValue) }
+                },
+                onPartial = { partialText ->
+                    _uiState.update { it.copy(orionTranscript = partialText) }
+                },
+                onResult = { spokenText ->
+                    val cleanedText = com.example.browser.voiceengine.TranscriptEngine.cleanLiveTranscript(spokenText)
+                    _uiState.update { it.copy(orionTranscript = cleanedText, orionRmsdB = 0f, isOrionListening = false) }
 
-                override fun onRmsChanged(rmsdB: Float) {
-                    val normalized = (rmsdB + 2f) / 10f
-                    _uiState.update { it.copy(orionRmsdB = normalized.coerceIn(0f, 1f)) }
-                }
+                    // Stop recognition immediately and close microphone
+                    stopActiveSpeechRecognizer()
 
-                override fun onBufferReceived(buffer: ByteArray?) {}
-
-                override fun onEndOfSpeech() {
-                    _uiState.update { it.copy(orionTranscript = "Analyzing...") }
-                }
-
-                override fun onError(error: Int) {
-                    val msg = when (error) {
-                        android.speech.SpeechRecognizer.ERROR_AUDIO -> "Audio recording error"
-                        android.speech.SpeechRecognizer.ERROR_CLIENT -> "Client error"
-                        android.speech.SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Permissions required"
-                        android.speech.SpeechRecognizer.ERROR_NETWORK -> "Network issue"
-                        android.speech.SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Network timed out"
-                        android.speech.SpeechRecognizer.ERROR_NO_MATCH -> "Waiting for speech..."
-                        android.speech.SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Mic is busy"
-                        android.speech.SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Listening timed out..."
-                        else -> "Error ($error)"
-                    }
-                    Log.d("OrionVoiceV3", "Active recognizer error: $msg ($error)")
-                    _uiState.update { it.copy(orionRmsdB = 0f) }
-
-                    // Silently restart recognizer if we are still within the 60-seconds window
-                    if (isActiveSessionRunning && System.currentTimeMillis() < sessionEndTime) {
-                        viewModelScope.launch {
-                            kotlinx.coroutines.delay(500L)
-                            if (isActiveSessionRunning) {
-                                startActiveSpeechRecognizer(context)
+                    // Conversational Follow-up Check
+                    if (conversationalFollowUpType == "music") {
+                        conversationalFollowUpType = null
+                        val historyItem = VoiceHistoryEntry(text = cleanedText, type = "command")
+                        _uiState.update { it.copy(orionVoiceHistory = it.orionVoiceHistory + historyItem) }
+                        saveOrionVoiceState()
+                        
+                        val promptMessage = "Opening YouTube and searching for $cleanedText."
+                        playVoiceAssistantResponseSpoken(promptMessage) {
+                            try {
+                                val searchUrl = "https://www.youtube.com/results?search_query=" + java.net.URLEncoder.encode(cleanedText, "UTF-8")
+                                navigateTo(searchUrl)
+                            } catch (e: Exception) {
+                                e.printStackTrace()
                             }
+                            dismissOrionVoiceOverlay()
                         }
+                        return@startListening
                     }
-                }
 
-                override fun onResults(results: android.os.Bundle?) {
-                    val matches = results?.getStringArrayList(android.speech.SpeechRecognizer.RESULTS_RECOGNITION)
-                    if (!matches.isNullOrEmpty()) {
-                        val spokenText = matches[0]
-                        _uiState.update { it.copy(orionTranscript = spokenText, orionRmsdB = 0f, isOrionListening = false) }
+                    // Conversational Context Check (YouTube search focus)
+                    val activeUrl = _uiState.value.tabs.find { it.id == _uiState.value.activeTabId }?.url ?: ""
+                    val isYouTubeContext = lastVoiceCommandType == "OPEN_YOUTUBE" || activeUrl.contains("youtube.com")
+                    val lowerSpoken = cleanedText.lowercase()
+                    
+                    if (isYouTubeContext && (lowerSpoken.startsWith("search ") || lowerSpoken.contains("songs"))) {
+                        val queryText = lowerSpoken.removePrefix("search").removePrefix("on youtube").trim()
+                        val promptMessage = "Searching $queryText on YouTube."
+                        playVoiceAssistantResponseSpoken(promptMessage) {
+                            try {
+                                val searchUrl = "https://www.youtube.com/results?search_query=" + java.net.URLEncoder.encode(queryText, "UTF-8")
+                                navigateTo(searchUrl)
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                            }
+                            dismissOrionVoiceOverlay()
+                        }
+                        return@startListening
+                    }
 
-                        // Reset 60s active session timeout since we got user input!
-                        sessionEndTime = System.currentTimeMillis() + 60000L
-
-                        // Conversational Follow-up Check
-                        if (conversationalFollowUpType == "music") {
-                            conversationalFollowUpType = null
-                            val historyItem = VoiceHistoryEntry(text = spokenText, type = "command")
+                    // Decide parsing and execution flow based on active mode
+                    when (_uiState.value.orionVoiceActiveMode) {
+                        "Notes" -> {
+                            val historyItem = VoiceHistoryEntry(text = cleanedText, type = "transcript")
                             _uiState.update { it.copy(orionVoiceHistory = it.orionVoiceHistory + historyItem) }
                             saveOrionVoiceState()
-                            
-                            val promptMessage = "Opening YouTube and searching for $spokenText."
-                            playVoiceAssistantResponseSpoken(promptMessage) {
-                                try {
-                                    val searchUrl = "https://www.youtube.com/results?search_query=" + java.net.URLEncoder.encode(spokenText, "UTF-8")
-                                    navigateTo(searchUrl)
-                                } catch (e: Exception) {
-                                    e.printStackTrace()
-                                }
-                                dismissOrionVoiceOverlay()
-                            }
-                            return
+                            playVoiceAssistantResponseSpoken("Note transcribed")
+                            dismissOrionVoiceOverlay()
                         }
-
-                        // Conversational Context Check (YouTube search focus)
-                        val activeUrl = _uiState.value.tabs.find { it.id == _uiState.value.activeTabId }?.url ?: ""
-                        val isYouTubeContext = lastVoiceCommandType == "OPEN_YOUTUBE" || activeUrl.contains("youtube.com")
-                        val lowerSpoken = spokenText.lowercase()
-                        
-                        if (isYouTubeContext && (lowerSpoken.startsWith("search ") || lowerSpoken.contains("songs"))) {
-                            val queryText = lowerSpoken.removePrefix("search").removePrefix("on youtube").trim()
-                            val promptMessage = "Searching $queryText on YouTube."
-                            playVoiceAssistantResponseSpoken(promptMessage) {
-                                try {
-                                    val searchUrl = "https://www.youtube.com/results?search_query=" + java.net.URLEncoder.encode(queryText, "UTF-8")
-                                    navigateTo(searchUrl)
-                                } catch (e: Exception) {
-                                    e.printStackTrace()
-                                }
-                                dismissOrionVoiceOverlay()
-                            }
-                            return
+                        "Chat" -> {
+                            processOrionChatModeResponse(cleanedText)
+                            dismissOrionVoiceOverlay()
                         }
+                        else -> { // "Assistant" Command execution
+                            val hasWake = cleanedText.lowercase().contains("orion")
+                            val type = if (hasWake) "command" else "search"
+                            val historyItem = VoiceHistoryEntry(text = cleanedText, type = type)
+                            _uiState.update { it.copy(orionVoiceHistory = it.orionVoiceHistory + historyItem) }
+                            saveOrionVoiceState()
 
-                        // Decide parsing and execution flow based on active mode
-                        when (_uiState.value.orionVoiceActiveMode) {
-                            "Notes" -> {
-                                val historyItem = VoiceHistoryEntry(text = spokenText, type = "transcript")
-                                _uiState.update { it.copy(orionVoiceHistory = it.orionVoiceHistory + historyItem) }
-                                saveOrionVoiceState()
-                                playVoiceAssistantResponseSpoken("Note transcribed")
+                            try {
+                                val actionRouter = ActionRouter(this@BrowserViewModel)
+                                val commandRouter = CommandRouter(getApplication(), actionRouter)
+                                TranscriptManager.updateTranscript(cleanedText)
+                                commandRouter.routeCommand(cleanedText)
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                                // Fallback to existing search engine
+                                val parsed = com.example.searchengine.VoiceSearch.parseVoiceCommand(cleanedText)
+                                executeVoiceCommandResult(parsed)
                             }
-                            "Chat" -> {
-                                processOrionChatModeResponse(spokenText)
-                            }
-                            else -> { // "Assistant" Command execution
-                                val hasWake = spokenText.lowercase().contains("orion")
-                                val type = if (hasWake) "command" else "search"
-                                val historyItem = VoiceHistoryEntry(text = spokenText, type = type)
-                                _uiState.update { it.copy(orionVoiceHistory = it.orionVoiceHistory + historyItem) }
-                                saveOrionVoiceState()
-
-                                try {
-                                    val actionRouter = ActionRouter(this@BrowserViewModel)
-                                    val commandRouter = CommandRouter(getApplication(), actionRouter)
-                                    TranscriptManager.updateTranscript(spokenText)
-                                    commandRouter.routeCommand(spokenText)
-                                } catch (e: Exception) {
-                                    e.printStackTrace()
-                                    // Fallback to existing search engine
-                                    val parsed = com.example.searchengine.VoiceSearch.parseVoiceCommand(spokenText)
-                                    executeVoiceCommandResult(parsed)
-                                }
-                            }
-                        }
-
-                        // Keep active session alive for multiple commands!
-                        if (isActiveSessionRunning) {
-                            viewModelScope.launch {
-                                kotlinx.coroutines.delay(1500L) // small delay to speak feedback if any
-                                if (isActiveSessionRunning) {
-                                    startActiveSpeechRecognizer(context)
-                                }
-                            }
-                        }
-                    } else {
-                        if (isActiveSessionRunning && System.currentTimeMillis() < sessionEndTime) {
-                            startActiveSpeechRecognizer(context)
+                            dismissOrionVoiceOverlay()
                         }
                     }
-                }
+                },
+                onErrorOccurred = { errorMsg, errorCode ->
+                    _uiState.update { it.copy(orionRmsdB = 0f) }
+                    stopActiveSpeechRecognizer()
+                    _uiState.update { it.copy(orionTranscript = "Error: $errorMsg", isOrionListening = false) }
 
-                override fun onPartialResults(partialResults: android.os.Bundle?) {
-                    val partialMatches = partialResults?.getStringArrayList(android.speech.SpeechRecognizer.RESULTS_RECOGNITION)
-                    if (!partialMatches.isNullOrEmpty()) {
-                        _uiState.update { it.copy(orionTranscript = partialMatches[0]) }
+                    // Dismiss after a standard reading delay (no restarts occurring)
+                    recognitionRestartJob?.cancel()
+                    recognitionRestartJob = viewModelScope.launch {
+                        kotlinx.coroutines.delay(1500L)
+                        dismissOrionVoiceOverlay()
                     }
                 }
-
-                override fun onEvent(eventType: Int, params: android.os.Bundle?) {}
-            })
-
-            recognizer.startListening(intent)
+            )
         } catch (e: Exception) {
             e.printStackTrace()
         }
     }
 
     private fun stopActiveSpeechRecognizer() {
-        try {
-            speechRecognizer?.stopListening()
-            speechRecognizer?.destroy()
-        } catch (e: Exception) {
-            e.printStackTrace()
+        if (::orionVoiceEngine.isInitialized) {
+            orionVoiceEngine.speechRecognitionModule.stopListening()
         }
-        speechRecognizer = null
     }
 
     fun stopOrionVoiceListening() {
         isActiveSessionRunning = false
         activeSessionJob?.cancel()
         activeSessionJob = null
+        recognitionRestartJob?.cancel()
+        recognitionRestartJob = null
         stopActiveSpeechRecognizer()
         
         _uiState.update { it.copy(isOrionListening = false, orionRmsdB = 0f) }
@@ -5792,15 +5708,6 @@ class BrowserViewModel(
         stopOrionVoiceListening()
         ttsEngine?.stop()
         _uiState.update { it.copy(isOrionOverlayVisible = false, orionErrorMessage = null) }
-
-        // Coordinated restart of Mode 1 (Hotword Idle Mode) to go back to sleep
-         if (_uiState.value.orionVoiceWakeWordEnabled) {
-            try {
-                com.example.browser.voiceengine.OrionHotwordService.startService(getApplication())
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
     }
 
     fun playVoiceAssistantResponseSpoken(text: String, onSpeakDone: (() -> Unit)? = null) {
@@ -6429,12 +6336,6 @@ class BrowserViewModel(
     override fun onCleared() {
         super.onCleared()
         stopBackgroundAudio()
-        try {
-            assistantActivationManager?.stopListening()
-            assistantActivationManager = null
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
         try {
             extensionManager.shutdown()
         } catch (e: Exception) {

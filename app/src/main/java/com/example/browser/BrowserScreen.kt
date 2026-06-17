@@ -409,23 +409,6 @@ fun BrowserScreen(
 
                     if (!uiState.isSearchFocused) {
 
-                        // Orion Assistant Voice Button
-                        IconButton(
-                            onClick = {
-                                viewModel.startOrionVoiceListening(context)
-                            },
-                            modifier = Modifier
-                                .size(36.dp)
-                                .testTag("orion_voice_toolbar_btn")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Mic,
-                                contentDescription = "Orion Assistant Voice Input",
-                                tint = if (isGlass) Color.White else MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(22.dp)
-                            )
-                        }
-
                         // AI Button placed beside tab counter and menu
                         IconButton(
                             onClick = {

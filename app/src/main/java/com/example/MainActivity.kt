@@ -67,29 +67,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onStart() {
-        super.onStart()
-        val hasPermission = androidx.core.content.ContextCompat.checkSelfPermission(
-            this, android.Manifest.permission.RECORD_AUDIO
-        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-        if (hasPermission) {
-            try {
-                com.example.browser.voiceengine.OrionHotwordService.startService(this)
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-    }
-
-    override fun onStop() {
-        super.onStop()
-        try {
-            com.example.browser.voiceengine.OrionHotwordService.stopService(this)
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
