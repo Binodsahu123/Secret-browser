@@ -2,35 +2,30 @@ package com.example.browser
 
 import android.app.Activity
 import android.content.Context
-import android.os.Build
-import android.view.View
+import android.content.ContextWrapper
 
 object FullscreenController {
+
+    fun findActivity(context: Context): Activity? {
+        var currentContext = context
+        while (currentContext is ContextWrapper) {
+            if (currentContext is Activity) {
+                return currentContext
+            }
+            currentContext = currentContext.baseContext
+        }
+        return null
+    }
+
     fun onEnterFullscreen(context: Context) {
-        val activity = context as? Activity ?: return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            activity.window.insetsController?.hide(
-                android.view.WindowInsets.Type.statusBars() or android.view.WindowInsets.Type.navigationBars()
-            )
-        } else {
-            @Suppress("DEPRECATION")
-            activity.window.decorView.systemUiVisibility = (
-                View.SYSTEM_UI_FLAG_FULLSCREEN or
-                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
-                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-            )
+        findActivity(context)?.let { activity ->
+            FullscreenVideoManager(activity).enterFullscreen()
         }
     }
 
     fun onExitFullscreen(context: Context) {
-        val activity = context as? Activity ?: return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            activity.window.insetsController?.show(
-                android.view.WindowInsets.Type.statusBars() or android.view.WindowInsets.Type.navigationBars()
-            )
-        } else {
-            @Suppress("DEPRECATION")
-            activity.window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+        findActivity(context)?.let { activity ->
+            FullscreenVideoManager(activity).exitFullscreen()
         }
     }
 }

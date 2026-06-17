@@ -115,210 +115,101 @@ object MediaLinkResolver {
     }
 
     private fun tryResolveSocialMedia(url: String): List<ResolvedMediaStream> {
-        // 1. YouTube specialized extraction via public high-availability Invidious API instances
-        val ytId = extractYouTubeId(url)
-        if (ytId != null) {
-            val invidiousInstances = listOf(
-                "https://invidious.privacydev.net",
-                "https://yewtu.be",
-                "https://iv.melmac.space",
-                "https://invidious.nerdvpn.de",
-                "https://invidious.flokinet.to"
-            )
-            for (instance in invidiousInstances) {
-                try {
-                    Log.d(TAG, "Attempting Invidious resolver inside $instance for video ID: $ytId")
-                    val reqUrl = "$instance/api/v1/videos/$ytId"
-                    val request = Request.Builder()
-                        .url(reqUrl)
-                        .get()
-                        .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                        .build()
-                    client.newCall(request).execute().use { response ->
-                        if (response.isSuccessful) {
-                            val bodyText = response.body?.string() ?: ""
-                            val json = JSONObject(bodyText)
-                            val resolved = mutableListOf<ResolvedMediaStream>()
-
-                            // Parse regular multiplexed streams (contain both video and audio)
-                            if (json.has("formatStreams")) {
-                                val streams = json.getJSONArray("formatStreams")
-                                for (i in 0 until streams.length()) {
-                                    val streamObj = streams.getJSONObject(i)
-                                    val streamUrl = streamObj.getString("url")
-                                    val q = streamObj.optString("qualityLabel", "360p")
-                                    val cont = streamObj.optString("container", "mp4")
-                                    val type = streamObj.optString("type", "video/mp4")
-                                    resolved.add(
-                                        ResolvedMediaStream(
-                                            url = streamUrl,
-                                            label = "$q Video + Audio ($cont)",
-                                            ext = cont.uppercase(),
-                                            size = "Direct Stream",
-                                            isAudio = false,
-                                            mimeType = type,
-                                            originalUrl = url
-                                        )
-                                    )
-                                }
-                            }
-
-                            // Parse adaptive streams (Separate HD Video tracks and crystal-clear HQ Audio tracks)
-                            if (json.has("adaptiveFormats")) {
-                                val adaptive = json.getJSONArray("adaptiveFormats")
-                                for (i in 0 until adaptive.length()) {
-                                    val item = adaptive.getJSONObject(i)
-                                    val streamUrl = item.getString("url")
-                                    val type = item.optString("type", "")
-                                    val isAudio = type.contains("audio/")
-                                    val container = item.optString("container", if (isAudio) "m4a" else "mp4")
-                                    if (isAudio) {
-                                        val bitrate = item.optLong("bitrate", 128000) / 1000
-                                        resolved.add(
-                                            ResolvedMediaStream(
-                                                url = streamUrl,
-                                                label = "Audio Track - ${bitrate}kbps ($container)",
-                                                ext = container.uppercase(),
-                                                size = "Direct Audio",
-                                                isAudio = true,
-                                                mimeType = type,
-                                                originalUrl = url
-                                            )
-                                        )
-                                    } else {
-                                        val q = item.optString("qualityLabel", "1080p")
-                                        resolved.add(
-                                            ResolvedMediaStream(
-                                                url = streamUrl,
-                                                label = "HD Video Only - $q ($container)",
-                                                ext = container.uppercase(),
-                                                size = "HD Video",
-                                                isAudio = false,
-                                                mimeType = type,
-                                                originalUrl = url
-                                            )
-                                        )
-                                    }
-                                }
-                            }
-
-                            if (resolved.isNotEmpty()) {
-                                Log.i(TAG, "Successfully resolved YouTube video $ytId via Invidious instance: $instance")
-                                return resolved
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error resolving YouTube via Invidious instance $instance", e)
-                }
-            }
-        }
-
-        // 2. Fall back to cycling standard Cobalt endpoints (supporting both v7 legacy and v10 API protocols)
+        // We will cycle through our Cobalt APIs to resolve YouTube/Instagram/TikTok elements
         for (server in cobaltServers) {
-            val endpointsToTry = listOf(
-                server,                      // Original path, e.g. https://co.wuk.sh/api/json
-                server.replace("/api/json", "/") // Modern Cobalt v10 path, e.g. https://co.wuk.sh/
-            ).distinct()
+            try {
+                Log.d(TAG, "Attempting Cobalt API on server: $server")
+                
+                // Construct the JSON request body
+                val jsonRequest = JSONObject().apply {
+                    put("url", url)
+                    put("videoQuality", "1080")
+                    put("audioFormat", "mp3")
+                    put("isAudioOnly", false)
+                    put("isNoTTWatermark", true)
+                }
 
-            for (endpoint in endpointsToTry) {
-                try {
-                    Log.d(TAG, "Attempting Cobalt API on endpoint: $endpoint")
-                    
-                    val jsonRequest = JSONObject().apply {
-                        put("url", url)
-                        put("videoQuality", "1080")
-                        put("audioFormat", "mp3")
-                        put("downloadMode", "video") // Modern v10 property
-                        put("isAudioOnly", false)    // Legacy v7 property
-                        put("isNoTTWatermark", true)
-                    }
+                val mediaType = "application/json; charset=utf-8".toMediaType()
+                val body = jsonRequest.toString().toRequestBody(mediaType)
+                
+                val request = Request.Builder()
+                    .url(server)
+                    .post(body)
+                    .addHeader("Accept", "application/json")
+                    .addHeader("Content-Type", "application/json")
+                    .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                    .build()
 
-                    val mediaType = "application/json; charset=utf-8".toMediaType()
-                    val body = jsonRequest.toString().toRequestBody(mediaType)
-                    
-                    val request = Request.Builder()
-                        .url(endpoint)
-                        .post(body)
-                        .addHeader("Accept", "application/json")
-                        .addHeader("Content-Type", "application/json")
-                        .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                        .build()
+                client.newCall(request).execute().use { response ->
+                    if (response.isSuccessful) {
+                        val responseBody = response.body?.string() ?: ""
+                        Log.d(TAG, "Cobalt success response: $responseBody")
+                        val json = JSONObject(responseBody)
+                        val status = json.optString("status")
 
-                    client.newCall(request).execute().use { response ->
-                        if (response.isSuccessful) {
-                            val responseBody = response.body?.string() ?: ""
-                            Log.d(TAG, "Cobalt success response: $responseBody")
-                            val json = JSONObject(responseBody)
-                            val status = json.optString("status")
+                        val resolved = mutableListOf<ResolvedMediaStream>()
 
-                            val resolved = mutableListOf<ResolvedMediaStream>()
-
-                            if (status == "stream" || status == "redirect") {
-                                val directUrl = json.getString("url")
+                        if (status == "stream" || status == "redirect") {
+                            val directUrl = json.getString("url")
+                            resolved.add(
+                                ResolvedMediaStream(
+                                    url = directUrl,
+                                    label = "High Quality (1080p Stream)",
+                                    ext = "MP4",
+                                    size = "Auto",
+                                    isAudio = false,
+                                    mimeType = "video/mp4",
+                                    originalUrl = url
+                                )
+                            )
+                            // Also add an MP3 audio only option
+                            resolved.add(
+                                ResolvedMediaStream(
+                                    url = directUrl,
+                                    label = "HQ Audio conversion (320kbps)",
+                                    ext = "MP3",
+                                    size = "Auto",
+                                    isAudio = true,
+                                    mimeType = "audio/mpeg",
+                                    originalUrl = url
+                                )
+                            )
+                        } else if (status == "picker") {
+                            val pickerArray = json.getJSONArray("picker")
+                            for (i in 0 until pickerArray.length()) {
+                                val item = pickerArray.getJSONObject(i)
+                                val itemUrl = item.getString("url")
+                                var type = item.optString("type", "video")
+                                val qualityLabel = item.optString("quality", "Default")
+                                
+                                val isAudio = type == "audio"
                                 resolved.add(
                                     ResolvedMediaStream(
-                                        url = directUrl,
-                                        label = "High Quality (1080p Stream)",
-                                        ext = "MP4",
-                                        size = "Auto",
-                                        isAudio = false,
-                                        mimeType = "video/mp4",
+                                        url = itemUrl,
+                                        label = if (isAudio) "Audio Only ($qualityLabel)" else "Video - $qualityLabel Quality",
+                                        ext = if (isAudio) "MP3" else "MP4",
+                                        size = "Dynamic Size",
+                                        isAudio = isAudio,
+                                        mimeType = if (isAudio) "audio/mpeg" else "video/mp4",
                                         originalUrl = url
                                     )
                                 )
-                                resolved.add(
-                                    ResolvedMediaStream(
-                                        url = directUrl,
-                                        label = "HQ Audio conversion (320kbps)",
-                                        ext = "MP3",
-                                        size = "Auto",
-                                        isAudio = true,
-                                        mimeType = "audio/mpeg",
-                                        originalUrl = url
-                                    )
-                                )
-                            } else if (status == "picker") {
-                                val pickerArray = json.getJSONArray("picker")
-                                for (i in 0 until pickerArray.length()) {
-                                    val item = pickerArray.getJSONObject(i)
-                                    val itemUrl = item.getString("url")
-                                    val type = item.optString("type", "video")
-                                    val qualityLabel = item.optString("quality", "Default")
-                                    
-                                    val isAudio = type == "audio"
-                                    resolved.add(
-                                        ResolvedMediaStream(
-                                            url = itemUrl,
-                                            label = if (isAudio) "Audio Only ($qualityLabel)" else "Video - $qualityLabel Quality",
-                                            ext = if (isAudio) "MP3" else "MP4",
-                                            size = "Dynamic Size",
-                                            isAudio = isAudio,
-                                            mimeType = if (isAudio) "audio/mpeg" else "video/mp4",
-                                            originalUrl = url
-                                        )
-                                    )
-                                }
-                            }
-
-                            if (resolved.isNotEmpty()) {
-                                Log.i(TAG, "Successfully resolved social media via Cobalt on $endpoint!")
-                                return resolved
                             }
                         }
+
+                        if (resolved.isNotEmpty()) {
+                            Log.i(TAG, "Successfully resolved social media via Cobalt API!")
+                            return resolved
+                        }
+                    } else {
+                        Log.w(TAG, "Cobalt server $server responded with code: ${response.code}")
                     }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error resolving via Cobalt on endpoint $endpoint", e)
                 }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error resolving via Cobalt on server $server", e)
             }
         }
         return emptyList()
-    }
-
-    private fun extractYouTubeId(url: String): String? {
-        val pattern = Pattern.compile("(?:watch\\?v=|shorts/|youtu\\.be/|embed/|v/|/vi/)([a-zA-Z0-9_-]{11})")
-        val matcher = pattern.matcher(url)
-        return if (matcher.find()) matcher.group(1) else null
     }
 
     private fun tryExtractFromHtml(url: String): List<ResolvedMediaStream> {

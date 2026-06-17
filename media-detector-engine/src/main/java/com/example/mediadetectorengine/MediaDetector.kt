@@ -91,10 +91,23 @@ object MediaDetector {
 
     fun isSocialMediaUrl(url: String): Boolean {
         val lower = url.lowercase(Locale.ROOT)
-        return lower.contains("youtube.com") || lower.contains("youtu.be") ||
-               lower.contains("instagram.com") || lower.contains("facebook.com") ||
-               lower.contains("tiktok.com") || lower.contains("vimeo.com") ||
-               lower.contains("dailymotion.com") || lower.contains("pinterest.com")
+        // Only trigger YouTube if we are on an actual video watch, short, embed, or video URL path
+        val isYoutubeVideo = (lower.contains("youtube.com") || lower.contains("youtu.be")) && 
+                (lower.contains("watch?") || lower.contains("embed/") || lower.contains("/shorts/") || lower.contains("v=") || lower.contains("youtu.be/"))
+                
+        // Only trigger Instagram if we are on a reel or a specific post
+        val isInstagramMedia = lower.contains("instagram.com") && (lower.contains("/reels/") || lower.contains("/reel/") || lower.contains("/p/"))
+        
+        // Only trigger Facebook if it's an actual video watch, reel or post with media
+        val isFacebookVideo = lower.contains("facebook.com") && (lower.contains("/videos/") || lower.contains("/watch/") || lower.contains("/reel/") || lower.contains("/posts/"))
+        
+        // Only trigger TikTok if it's an actual video page
+        val isTiktokVideo = lower.contains("tiktok.com") && (lower.contains("/video/") || lower.contains("/v/"))
+        
+        // Other video sharing platforms
+        val isOtherVideo = lower.contains("vimeo.com/") || lower.contains("dailymotion.com/video/")
+        
+        return isYoutubeVideo || isInstagramMedia || isFacebookVideo || isTiktokVideo || isOtherVideo
     }
 
     fun detectFromUrl(url: String): DetectedMedia? {

@@ -16,6 +16,11 @@ import com.example.data.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
+import android.util.Log
+import com.example.searchengine.VoiceActionType
+import com.example.searchengine.VoiceCommandResult
+import com.example.searchengine.VoiceSearch
+import com.example.searchengine.SearchEngineImpl
 import okhttp3.Cache
 import okhttp3.OkHttpClient
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -65,6 +70,7 @@ data class TabState(
 
 data class BrowserUiState(
     val tabs: List<TabState> = emptyList(),
+    val collapsedGroupIds: Set<String> = emptySet(),
     val activeTabId: String = "",
     val isJavaScriptEnabled: Boolean = true,
     val isHardwareAccelerationEnabled: Boolean = true,
@@ -140,7 +146,49 @@ data class BrowserUiState(
     val translateTargetLang: String = "English",
     val translateTargetLangCode: String = "en",
     val originalTranslationUrl: String = "",
-    val autoTranslateEnabled: Boolean = false
+    val autoTranslateEnabled: Boolean = false,
+    val isTabsListView: Boolean = false,
+    val isCustomTabOrder: Boolean = true,
+    
+    // Orion Voice Assistant properties
+    val isOrionListening: Boolean = false,
+    val orionTranscript: String = "Listening...",
+    val orionRmsdB: Float = 0f,
+    val isOrionOverlayVisible: Boolean = false,
+    val orionErrorMessage: String? = null,
+    val historySearchQuery: String = "",
+    val orionVoiceHistory: List<VoiceHistoryEntry> = emptyList(),
+    val orionVoiceNotes: List<VoiceNote> = emptyList(),
+    val orionVoiceActiveLanguage: String = "English",
+    val orionVoiceActiveLanguageCode: String = "en-US",
+    val orionVoiceAutoDetectLanguage: Boolean = true,
+    val orionVoiceChatSessions: List<VoiceChatMessage> = emptyList(),
+    val orionVoiceWakeWordEnabled: Boolean = false,
+    val orionVoiceActiveMode: String = "Assistant", // "Assistant", "Notes", "Chat", "Saved"
+    val orionNoteFormat: String = "Text" // "Text", "Markdown", "Browser"
+)
+
+data class VoiceHistoryEntry(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val text: String,
+    val type: String, // "command", "search", "transcript", "chat"
+    val timestamp: Long = System.currentTimeMillis()
+)
+
+data class VoiceNote(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val originalTranscript: String,
+    val noteContent: String,
+    val format: String, // "Text", "Markdown", "Browser"
+    val timestamp: Long = System.currentTimeMillis(),
+    val title: String = ""
+)
+
+data class VoiceChatMessage(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val role: String, // "user", "assistant"
+    val text: String,
+    val timestamp: Long = System.currentTimeMillis()
 )
 
 data class ActiveViewerFile(
@@ -185,6 +233,15 @@ class BrowserViewModel(
     val extensionManager = com.example.extensionengine.ExtensionManager(application, this)
     val permissionEngine: com.example.permissionengine.PermissionEngine = com.example.permissionengine.PermissionEngineImpl(application)
     val translateManager = com.example.translateengine.TranslateManager(application)
+
+    val normalSessionStore = NormalSessionStore(application, this)
+    val incognitoSessionStore = IncognitoSessionStore()
+    val normalCookieStore = NormalCookieStore(application)
+    val incognitoCookieStore = IncognitoCookieStore()
+    val normalCacheStore = NormalCacheStore()
+    val incognitoCacheStore = IncognitoCacheStore()
+    val normalHistoryStore = NormalHistoryStore(repository)
+    val incognitoHistoryStore = IncognitoHistoryStore()
 
     private val _uiState = MutableStateFlow(
         BrowserUiState(
@@ -264,7 +321,6 @@ class BrowserViewModel(
     // SwiftBrowser Advanced Professional Download Engine
     val customDownloadEngine = com.example.downloadengine.DownloadManagerImpl(getApplication())
     val detectedMediaCustom = androidx.compose.runtime.mutableStateOf<com.example.mediadetectorengine.DetectedMedia?>(null)
-    val youtubeDetectionEngine = com.example.browser.YouTubeDetectionEngine()
     val showDownloadDialogCustom = androidx.compose.runtime.mutableStateOf(false)
 
     val downloads: StateFlow<List<DownloadItem>> = repository.downloads
@@ -282,6 +338,13 @@ class BrowserViewModel(
     private var ttsEngine: android.speech.tts.TextToSpeech? = null
     private var ttsSegments = listOf<String>()
     private var currentTtsSegmentIndex = 0
+    var afterSpeakAction: (() -> Unit)? = null
+    var lastVoiceCommandType: String? = null
+    var conversationalFollowUpType: String? = null
+    private var assistantActivationManager: com.example.browser.voiceengine.AssistantActivationManager? = null
+    private var activeSessionJob: kotlinx.coroutines.Job? = null
+    private var sessionEndTime: Long = 0L
+    private var isActiveSessionRunning = false
     private val sslDomainsToIgnore = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
     init {
@@ -389,20 +452,36 @@ class BrowserViewModel(
             ttsEngine = android.speech.tts.TextToSpeech(application) { status ->
                 if (status == android.speech.tts.TextToSpeech.SUCCESS) {
                     ttsEngine?.language = java.util.Locale.getDefault()
+                    setupTtsProgressListener()
                 }
             }
         } catch (e: Exception) {
             e.printStackTrace()
         }
 
-        // Sync settings from PreferenceManager on startup
-        _uiState.update {
-            it.copy(
-                isJavaScriptEnabled = prefs.isJavaScriptEnabled,
-                isHardwareAccelerationEnabled = prefs.isHardwareAccelerationEnabled,
-                newTabWallpaper = prefs.newTabWallpaper,
-                readerFontSize = prefs.readerFontSize
-            )
+        // Sync settings from PreferenceManager
+        viewModelScope.launch {
+            combine(
+                prefs.isJavaScriptEnabled,
+                prefs.isHardwareAccelerationEnabled,
+                prefs.newTabWallpaper,
+                prefs.readerFontSize
+            ) { js, hw, bg, size ->
+                _uiState.update {
+                    it.copy(
+                        isJavaScriptEnabled = js,
+                        isHardwareAccelerationEnabled = hw,
+                        newTabWallpaper = bg,
+                        readerFontSize = size
+                    )
+                }
+                // Apply update to active WebViews
+                _uiState.value.tabs.forEach { tab ->
+                    webViewMap[tab.id]?.let { webView ->
+                        applyWebViewSettings(webView, js, hw, tab.isDesktopMode, tab.isIncognito)
+                    }
+                }
+            }.collect()
         }
 
         // Register Media Notification Receiver listener to respond dynamically to system/notification media intents
@@ -427,6 +506,25 @@ class BrowserViewModel(
         restoreTabsState()
         loadArticlesForCategory("For You", false)
         refreshSettings()
+        loadOrionVoiceState()
+
+        try {
+            assistantActivationManager = com.example.browser.voiceengine.AssistantActivationManager(application) { command ->
+                viewModelScope.launch(Dispatchers.Main) {
+                    // Enter Mode 2 (Active Listening Mode) immediately
+                    startOrionVoiceListening(application)
+
+                    if (command != null && command.trim().isNotEmpty()) {
+                        val parsed = com.example.browser.voiceengine.IntentEngine.determineIntent(command)
+                        val actionRouter = com.example.browser.voiceengine.ActionRouter(this@BrowserViewModel)
+                        actionRouter.executeIntent(parsed)
+                    }
+                }
+            }
+            assistantActivationManager?.startListening()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     fun refreshSettings() {
@@ -560,6 +658,47 @@ class BrowserViewModel(
             state.copy(tabs = updatedTabs)
         }
         saveTabsState()
+    }
+
+    fun collapseGroup(groupId: String) {
+        _uiState.update { state ->
+            state.copy(collapsedGroupIds = state.collapsedGroupIds + groupId)
+        }
+        saveTabsState()
+    }
+
+    fun expandGroup(groupId: String) {
+        _uiState.update { state ->
+            state.copy(collapsedGroupIds = state.collapsedGroupIds - groupId)
+        }
+        saveTabsState()
+    }
+
+    fun deleteGroup(groupId: String) {
+        val tabsInGroup = _uiState.value.tabs.filter { it.groupId == groupId }
+        tabsInGroup.forEach { destroyTabWebView(it.id) }
+        
+        _uiState.update { state ->
+            val updatedTabs = state.tabs.filter { it.groupId != groupId }
+            val newActiveGroup = state.collapsedGroupIds - groupId
+            val remainingIds = updatedTabs.map { it.id }
+            val newActiveTabId = if (remainingIds.contains(state.activeTabId)) {
+                state.activeTabId
+            } else {
+                remainingIds.firstOrNull() ?: ""
+            }
+            state.copy(
+                tabs = updatedTabs,
+                collapsedGroupIds = newActiveGroup,
+                activeTabId = newActiveTabId
+            )
+        }
+        saveTabsState()
+        
+        // reopen empty tab if all closed
+        if (_uiState.value.tabs.isEmpty()) {
+            addNewTab()
+        }
     }
 
     fun addNewTabInGroupById(groupId: String, isIncognito: Boolean = false) {
@@ -723,9 +862,17 @@ class BrowserViewModel(
         tabHistory.remove(tabId)
         val currentState = _uiState.value
         val tabs = currentState.tabs
+        val tabToClose = tabs.find { it.id == tabId }
+        val isIncog = tabToClose?.isIncognito == true
+
         if (tabs.size <= 1) {
             // If it's the last tab, close then reopen an empty new tab
             destroyTabWebView(tabId)
+            if (isIncog) {
+                incognitoCookieStore.clearCookies()
+                incognitoCacheStore.clearAllIncognitoCache(emptyList())
+                incognitoSessionStore.clearSession()
+            }
             _uiState.update { state ->
                 state.copy(tabs = emptyList(), activeTabId = "")
             }
@@ -735,6 +882,14 @@ class BrowserViewModel(
 
         val tabIndex = tabs.indexOfFirst { it.id == tabId }
         val updatedTabs = tabs.filter { it.id != tabId }
+        
+        // If it was incognito, and no other incognito tabs are left, do complete wipe
+        if (isIncog && !updatedTabs.any { it.isIncognito }) {
+            incognitoCookieStore.clearCookies()
+            incognitoCacheStore.clearAllIncognitoCache(emptyList())
+            incognitoSessionStore.clearSession()
+        }
+
         val newSelection = if (currentState.activeTabId == tabId) {
             val nextIndex = if (tabIndex < updatedTabs.size) tabIndex else updatedTabs.size - 1
             updatedTabs[nextIndex].id
@@ -808,30 +963,10 @@ class BrowserViewModel(
                 return
             }
 
-            // Secure type checking with try-catch to prevent SecurityExceptions/PermissionDenials
-            var mime = type ?: ""
-            if (mime.isEmpty() || mime == "*/*") {
-                try {
-                    mime = context.contentResolver.getType(dataUri) ?: ""
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-            }
-
-            // Fallback to extract original file name from the URI itself
+            var mime = type ?: context.contentResolver.getType(dataUri) ?: ""
             var name = "External_File"
-            try {
-                dataUri.lastPathSegment?.let { segment ->
-                    val lastSlash = segment.substringAfterLast("/")
-                    if (lastSlash.isNotEmpty()) {
-                        name = lastSlash
-                    }
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
 
-            // Overwrite name if the ContentResolver query succeeds
+            // Query name from ContentResolver
             try {
                 context.contentResolver.query(dataUri, null, null, null, null)?.use { cursor ->
                     val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
@@ -846,15 +981,14 @@ class BrowserViewModel(
                 e.printStackTrace()
             }
 
-            // Deduce mime type from file extension if empty or indeterminate (including generic application/octet-stream)
-            if (mime.isEmpty() || mime == "*/*" || mime == "application/octet-stream") {
+            // Deduce mime type from file extension if empty or indeterminate
+            if (mime.isEmpty() || mime == "*/*") {
                 val ext = name.substringAfterLast(".").lowercase()
                 mime = when (ext) {
                     "mp4", "mkv", "3gp", "avi", "webm" -> "video/*"
                     "mp3", "wav", "ogg", "aac", "m4a", "flac" -> "audio/*"
                     "pdf" -> "application/pdf"
                     "html", "htm" -> "text/html"
-                    "java", "kt", "xml", "json", "js", "css", "txt", "md", "properties", "gradle", "kts", "c", "cpp", "h" -> "text/plain"
                     else -> mime.takeIf { it.isNotEmpty() } ?: "*/*"
                 }
             }
@@ -873,7 +1007,18 @@ class BrowserViewModel(
                 }
             }
 
-            // HTML files fall through to the editor overlay for editing, save as PDF, and save as image!
+            // HTML files can be launched directly inside the WebView!
+            if (mime.contains("html", ignoreCase = true)) {
+                try {
+                    val input = context.contentResolver.openInputStream(dataUri)
+                    val text = input?.bufferedReader()?.use { it.readText() } ?: ""
+                    addNewTab(url = "data:text/html;charset=utf-8," + android.net.Uri.encode(text))
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    addNewTab(url = dataUri.toString())
+                }
+                return
+            }
 
             val safeName = name.replace("/", "_").replace("\\", "_")
             _uiState.update {
@@ -898,6 +1043,37 @@ class BrowserViewModel(
                 addNewTab(url = url)
             }
         }
+
+        if (intent.getBooleanExtra("WAKE_WORD_TRIGGERED", false)) {
+            val command = intent.getStringExtra("COMMAND_PAYLOAD")
+            _uiState.update { it.copy(isOrionOverlayVisible = true) }
+            if (command.isNullOrBlank()) {
+                playVoiceAssistantResponseSpoken("Yes, I am listening")
+                viewModelScope.launch {
+                    kotlinx.coroutines.delay(650L)
+                    startOrionVoiceListening(context)
+                }
+            } else {
+                _uiState.update { it.copy(orionTranscript = command, isOrionListening = false, orionRmsdB = 0f) }
+                viewModelScope.launch {
+                    val hasWake = command.lowercase().contains("orion")
+                    val type = if (hasWake) "command" else "search"
+                    val historyItem = VoiceHistoryEntry(text = command, type = type)
+                    _uiState.update { it.copy(orionVoiceHistory = it.orionVoiceHistory + historyItem) }
+                    saveOrionVoiceState()
+                    try {
+                        val actionRouter = ActionRouter(this@BrowserViewModel)
+                        val commandRouter = CommandRouter(getApplication(), actionRouter)
+                        TranscriptManager.updateTranscript(command)
+                        commandRouter.routeCommand(command)
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        val parsed = com.example.searchengine.VoiceSearch.parseVoiceCommand(command)
+                        executeVoiceCommandResult(parsed)
+                    }
+                }
+            }
+        }
     }
 
     fun saveTabsState() {
@@ -916,14 +1092,22 @@ class BrowserViewModel(
                     put("title", tab.title)
                     put("isDesktopMode", tab.isDesktopMode)
                     put("parentTabId", tab.parentTabId)
+                    put("groupId", tab.groupId)
+                    put("groupName", tab.groupName)
+                    put("groupColor", tab.groupColor)
+                    put("lastActiveTime", tab.lastActiveTime)
                 }
                 jsonArray.put(obj)
             }
+            
+            val collapsedArray = org.json.JSONArray()
+            currentState.collapsedGroupIds.forEach { collapsedArray.put(it) }
             
             val prefs = getApplication<Application>().getSharedPreferences("orion_tab_state", Context.MODE_PRIVATE)
             prefs.edit().apply {
                 putString("saved_tabs_list", jsonArray.toString())
                 putString("active_tab_id", currentState.activeTabId)
+                putString("collapsed_groups_list", collapsedArray.toString())
                 apply()
             }
         } catch (e: Exception) {
@@ -932,11 +1116,33 @@ class BrowserViewModel(
     }
 
     fun restoreTabsState() {
+        val prefs = getApplication<Application>().getSharedPreferences("orion_tab_state", Context.MODE_PRIVATE)
+        val isListViewSaved = prefs.getBoolean("is_tabs_list_view", false)
+        val isCustomOrderSaved = prefs.getBoolean("is_custom_tab_order", true)
+        
+        val collapsedGroups = mutableSetOf<String>()
+        val collapsedStr = prefs.getString("collapsed_groups_list", null)
+        if (!collapsedStr.isNullOrEmpty()) {
+            try {
+                val collapsedArray = org.json.JSONArray(collapsedStr)
+                for (i in 0 until collapsedArray.length()) {
+                    collapsedGroups.add(collapsedArray.getString(i))
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        _uiState.update { state ->
+            state.copy(
+                isTabsListView = isListViewSaved,
+                isCustomTabOrder = isCustomOrderSaved,
+                collapsedGroupIds = collapsedGroups
+            )
+        }
+
         try {
-            val prefs = getApplication<Application>().getSharedPreferences("orion_tab_state", Context.MODE_PRIVATE)
             val savedListStr = prefs.getString("saved_tabs_list", null)
-            val activeTabId = prefs.getString("active_tab_id", "")
-            
             if (!savedListStr.isNullOrEmpty()) {
                 val jsonArray = org.json.JSONArray(savedListStr)
                 val restoredTabs = mutableListOf<TabState>()
@@ -947,6 +1153,10 @@ class BrowserViewModel(
                     val title = obj.optString("title", "New Tab")
                     val isDesktopMode = obj.optBoolean("isDesktopMode", false)
                     val parentTabId = if (obj.has("parentTabId")) obj.optString("parentTabId") else null
+                    val groupId = if (obj.has("groupId")) obj.optString("groupId", null) else null
+                    val groupName = if (obj.has("groupName")) obj.optString("groupName", null) else null
+                    val groupColor = if (obj.has("groupColor")) obj.optLong("groupColor") else null
+                    val lastActiveTime = obj.optLong("lastActiveTime", System.currentTimeMillis())
                     
                     restoredTabs.add(
                         TabState(
@@ -955,7 +1165,11 @@ class BrowserViewModel(
                             title = title,
                             isDesktopMode = isDesktopMode,
                             isIncognito = false,
-                            parentTabId = if (parentTabId.isNullOrEmpty()) null else parentTabId
+                            parentTabId = if (parentTabId.isNullOrEmpty() || parentTabId == "null") null else parentTabId,
+                            groupId = if (groupId.isNullOrEmpty() || groupId == "null") null else groupId,
+                            groupName = if (groupName.isNullOrEmpty() || groupName == "null") null else groupName,
+                            groupColor = if (groupColor == 0L) null else groupColor,
+                            lastActiveTime = lastActiveTime
                         )
                     )
                 }
@@ -967,7 +1181,10 @@ class BrowserViewModel(
                         state.copy(
                             tabs = restoredTabs,
                             activeTabId = finalActiveId,
-                            currentInputUrl = if (activeTab?.url == "orion://newtab") "" else (activeTab?.url ?: "")
+                            currentInputUrl = if (activeTab?.url == "orion://newtab") "" else (activeTab?.url ?: ""),
+                            isTabsListView = isListViewSaved,
+                            isCustomTabOrder = isCustomOrderSaved,
+                            collapsedGroupIds = collapsedGroups
                         )
                     }
                     return
@@ -979,6 +1196,35 @@ class BrowserViewModel(
         
         // Default startup tab
         addNewTab()
+    }
+
+    fun setTabsListView(isList: Boolean) {
+        _uiState.update { it.copy(isTabsListView = isList) }
+        val prefs = getApplication<Application>().getSharedPreferences("orion_tab_state", Context.MODE_PRIVATE)
+        prefs.edit().putBoolean("is_tabs_list_view", isList).apply()
+    }
+
+    fun setCustomTabOrder(isCustom: Boolean) {
+        _uiState.update { it.copy(isCustomTabOrder = isCustom) }
+        val prefs = getApplication<Application>().getSharedPreferences("orion_tab_state", Context.MODE_PRIVATE)
+        prefs.edit().putBoolean("is_custom_tab_order", isCustom).apply()
+    }
+
+    fun moveTab(fromTabId: String, toTabId: String) {
+        _uiState.update { state ->
+            val tabs = state.tabs
+            val fromIndex = tabs.indexOfFirst { it.id == fromTabId }
+            val toIndex = tabs.indexOfFirst { it.id == toTabId }
+            if (fromIndex != -1 && toIndex != -1) {
+                val mutableTabs = tabs.toMutableList()
+                val item = mutableTabs.removeAt(fromIndex)
+                mutableTabs.add(toIndex, item)
+                state.copy(tabs = mutableTabs)
+            } else {
+                state
+            }
+        }
+        saveTabsState()
     }
 
     fun resetFilePickerState() {
@@ -1132,7 +1378,8 @@ class BrowserViewModel(
                 this,
                 _uiState.value.isJavaScriptEnabled,
                 _uiState.value.isHardwareAccelerationEnabled,
-                currentTab?.isDesktopMode ?: false
+                currentTab?.isDesktopMode ?: false,
+                currentTab?.isIncognito ?: false
             )
             extensionManager.setupWebView(this, tabId)
 
@@ -1153,28 +1400,6 @@ class BrowserViewModel(
                 ): WebResourceResponse? {
                     return try {
                         val urlStr = request?.url?.toString()
-                        if (urlStr != null && urlStr.contains("youtube.com/ytpro_cdn/")) {
-                            var modifiedUrl = urlStr
-                            if (urlStr.contains("youtube.com/ytpro_cdn/esm")) {
-                                modifiedUrl = urlStr.replace("youtube.com/ytpro_cdn/esm", "esm.sh")
-                            } else if (urlStr.contains("youtube.com/ytpro_cdn/npm")) {
-                                modifiedUrl = urlStr.replace("youtube.com/ytpro_cdn", "cdn.jsdelivr.net")
-                            }
-                            android.util.Log.d("YTProIntercept", "Intercepted YTPro stream CDN URL: $urlStr -> $modifiedUrl")
-                            
-                            val conn = java.net.URL(modifiedUrl).openConnection() as java.net.HttpURLConnection
-                            conn.requestMethod = "GET"
-                            conn.connectTimeout = 10000
-                            conn.readTimeout = 15000
-                            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                            val mimeType = if (urlStr.endsWith(".js") || urlStr.contains(".js") || urlStr.contains("/npm/")) "application/javascript" else "text/html"
-                            return WebResourceResponse(
-                                mimeType,
-                                "UTF-8",
-                                conn.inputStream
-                            )
-                        }
-
                         if (urlStr != null && (urlStr.startsWith("chrome-extension://") || urlStr.startsWith("orion-extension://"))) {
                             val interceptRes = com.example.extensionengine.ExtensionDirectoryResolver.handleExtensionRequest(context, urlStr)
                             if (interceptRes != null) return interceptRes
@@ -1217,9 +1442,6 @@ class BrowserViewModel(
                     try {
                         super.onPageStarted(view, url, favicon)
                         detectedMediaCustom.value = null
-                        if (url == null || !youtubeDetectionEngine.isYouTubeUrl(url)) {
-                            youtubeDetectionEngine.updateDetectedVideo(null)
-                        }
                         isUASwitchPending = false
                         if (url != null && view != null && !url.startsWith("orion://")) {
                             val host = android.net.Uri.parse(url).host
@@ -1396,6 +1618,11 @@ class BrowserViewModel(
                                     document.head.appendChild(newMeta);
                                 }
                             """.trimIndent(), null)
+                        }
+
+                        // Inject Orion Compatibility Engine layers
+                        if (view != null && url != null) {
+                            com.example.browser.OrionCompatibilityEngine.injectCompatibilityLayer(view, url, context)
                         }
 
                         // Inject Simulated Chrome/User extensions upon page load complete
@@ -1834,9 +2061,13 @@ class BrowserViewModel(
                             }
                         }
 
-                        if (url != null && url != "orion://newtab" && url != "orion://newtab-incognito" && !url.startsWith("orion://") && !isTabIncognito) {
+                        if (url != null && url != "orion://newtab" && url != "orion://newtab-incognito" && !url.startsWith("orion://")) {
                             viewModelScope.launch {
-                                repository.addHistory(url, title)
+                                if (isTabIncognito) {
+                                    incognitoHistoryStore.addHistory(url, title)
+                                } else {
+                                    normalHistoryStore.addHistory(url, title)
+                                }
                             }
                         }
 
@@ -2317,25 +2548,6 @@ class BrowserViewModel(
                     }
                 }
             }, "OrionJS")
-
-            addJavascriptInterface(
-                youtubeDetectionEngine.YouTubeDetectionBridge { videoInfo ->
-                    viewModelScope.launch(Dispatchers.Main) {
-                        youtubeDetectionEngine.updateDetectedVideo(videoInfo)
-                    }
-                },
-                "YouTubeDetectionBridge"
-            )
-
-            addJavascriptInterface(
-                YTProAndroidBridge(context, this, customDownloadEngine),
-                "Android"
-            )
-
-            addJavascriptInterface(
-                YouTubeVideoDownloaderBridge(context),
-                "YouTubeVideoDownloader"
-            )
             
             // Register native Web Notification Bridge
             addJavascriptInterface(
@@ -2394,7 +2606,8 @@ class BrowserViewModel(
             webView,
             _uiState.value.isJavaScriptEnabled,
             _uiState.value.isHardwareAccelerationEnabled,
-            currentTab?.isDesktopMode ?: false
+            currentTab?.isDesktopMode ?: false,
+            currentTab?.isIncognito ?: false
         )
 
         // If the URL is already present in TabState, load it initially
@@ -2414,7 +2627,7 @@ class BrowserViewModel(
         return webView
     }
 
-    private fun applyWebViewSettings(webView: WebView, jsEnabled: Boolean, hwEnabled: Boolean, isDesktop: Boolean = false) {
+    private fun applyWebViewSettings(webView: WebView, jsEnabled: Boolean, hwEnabled: Boolean, isDesktop: Boolean = false, isIncognito: Boolean = false) {
         webView.settings.apply {
             javaScriptEnabled = jsEnabled
             domStorageEnabled = true
@@ -2444,10 +2657,12 @@ class BrowserViewModel(
             }
         }
 
-        try {
-            android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
-        } catch (e: Exception) {
-            e.printStackTrace()
+        if (isIncognito) {
+            incognitoCookieStore.setupCookies(webView)
+            incognitoCacheStore.setupCache(webView)
+        } else {
+            normalCookieStore.acceptCookies(webView)
+            normalCacheStore.setupCache(webView)
         }
 
         if (hwEnabled) {
@@ -2981,7 +3196,7 @@ class BrowserViewModel(
         }
     }
 
-    fun deleteHistoryItem(id: Long) {
+    fun deleteHistoryItem(id: Int) {
         viewModelScope.launch {
             repository.deleteHistoryItem(id)
         }
@@ -3533,7 +3748,7 @@ class BrowserViewModel(
             results.addAll(matches)
             
             // 2. Call Gemini API to query online CWS recommendations dynamically if API key is present
-            val apiKey = com.example.browser.BuildConfig.GEMINI_API_KEY
+            val apiKey = com.example.BuildConfig.GEMINI_API_KEY
             if (apiKey.isNotBlank() && apiKey != "placeholder_gemini_key") {
                 try {
                     val prompt = """
@@ -4583,11 +4798,29 @@ class BrowserViewModel(
 
             override fun onDone(utteranceId: String?) {
                 viewModelScope.launch(Dispatchers.Main) {
-                    playNextTtsSegment()
+                    if (utteranceId == "orion_speak") {
+                        val action = afterSpeakAction
+                        afterSpeakAction = null
+                        if (action != null) {
+                            action.invoke()
+                        }
+                    } else if (utteranceId?.startsWith("segment_") == true) {
+                        playNextTtsSegment()
+                    }
                 }
             }
 
-            override fun onError(utteranceId: String?) {}
+            override fun onError(utteranceId: String?) {
+                viewModelScope.launch(Dispatchers.Main) {
+                    if (utteranceId == "orion_speak") {
+                        val action = afterSpeakAction
+                        afterSpeakAction = null
+                        if (action != null) {
+                            action.invoke()
+                        }
+                    }
+                }
+            }
         })
     }
 
@@ -4773,6 +5006,11 @@ class BrowserViewModel(
         val tabs = _uiState.value.tabs
         val (incognito, normal) = tabs.partition { it.isIncognito }
         incognito.forEach { destroyTabWebView(it.id) }
+        
+        incognitoCookieStore.clearCookies()
+        incognitoCacheStore.clearAllIncognitoCache(emptyList())
+        incognitoSessionStore.clearSession()
+
         _uiState.update { state ->
             state.copy(
                 tabs = normal,
@@ -5309,9 +5547,894 @@ class BrowserViewModel(
         }
     }
 
+    // --- ORION VOICE INTELLIGENCE ENGINE V3 SYSTEM ---
+    private var speechRecognizer: android.speech.SpeechRecognizer? = null
+    private var wakeWordJob: kotlinx.coroutines.Job? = null
+
+    fun startOrionVoiceListening(context: android.content.Context) {
+        Log.i("OrionVoiceV3", "Entering Active Listening Mode (Mode 2) for 60-second session.")
+        isActiveSessionRunning = true
+        sessionEndTime = System.currentTimeMillis() + 60000L
+        
+        // Coordinated stop of Hotword Service (Mode 1) to completely free microphone
+        try {
+            com.example.browser.voiceengine.OrionHotwordService.stopService(context)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        // Run the 60 seconds monitor
+        activeSessionJob?.cancel()
+        activeSessionJob = viewModelScope.launch(Dispatchers.Main) {
+            while (isActiveSessionRunning) {
+                kotlinx.coroutines.delay(1000L)
+                if (System.currentTimeMillis() > sessionEndTime) {
+                    Log.i("OrionVoiceV3", "Active session 60-seconds window timed out. Going back to sleep.")
+                    dismissOrionVoiceOverlay()
+                }
+            }
+        }
+
+        startActiveSpeechRecognizer(context)
+    }
+
+    private fun startActiveSpeechRecognizer(context: android.content.Context) {
+        if (!isActiveSessionRunning) return
+        stopActiveSpeechRecognizer()
+
+        _uiState.update {
+            it.copy(
+                isOrionListening = true,
+                orionTranscript = if (it.orionVoiceActiveMode == "Chat") "Speak to Orion Chat..." else "Listening (60s session)...",
+                orionErrorMessage = null,
+                isOrionOverlayVisible = true,
+                orionRmsdB = 0f
+            )
+        }
+
+        try {
+            val recognizer = android.speech.SpeechRecognizer.createSpeechRecognizer(context)
+            speechRecognizer = recognizer
+
+            val intent = android.content.Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(android.speech.RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                val langCode = _uiState.value.orionVoiceActiveLanguageCode
+                putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, langCode)
+                putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, langCode)
+                putExtra(android.speech.RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, langCode)
+            }
+
+            recognizer.setRecognitionListener(object : android.speech.RecognitionListener {
+                override fun onReadyForSpeech(params: android.os.Bundle?) {
+                    val promptText = when (_uiState.value.orionVoiceActiveMode) {
+                        "Notes" -> "Dictate your note..."
+                        "Chat" -> "Orion is listening..."
+                        else -> "How can Orion help you?"
+                    }
+                    _uiState.update { it.copy(orionTranscript = promptText, orionRmsdB = 0.1f) }
+                }
+
+                override fun onBeginningOfSpeech() {
+                    _uiState.update { it.copy(orionTranscript = "Hearing...") }
+                }
+
+                override fun onRmsChanged(rmsdB: Float) {
+                    val normalized = (rmsdB + 2f) / 10f
+                    _uiState.update { it.copy(orionRmsdB = normalized.coerceIn(0f, 1f)) }
+                }
+
+                override fun onBufferReceived(buffer: ByteArray?) {}
+
+                override fun onEndOfSpeech() {
+                    _uiState.update { it.copy(orionTranscript = "Analyzing...") }
+                }
+
+                override fun onError(error: Int) {
+                    val msg = when (error) {
+                        android.speech.SpeechRecognizer.ERROR_AUDIO -> "Audio recording error"
+                        android.speech.SpeechRecognizer.ERROR_CLIENT -> "Client error"
+                        android.speech.SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Permissions required"
+                        android.speech.SpeechRecognizer.ERROR_NETWORK -> "Network issue"
+                        android.speech.SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Network timed out"
+                        android.speech.SpeechRecognizer.ERROR_NO_MATCH -> "Waiting for speech..."
+                        android.speech.SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Mic is busy"
+                        android.speech.SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Listening timed out..."
+                        else -> "Error ($error)"
+                    }
+                    Log.d("OrionVoiceV3", "Active recognizer error: $msg ($error)")
+                    _uiState.update { it.copy(orionRmsdB = 0f) }
+
+                    // Silently restart recognizer if we are still within the 60-seconds window
+                    if (isActiveSessionRunning && System.currentTimeMillis() < sessionEndTime) {
+                        viewModelScope.launch {
+                            kotlinx.coroutines.delay(500L)
+                            if (isActiveSessionRunning) {
+                                startActiveSpeechRecognizer(context)
+                            }
+                        }
+                    }
+                }
+
+                override fun onResults(results: android.os.Bundle?) {
+                    val matches = results?.getStringArrayList(android.speech.SpeechRecognizer.RESULTS_RECOGNITION)
+                    if (!matches.isNullOrEmpty()) {
+                        val spokenText = matches[0]
+                        _uiState.update { it.copy(orionTranscript = spokenText, orionRmsdB = 0f, isOrionListening = false) }
+
+                        // Reset 60s active session timeout since we got user input!
+                        sessionEndTime = System.currentTimeMillis() + 60000L
+
+                        // Conversational Follow-up Check
+                        if (conversationalFollowUpType == "music") {
+                            conversationalFollowUpType = null
+                            val historyItem = VoiceHistoryEntry(text = spokenText, type = "command")
+                            _uiState.update { it.copy(orionVoiceHistory = it.orionVoiceHistory + historyItem) }
+                            saveOrionVoiceState()
+                            
+                            val promptMessage = "Opening YouTube and searching for $spokenText."
+                            playVoiceAssistantResponseSpoken(promptMessage) {
+                                try {
+                                    val searchUrl = "https://www.youtube.com/results?search_query=" + java.net.URLEncoder.encode(spokenText, "UTF-8")
+                                    navigateTo(searchUrl)
+                                } catch (e: Exception) {
+                                    e.printStackTrace()
+                                }
+                                dismissOrionVoiceOverlay()
+                            }
+                            return
+                        }
+
+                        // Conversational Context Check (YouTube search focus)
+                        val activeUrl = _uiState.value.tabs.find { it.id == _uiState.value.activeTabId }?.url ?: ""
+                        val isYouTubeContext = lastVoiceCommandType == "OPEN_YOUTUBE" || activeUrl.contains("youtube.com")
+                        val lowerSpoken = spokenText.lowercase()
+                        
+                        if (isYouTubeContext && (lowerSpoken.startsWith("search ") || lowerSpoken.contains("songs"))) {
+                            val queryText = lowerSpoken.removePrefix("search").removePrefix("on youtube").trim()
+                            val promptMessage = "Searching $queryText on YouTube."
+                            playVoiceAssistantResponseSpoken(promptMessage) {
+                                try {
+                                    val searchUrl = "https://www.youtube.com/results?search_query=" + java.net.URLEncoder.encode(queryText, "UTF-8")
+                                    navigateTo(searchUrl)
+                                } catch (e: Exception) {
+                                    e.printStackTrace()
+                                }
+                                dismissOrionVoiceOverlay()
+                            }
+                            return
+                        }
+
+                        // Decide parsing and execution flow based on active mode
+                        when (_uiState.value.orionVoiceActiveMode) {
+                            "Notes" -> {
+                                val historyItem = VoiceHistoryEntry(text = spokenText, type = "transcript")
+                                _uiState.update { it.copy(orionVoiceHistory = it.orionVoiceHistory + historyItem) }
+                                saveOrionVoiceState()
+                                playVoiceAssistantResponseSpoken("Note transcribed")
+                            }
+                            "Chat" -> {
+                                processOrionChatModeResponse(spokenText)
+                            }
+                            else -> { // "Assistant" Command execution
+                                val hasWake = spokenText.lowercase().contains("orion")
+                                val type = if (hasWake) "command" else "search"
+                                val historyItem = VoiceHistoryEntry(text = spokenText, type = type)
+                                _uiState.update { it.copy(orionVoiceHistory = it.orionVoiceHistory + historyItem) }
+                                saveOrionVoiceState()
+
+                                try {
+                                    val actionRouter = ActionRouter(this@BrowserViewModel)
+                                    val commandRouter = CommandRouter(getApplication(), actionRouter)
+                                    TranscriptManager.updateTranscript(spokenText)
+                                    commandRouter.routeCommand(spokenText)
+                                } catch (e: Exception) {
+                                    e.printStackTrace()
+                                    // Fallback to existing search engine
+                                    val parsed = com.example.searchengine.VoiceSearch.parseVoiceCommand(spokenText)
+                                    executeVoiceCommandResult(parsed)
+                                }
+                            }
+                        }
+
+                        // Keep active session alive for multiple commands!
+                        if (isActiveSessionRunning) {
+                            viewModelScope.launch {
+                                kotlinx.coroutines.delay(1500L) // small delay to speak feedback if any
+                                if (isActiveSessionRunning) {
+                                    startActiveSpeechRecognizer(context)
+                                }
+                            }
+                        }
+                    } else {
+                        if (isActiveSessionRunning && System.currentTimeMillis() < sessionEndTime) {
+                            startActiveSpeechRecognizer(context)
+                        }
+                    }
+                }
+
+                override fun onPartialResults(partialResults: android.os.Bundle?) {
+                    val partialMatches = partialResults?.getStringArrayList(android.speech.SpeechRecognizer.RESULTS_RECOGNITION)
+                    if (!partialMatches.isNullOrEmpty()) {
+                        _uiState.update { it.copy(orionTranscript = partialMatches[0]) }
+                    }
+                }
+
+                override fun onEvent(eventType: Int, params: android.os.Bundle?) {}
+            })
+
+            recognizer.startListening(intent)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun stopActiveSpeechRecognizer() {
+        try {
+            speechRecognizer?.stopListening()
+            speechRecognizer?.destroy()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        speechRecognizer = null
+    }
+
+    fun stopOrionVoiceListening() {
+        isActiveSessionRunning = false
+        activeSessionJob?.cancel()
+        activeSessionJob = null
+        stopActiveSpeechRecognizer()
+        
+        _uiState.update { it.copy(isOrionListening = false, orionRmsdB = 0f) }
+    }
+
+    fun dismissOrionVoiceOverlay() {
+        stopOrionVoiceListening()
+        ttsEngine?.stop()
+        _uiState.update { it.copy(isOrionOverlayVisible = false, orionErrorMessage = null) }
+
+        // Coordinated restart of Mode 1 (Hotword Idle Mode) to go back to sleep
+         if (_uiState.value.orionVoiceWakeWordEnabled) {
+            try {
+                com.example.browser.voiceengine.OrionHotwordService.startService(getApplication())
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    fun playVoiceAssistantResponseSpoken(text: String, onSpeakDone: (() -> Unit)? = null) {
+        afterSpeakAction = onSpeakDone
+        val clean = text.replace(Regex("[*#_`]"), " ").take(400)
+        val params = android.os.Bundle()
+        params.putString(android.speech.tts.TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, "orion_speak")
+        ttsEngine?.speak(clean, android.speech.tts.TextToSpeech.QUEUE_FLUSH, params, "orion_speak")
+    }
+
+    // --- STATE MANAGEMENT AND SERIALIZATION ---
+    
+    fun setHistorySearchQuery(query: String) {
+        _uiState.update { it.copy(historySearchQuery = query) }
+    }
+    
+    fun setOrionVoiceActiveMode(mode: String) {
+        _uiState.update { it.copy(orionVoiceActiveMode = mode) }
+    }
+
+    fun setOrionVoiceActiveLanguage(name: String, code: String) {
+        _uiState.update { it.copy(orionVoiceActiveLanguage = name, orionVoiceActiveLanguageCode = code) }
+        saveOrionVoiceState()
+    }
+
+    fun setOrionNoteFormat(format: String) {
+        _uiState.update { it.copy(orionNoteFormat = format) }
+    }
+
+    fun saveCurrentVoiceNote(title: String = "") {
+        val transcript = _uiState.value.orionTranscript
+        if (transcript.isEmpty() || transcript == "Listening..." || transcript == "Hearing...") return
+        
+        val format = _uiState.value.orionNoteFormat
+        val timestamp = System.currentTimeMillis()
+        val finalTitle = if (title.isNotBlank()) title else {
+            "Voice Note ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(timestamp))}"
+        }
+        
+        val content = when (format) {
+            "Markdown" -> """
+                # $finalTitle
+                
+                *Transcribed via Orion Voice Intelligence V3*
+                *Date: ${java.util.Date(timestamp)}*
+                
+                ---
+                
+                $transcript
+                
+            """.trimIndent()
+            "Browser" -> """
+                Browser Dictation Context Note:
+                Source URL: ${_uiState.value.tabs.find { it.id == _uiState.value.activeTabId }?.url ?: "orion://newtab"}
+                
+                Transcript Content:
+                $transcript
+            """.trimIndent()
+            else -> transcript
+        }
+
+        val note = VoiceNote(
+            originalTranscript = transcript,
+            noteContent = content,
+            format = format,
+            timestamp = timestamp,
+            title = finalTitle
+        )
+
+        _uiState.update {
+            it.copy(
+                orionVoiceNotes = it.orionVoiceNotes + note,
+                orionTranscript = "Saved Note: \"$finalTitle\"!"
+            )
+        }
+        playVoiceAssistantResponseSpoken("Note saved as $format note")
+        saveOrionVoiceState()
+    }
+
+    fun deleteVoiceNote(id: String) {
+        _uiState.update { state ->
+            state.copy(orionVoiceNotes = state.orionVoiceNotes.filter { it.id != id })
+        }
+        saveOrionVoiceState()
+    }
+
+    fun clearVoiceHistory() {
+        _uiState.update { it.copy(orionVoiceHistory = emptyList()) }
+        saveOrionVoiceState()
+    }
+
+    fun clearVoiceChat() {
+        _uiState.update { it.copy(orionVoiceChatSessions = emptyList()) }
+        saveOrionVoiceState()
+    }
+
+    fun toggleOrionWakeWord() {
+        _uiState.update { state ->
+            val updated = !state.orionVoiceWakeWordEnabled
+            state.copy(orionVoiceWakeWordEnabled = updated)
+        }
+        saveOrionVoiceState()
+    }
+
+    fun processOrionChatModeResponse(spokenText: String) {
+        val userItem = VoiceChatMessage(role = "user", text = spokenText)
+        val chatHistory = _uiState.value.orionVoiceChatSessions + userItem
+        
+        _uiState.update { 
+            it.copy(
+                orionVoiceChatSessions = chatHistory,
+                orionTranscript = "Orion thinking...",
+                isOrionListening = false
+            )
+        }
+        
+        viewModelScope.launch {
+            try {
+                val isTranslateRequest = spokenText.lowercase().contains("translate") || spokenText.lowercase().contains("anuvad")
+                val basePrompt = if (isTranslateRequest) {
+                    val previousAssistantMsg = _uiState.value.orionVoiceChatSessions.lastOrNull { it.role == "assistant" }?.text ?: ""
+                    "The user wants you to translate standard text. Translate this previous response cleanly into the target requested language:\n\n\"$previousAssistantMsg\"\n\nOtherwise, translate this prompt: \"$spokenText\""
+                } else {
+                    spokenText
+                }
+
+                // Append active page context if requested
+                val finalPrompt = if (spokenText.contains("page") || spokenText.contains("site") || spokenText.contains("website") || spokenText.contains("article")) {
+                    var pageContent = "No page loaded"
+                    val activeId = _uiState.value.activeTabId
+                    val webView = webViewMap[activeId]
+                    if (webView != null) {
+                        val latch = java.util.concurrent.CountDownLatch(1)
+                        webView.post {
+                            webView.evaluateJavascript("document.body.innerText") { rawText ->
+                                pageContent = rawText ?: ""
+                                latch.countDown()
+                            }
+                        }
+                        latch.await(3, java.util.concurrent.TimeUnit.SECONDS)
+                    }
+                    "Use this webpage background text to contextually answer the prompt:\n$pageContent\n\nPrompt: $basePrompt"
+                } else {
+                    basePrompt
+                }
+
+                val aiResult = AISummaryEngine.chatSession(emptyList(), finalPrompt, AISettingsManager(getApplication()), getApplication())
+                val assistantItem = VoiceChatMessage(role = "assistant", text = aiResult)
+                
+                _uiState.update { 
+                    it.copy(
+                        orionVoiceChatSessions = chatHistory + assistantItem,
+                        orionTranscript = aiResult
+                    )
+                }
+                playVoiceAssistantResponseSpoken(aiResult) {
+                    startOrionVoiceListening(getApplication())
+                }
+                
+                // Save history log
+                val historyItem = VoiceHistoryEntry(text = spokenText, type = "chat")
+                _uiState.update { it.copy(orionVoiceHistory = it.orionVoiceHistory + historyItem) }
+                saveOrionVoiceState()
+            } catch (e: Exception) {
+                e.printStackTrace()
+                _uiState.update { it.copy(orionErrorMessage = "Chat response failed: ${e.message}") }
+            }
+        }
+    }
+
+    fun startOrionWakeWordMonitoring(context: android.content.Context) {
+        // No-op: background wake-word service monitoring is removed
+    }
+
+    private fun saveOrionVoiceState() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                // Save Voice Notes
+                val notesArray = org.json.JSONArray()
+                _uiState.value.orionVoiceNotes.forEach { note ->
+                    val obj = org.json.JSONObject()
+                    obj.put("id", note.id)
+                    obj.put("originalTranscript", note.originalTranscript)
+                    obj.put("noteContent", note.noteContent)
+                    obj.put("format", note.format)
+                    obj.put("timestamp", note.timestamp)
+                    obj.put("title", note.title)
+                    notesArray.put(obj)
+                }
+                prefs.setString("orion_voice_notes_v3", notesArray.toString())
+
+                // Save Voice History
+                val historyArray = org.json.JSONArray()
+                _uiState.value.orionVoiceHistory.forEach { h ->
+                    val obj = org.json.JSONObject()
+                    obj.put("id", h.id)
+                    obj.put("text", h.text)
+                    obj.put("type", h.type)
+                    obj.put("timestamp", h.timestamp)
+                    historyArray.put(obj)
+                }
+                prefs.setString("orion_voice_history_v3", historyArray.toString())
+
+                // Save Voice Chat Sessions
+                val chatArray = org.json.JSONArray()
+                _uiState.value.orionVoiceChatSessions.forEach { c ->
+                    val obj = org.json.JSONObject()
+                    obj.put("id", c.id)
+                    obj.put("role", c.role)
+                    obj.put("text", c.text)
+                    obj.put("timestamp", c.timestamp)
+                    chatArray.put(obj)
+                }
+                prefs.setString("orion_voice_chats_v3", chatArray.toString())
+                
+                // Save settings
+                prefs.setString("orion_voice_lang", _uiState.value.orionVoiceActiveLanguage)
+                prefs.setString("orion_voice_lang_code", _uiState.value.orionVoiceActiveLanguageCode)
+                prefs.setBoolean("orion_voice_auto_detect", _uiState.value.orionVoiceAutoDetectLanguage)
+                prefs.setBoolean("orion_voice_wakeword_enabled", _uiState.value.orionVoiceWakeWordEnabled)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    fun loadOrionVoiceState() {
+        try {
+            val notesStr = prefs.getString("orion_voice_notes_v3", "")
+            val loadedNotes = mutableListOf<VoiceNote>()
+            if (notesStr.isNotEmpty()) {
+                val array = org.json.JSONArray(notesStr)
+                for (i in 0 until array.length()) {
+                    val obj = array.getJSONObject(i)
+                    loadedNotes.add(VoiceNote(
+                        id = obj.optString("id", java.util.UUID.randomUUID().toString()),
+                        originalTranscript = obj.optString("originalTranscript", ""),
+                        noteContent = obj.optString("noteContent", ""),
+                        format = obj.optString("format", "Text"),
+                        timestamp = obj.optLong("timestamp", System.currentTimeMillis()),
+                        title = obj.optString("title", "")
+                    ))
+                }
+            }
+
+            val histStr = prefs.getString("orion_voice_history_v3", "")
+            val loadedHist = mutableListOf<VoiceHistoryEntry>()
+            if (histStr.isNotEmpty()) {
+                val array = org.json.JSONArray(histStr)
+                for (i in 0 until array.length()) {
+                    val obj = array.getJSONObject(i)
+                    loadedHist.add(VoiceHistoryEntry(
+                        id = obj.optString("id", java.util.UUID.randomUUID().toString()),
+                        text = obj.optString("text", ""),
+                        type = obj.optString("type", "command"),
+                        timestamp = obj.optLong("timestamp", System.currentTimeMillis())
+                    ))
+                }
+            }
+
+            val chatStr = prefs.getString("orion_voice_chats_v3", "")
+            val loadedChat = mutableListOf<VoiceChatMessage>()
+            if (chatStr.isNotEmpty()) {
+                val array = org.json.JSONArray(chatStr)
+                for (i in 0 until array.length()) {
+                    val obj = array.getJSONObject(i)
+                    loadedChat.add(VoiceChatMessage(
+                        id = obj.optString("id", java.util.UUID.randomUUID().toString()),
+                        role = obj.optString("role", "user"),
+                        text = obj.optString("text", ""),
+                        timestamp = obj.optLong("timestamp", System.currentTimeMillis())
+                    ))
+                }
+            }
+
+            _uiState.update {
+                it.copy(
+                    orionVoiceNotes = loadedNotes,
+                    orionVoiceHistory = loadedHist,
+                    orionVoiceChatSessions = loadedChat,
+                    orionVoiceActiveLanguage = prefs.getString("orion_voice_lang", "English"),
+                    orionVoiceActiveLanguageCode = prefs.getString("orion_voice_lang_code", "en-US"),
+                    orionVoiceAutoDetectLanguage = prefs.getBoolean("orion_voice_auto_detect", true),
+                    orionVoiceWakeWordEnabled = prefs.getBoolean("orion_voice_wakeword_enabled", true)
+                )
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun speakPageContentAloud(text: String) {
+        val sentences = text.split(Regex("[.!?\n]"))
+            .map { it.trim() }
+            .filter { it.length > 5 }
+            .take(50)
+            
+        if (sentences.isNotEmpty()) {
+            ttsSegments = sentences
+            currentTtsSegmentIndex = 0
+            _uiState.update {
+                it.copy(
+                    isTtsActive = true,
+                    isTtsPlaying = true,
+                    currentTtsText = sentences[0],
+                    currentTtsIndex = 0,
+                    totalTtsSegments = sentences.size
+                )
+            }
+            setupTtsProgressListener()
+            playTtsSegment(0)
+        }
+    }
+
+    fun extractPageTextForAI(callback: (String) -> Unit) {
+        val activeId = _uiState.value.activeTabId
+        val webView = webViewMap[activeId]
+        if (webView == null) {
+            callback("No active web page loaded.")
+            return
+        }
+        webView.evaluateJavascript(WebsiteContextExtractor.JS_EXTRACT_SCRIPT) { res ->
+            val context = WebsiteContextExtractor.parseJsonToContext(res)
+            callback(context.toFormattedPromptString())
+        }
+    }
+
+    fun executeVoiceCommandResult(result: com.example.searchengine.VoiceCommandResult) {
+        val payload = result.payload
+        Log.i("OrionAssistant", "Executing voice action: ${result.actionType} with payload: $payload")
+        _uiState.update { it.copy(orionTranscript = "Executing action: ${result.actionType}...") }
+        
+        viewModelScope.launch {
+            when (result.actionType) {
+                com.example.searchengine.VoiceActionType.BACK -> {
+                    val activeId = _uiState.value.activeTabId
+                    webViewMap[activeId]?.let {
+                        if (it.canGoBack()) {
+                            _uiState.update { state -> state.copy(orionTranscript = "Navigating back...") }
+                            playVoiceAssistantResponseSpoken("Going back")
+                            it.goBack()
+                            dismissOrionVoiceOverlay()
+                        } else {
+                            _uiState.update { state -> state.copy(orionErrorMessage = "Cannot go back: No history found") }
+                            playVoiceAssistantResponseSpoken("Nowhere to go back")
+                        }
+                    } ?: run {
+                        _uiState.update { state -> state.copy(orionErrorMessage = "No active page") }
+                    }
+                }
+                com.example.searchengine.VoiceActionType.FORWARD -> {
+                    val activeId = _uiState.value.activeTabId
+                    webViewMap[activeId]?.let {
+                        if (it.canGoForward()) {
+                            _uiState.update { state -> state.copy(orionTranscript = "Navigating forward...") }
+                            playVoiceAssistantResponseSpoken("Going forward")
+                            it.goForward()
+                            dismissOrionVoiceOverlay()
+                        } else {
+                            _uiState.update { state -> state.copy(orionErrorMessage = "Cannot go forward: No history found") }
+                            playVoiceAssistantResponseSpoken("Nowhere to go forward")
+                        }
+                    } ?: run {
+                        _uiState.update { state -> state.copy(orionErrorMessage = "No active page") }
+                    }
+                }
+                com.example.searchengine.VoiceActionType.REFRESH -> {
+                    val activeId = _uiState.value.activeTabId
+                    playVoiceAssistantResponseSpoken("Refreshing webpage")
+                    webViewMap[activeId]?.reload()
+                    dismissOrionVoiceOverlay()
+                }
+                com.example.searchengine.VoiceActionType.NEW_TAB -> {
+                    playVoiceAssistantResponseSpoken("New tab opened")
+                    addNewTab()
+                    dismissOrionVoiceOverlay()
+                }
+                com.example.searchengine.VoiceActionType.CLOSE_TAB -> {
+                    val activeId = _uiState.value.activeTabId
+                    playVoiceAssistantResponseSpoken("Tab closed")
+                    if (activeId.isNotEmpty()) {
+                        closeTab(activeId)
+                    }
+                    dismissOrionVoiceOverlay()
+                }
+                com.example.searchengine.VoiceActionType.OPEN_INCOGNITO -> {
+                    playVoiceAssistantResponseSpoken("Opening incognito private window")
+                    addNewTab(isIncognito = true)
+                    dismissOrionVoiceOverlay()
+                }
+                com.example.searchengine.VoiceActionType.CLOSE_INCOGNITO -> {
+                    playVoiceAssistantResponseSpoken("Closing all private windows")
+                    closeAllIncognitoTabs()
+                    _uiState.update { it.copy(orionTranscript = "Closed all private tab windows") }
+                    kotlinx.coroutines.delay(1200L)
+                    dismissOrionVoiceOverlay()
+                }
+                com.example.searchengine.VoiceActionType.OPEN_DOWNLOADS -> {
+                    playVoiceAssistantResponseSpoken("Opening downloads hub")
+                    setDownloadsOpen(true)
+                    dismissOrionVoiceOverlay()
+                }
+                com.example.searchengine.VoiceActionType.OPEN_HISTORY -> {
+                    playVoiceAssistantResponseSpoken("Opening browser history")
+                    _uiState.update { it.copy(historySearchQuery = "") }
+                    setHistoryOpen(true)
+                    dismissOrionVoiceOverlay()
+                }
+                com.example.searchengine.VoiceActionType.OPEN_SETTINGS -> {
+                    playVoiceAssistantResponseSpoken("Opening settings panel")
+                    setSettingsOpen(true)
+                    dismissOrionVoiceOverlay()
+                }
+                com.example.searchengine.VoiceActionType.OPEN_BOOKMARKS -> {
+                    playVoiceAssistantResponseSpoken("Opening saved bookmarks")
+                    setBookmarksOpen(true)
+                    dismissOrionVoiceOverlay()
+                }
+                com.example.searchengine.VoiceActionType.NAVIGATE -> {
+                    playVoiceAssistantResponseSpoken("Navigating to " + payload.replace("https://www.", "").replace("https://", "").replace("http://", "").take(25))
+                    navigateTo(payload)
+                    dismissOrionVoiceOverlay()
+                }
+                com.example.searchengine.VoiceActionType.SEARCH -> {
+                    playVoiceAssistantResponseSpoken("Searching google for " + payload.take(30))
+                    val searchEngine = com.example.searchengine.SearchEngineImpl()
+                    val searchUrl = searchEngine.buildSearchUrl(payload, "Google")
+                    navigateTo(searchUrl)
+                    dismissOrionVoiceOverlay()
+                }
+                com.example.searchengine.VoiceActionType.SEARCH_CURRENT_SITE -> {
+                    if (payload.isNotBlank()) {
+                        _uiState.update { it.copy(findInPageActive = true) }
+                        findInPageSearch(payload)
+                        playVoiceAssistantResponseSpoken("Searching page entries for " + payload.take(30))
+                    }
+                    dismissOrionVoiceOverlay()
+                }
+                com.example.searchengine.VoiceActionType.CREATE_TAB_GROUP -> {
+                    if (payload.isNotBlank()) {
+                        val activeId = _uiState.value.activeTabId
+                        if (activeId.isNotEmpty()) {
+                            playVoiceAssistantResponseSpoken("Created tab group " + payload)
+                            moveTabToGroup(activeId, payload, 0xFF4285F4)
+                            _uiState.update { it.copy(orionTranscript = "Created tab group: $payload") }
+                            kotlinx.coroutines.delay(1200L)
+                        }
+                    }
+                    dismissOrionVoiceOverlay()
+                }
+                com.example.searchengine.VoiceActionType.SWITCH_TAB_GROUP -> {
+                    if (payload.isNotBlank()) {
+                        val targetTab = _uiState.value.tabs.find { it.groupName?.equals(payload, ignoreCase = true) == true }
+                        if (targetTab != null) {
+                            playVoiceAssistantResponseSpoken("Switching tab group to " + payload)
+                            selectTab(targetTab.id)
+                            _uiState.update { it.copy(orionTranscript = "Switched to tab group: $payload") }
+                            kotlinx.coroutines.delay(1200L)
+                        } else {
+                            playVoiceAssistantResponseSpoken("Group not found")
+                            _uiState.update { it.copy(orionErrorMessage = "No active group named '$payload' found") }
+                            kotlinx.coroutines.delay(1500L)
+                        }
+                    }
+                    dismissOrionVoiceOverlay()
+                }
+                com.example.searchengine.VoiceActionType.OPEN_LAST_CLOSED_TAB -> {
+                    val closed = _uiState.value.recentlyClosedTabs
+                    if (closed.isNotEmpty()) {
+                        playVoiceAssistantResponseSpoken("Restoring last closed tab")
+                        reopenClosedTab(closed.last())
+                        _uiState.update { it.copy(orionTranscript = "Reopened last closed tab") }
+                        kotlinx.coroutines.delay(1000L)
+                    } else {
+                        playVoiceAssistantResponseSpoken("No closed tabs to restore")
+                        _uiState.update { it.copy(orionErrorMessage = "No recent closed history matches") }
+                        kotlinx.coroutines.delay(1500L)
+                    }
+                    dismissOrionVoiceOverlay()
+                }
+                
+                // AI features
+                com.example.searchengine.VoiceActionType.SUMMARIZE_PAGE -> {
+                    playVoiceAssistantResponseSpoken("Reading page to compile summary")
+                    _uiState.update { it.copy(orionTranscript = "Reading webpage text for summarization...") }
+                    extractPageTextForAI { text ->
+                        viewModelScope.launch {
+                            _uiState.update { it.copy(orionTranscript = "Asking Orion AI to summarize webpage...") }
+                            try {
+                                val summary = AISummaryEngine.analyzePage(text, AISettingsManager(getApplication()), getApplication())
+                                _uiState.update { it.copy(orionTranscript = summary) }
+                                playVoiceAssistantResponseSpoken(summary)
+                            } catch (e: Exception) {
+                                _uiState.update { it.copy(orionErrorMessage = "Failed to run AI summarizer: ${e.message}") }
+                            }
+                        }
+                    }
+                }
+                com.example.searchengine.VoiceActionType.EXPLAIN_PAGE -> {
+                    playVoiceAssistantResponseSpoken("Reading page to compile simple explanation")
+                    _uiState.update { it.copy(orionTranscript = "Reading page text for analysis...") }
+                    extractPageTextForAI { text ->
+                        viewModelScope.launch {
+                            _uiState.update { it.copy(orionTranscript = "Asking Orion AI to explain page topics...") }
+                            try {
+                                val prompt = "Explain the core concepts and lessons from this webpage content simply and clearly for a reader:\n\n$text"
+                                val explanation = AISummaryEngine.chatSession(emptyList(), prompt, AISettingsManager(getApplication()), getApplication())
+                                _uiState.update { it.copy(orionTranscript = explanation) }
+                                playVoiceAssistantResponseSpoken(explanation)
+                            } catch (e: Exception) {
+                                _uiState.update { it.copy(orionErrorMessage = "Failed to run AI explainer: ${e.message}") }
+                            }
+                        }
+                    }
+                }
+                com.example.searchengine.VoiceActionType.TRANSLATE_PAGE -> {
+                    _uiState.update { it.copy(orionTranscript = "Initiating page translation to " + payload + "...") }
+                    val targetCode = when (payload.trim().lowercase()) {
+                        "hindi" -> "hi"
+                        "tamil" -> "ta"
+                        "telugu" -> "te"
+                        "marathi" -> "mr"
+                        "bengali" -> "bn"
+                        "punjabi" -> "pa"
+                        "gujarati" -> "gu"
+                        "spanish" -> "es"
+                        "french" -> "fr"
+                        else -> "hi"
+                    }
+                    playVoiceAssistantResponseSpoken("Translating page to " + payload)
+                    translateActivePage(targetCode)
+                    kotlinx.coroutines.delay(1500L)
+                    dismissOrionVoiceOverlay()
+                }
+                com.example.searchengine.VoiceActionType.READ_PAGE_ALOUD -> {
+                    playVoiceAssistantResponseSpoken("Reading page content aloud")
+                    _uiState.update { it.copy(orionTranscript = "Processing page paragraphs...") }
+                    val activeId = _uiState.value.activeTabId
+                    val webView = webViewMap[activeId]
+                    if (webView != null) {
+                        webView.evaluateJavascript("document.body.innerText") { rawText ->
+                            val cleanText = rawText?.trim()?.removeSurrounding("\"")?.replace("\\n", "\n") ?: ""
+                            if (cleanText.isNotBlank()) {
+                                speakPageContentAloud(cleanText)
+                            }
+                        }
+                    }
+                    dismissOrionVoiceOverlay()
+                }
+                com.example.searchengine.VoiceActionType.ANALYZE_WEBSITE -> {
+                    playVoiceAssistantResponseSpoken("Running technical architecture overview on target page")
+                    _uiState.update { it.copy(orionTranscript = "Reading page tags for technical overview...") }
+                    extractPageTextForAI { text ->
+                        viewModelScope.launch {
+                            _uiState.update { it.copy(orionTranscript = "Analyzing performance, usability, and architecture...") }
+                            try {
+                                val prompt = "Provide a developer metrics and architecture analysis of this webpage content. Outline sections, link densities, and estimated value:\n\n$text"
+                                val analysis = AISummaryEngine.chatSession(emptyList(), prompt, AISettingsManager(getApplication()), getApplication())
+                                _uiState.update { it.copy(orionTranscript = analysis) }
+                                playVoiceAssistantResponseSpoken(analysis)
+                            } catch (e: Exception) {
+                                _uiState.update { it.copy(orionErrorMessage = "Failed to run AI analyzer: ${e.message}") }
+                            }
+                        }
+                    }
+                }
+                com.example.searchengine.VoiceActionType.VOICE_SEARCH_HISTORY -> {
+                    if (payload.isNotBlank()) {
+                        playVoiceAssistantResponseSpoken("Searching browser history logs for " + payload)
+                        _uiState.update { it.copy(historySearchQuery = payload) }
+                        setHistoryOpen(true)
+                    }
+                    dismissOrionVoiceOverlay()
+                }
+                
+                // Media features
+                com.example.searchengine.VoiceActionType.PLAY_VIDEO -> {
+                    val activeId = _uiState.value.activeTabId
+                    playVoiceAssistantResponseSpoken("Resuming video media playback")
+                    webViewMap[activeId]?.evaluateJavascript("try { document.querySelectorAll('video').forEach(v => v.play()); 'SUCCESS'; } catch(e) { e.message; }") {
+                        _uiState.update { it.copy(orionTranscript = "Media play initiated") }
+                    }
+                    kotlinx.coroutines.delay(1000L)
+                    dismissOrionVoiceOverlay()
+                }
+                com.example.searchengine.VoiceActionType.PAUSE_VIDEO -> {
+                    val activeId = _uiState.value.activeTabId
+                    playVoiceAssistantResponseSpoken("Video media playback paused")
+                    webViewMap[activeId]?.evaluateJavascript("try { document.querySelectorAll('video').forEach(v => v.pause()); 'SUCCESS'; } catch(e) { e.message; }") {
+                        _uiState.update { it.copy(orionTranscript = "Media pause initiated") }
+                    }
+                    kotlinx.coroutines.delay(1000L)
+                    dismissOrionVoiceOverlay()
+                }
+                com.example.searchengine.VoiceActionType.CHANGE_PLAYBACK_SPEED -> {
+                    val speedVal = payload.toFloatOrNull() ?: 1.5f
+                    val activeId = _uiState.value.activeTabId
+                    playVoiceAssistantResponseSpoken("Adjusting video speed rate to " + speedVal)
+                    webViewMap[activeId]?.evaluateJavascript("try { document.querySelectorAll('video').forEach(v => v.playbackRate = $speedVal); 'SUCCESS'; } catch(e) { e.message; }") {
+                        _uiState.update { it.copy(orionTranscript = "Media rate configured to ${speedVal}x") }
+                    }
+                    kotlinx.coroutines.delay(1200L)
+                    dismissOrionVoiceOverlay()
+                }
+                com.example.searchengine.VoiceActionType.DOWNLOAD_VIDEO -> {
+                    val activeId = _uiState.value.activeTabId
+                    playVoiceAssistantResponseSpoken("Locating live media streams to execute download")
+                    webViewMap[activeId]?.evaluateJavascript("(function() { var v = document.querySelector('video'); return v ? (v.src || v.currentSrc || '') : ''; })()") { rawUrl ->
+                        val videoUrl = rawUrl?.trim()?.removeSurrounding("\"") ?: ""
+                        if (videoUrl.isNotBlank() && videoUrl.startsWith("http")) {
+                            playVoiceAssistantResponseSpoken("Video stream found. Download started.")
+                            startDownload(videoUrl, "video_download.mp4", "video/mp4", "")
+                            _uiState.update { it.copy(orionTranscript = "Video download scheduled successfully") }
+                        } else {
+                            playVoiceAssistantResponseSpoken("Could not identify any streaming buffers")
+                            _uiState.update { it.copy(orionErrorMessage = "No webpage video tags match active streaming buffers") }
+                        }
+                    }
+                    kotlinx.coroutines.delay(1500L)
+                    dismissOrionVoiceOverlay()
+                }
+            }
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
         stopBackgroundAudio()
+        try {
+            assistantActivationManager?.stopListening()
+            assistantActivationManager = null
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
         try {
             extensionManager.shutdown()
         } catch (e: Exception) {
@@ -5323,5 +6446,101 @@ class BrowserViewModel(
         } catch (e: Exception) {
             e.printStackTrace()
         }
+    }
+}
+
+// Separate Session Engines
+class NormalSessionStore(private val context: Context, private val viewModel: BrowserViewModel) {
+    fun saveSession(tabs: List<TabState>, activeTabId: String) {
+        viewModel.saveTabsState()
+    }
+    fun restoreSession() {
+        viewModel.restoreTabsState()
+    }
+}
+
+class IncognitoSessionStore {
+    private val incognitoTabs = mutableListOf<TabState>()
+    fun saveSession(tabs: List<TabState>) {
+        // ALWAYS STORES NOTHING PERMANENTLY (as per requirements)
+    }
+    fun getTabs(): List<TabState> = incognitoTabs.toList()
+    fun clearSession() {
+        incognitoTabs.clear()
+    }
+}
+
+class NormalCookieStore(private val context: Context) {
+    fun acceptCookies(webView: android.webkit.WebView) {
+        try {
+            android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+    fun flush() {
+        try {
+            android.webkit.CookieManager.getInstance().flush()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+}
+
+class IncognitoCookieStore {
+    fun setupCookies(webView: android.webkit.WebView) {
+        try {
+            val cookieManager = android.webkit.CookieManager.getInstance()
+            cookieManager.setAcceptCookie(true)
+            cookieManager.setAcceptThirdPartyCookies(webView, false)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+    fun clearCookies() {
+        try {
+            android.webkit.CookieManager.getInstance().removeAllCookies(null)
+            android.webkit.CookieManager.getInstance().flush()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+}
+
+class NormalCacheStore {
+    fun setupCache(webView: android.webkit.WebView) {
+        webView.settings.cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
+    }
+}
+
+class IncognitoCacheStore {
+    fun setupCache(webView: android.webkit.WebView) {
+        webView.settings.cacheMode = android.webkit.WebSettings.LOAD_NO_CACHE
+        webView.settings.databaseEnabled = false
+        webView.settings.domStorageEnabled = true
+    }
+    fun clearCache(webView: android.webkit.WebView) {
+        webView.clearCache(true)
+        webView.clearFormData()
+        webView.clearHistory()
+    }
+    fun clearAllIncognitoCache(webViews: List<android.webkit.WebView>) {
+        webViews.forEach {
+            it.clearCache(true)
+            it.clearFormData()
+            it.clearHistory()
+        }
+    }
+}
+
+class NormalHistoryStore(private val repository: com.example.data.BrowserRepository) {
+    suspend fun addHistory(url: String, title: String) {
+        repository.addHistory(url, title)
+    }
+}
+
+class IncognitoHistoryStore {
+    suspend fun addHistory(url: String, title: String) {
+        // ALWAYS STORES NOTHING PERMANENTLY (as per requirements)
     }
 }

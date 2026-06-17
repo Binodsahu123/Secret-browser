@@ -32,6 +32,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.border
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.ui.zIndex
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.window.Dialog
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -91,9 +95,6 @@ fun BrowserScreen(
     val pendingPermissionRequest by viewModel.pendingPermissionRequest.collectAsState()
     val pendingGeolocationPrompt by viewModel.pendingGeolocationPrompt.collectAsState()
 
-    val detectedVideo by viewModel.youtubeDetectionEngine.detectedVideo.collectAsState()
-    var showYouTubeDownloadBottomSheet by remember { mutableStateOf(false) }
-
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
     val keyboardController = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
@@ -102,8 +103,6 @@ fun BrowserScreen(
     var isBrowserResolving by remember { mutableStateOf(false) }
     var browserResolvedStreams by remember { mutableStateOf<List<ResolvedMediaStream>>(emptyList()) }
     var showBrowserResolutionSelector by remember { mutableStateOf(false) }
-
-
 
     var showDelayedNotificationDialog by remember { mutableStateOf(false) }
 
@@ -409,6 +408,23 @@ fun BrowserScreen(
                     }
 
                     if (!uiState.isSearchFocused) {
+
+                        // Orion Assistant Voice Button
+                        IconButton(
+                            onClick = {
+                                viewModel.startOrionVoiceListening(context)
+                            },
+                            modifier = Modifier
+                                .size(36.dp)
+                                .testTag("orion_voice_toolbar_btn")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Mic,
+                                contentDescription = "Orion Assistant Voice Input",
+                                tint = if (isGlass) Color.White else MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
 
                         // AI Button placed beside tab counter and menu
                         IconButton(
@@ -729,7 +745,7 @@ fun BrowserScreen(
                             )
 
                             // List enabled extensions
-                            for (ext in getFullExtensionsList(viewModel)) {
+                            getFullExtensionsList(viewModel).forEach { ext ->
                                 val isInstalled = isExtensionInstalled(viewModel, ext.id)
                                 val isEnabled = viewModel.isExtensionEnabled(ext.id)
                                 if (isInstalled && isEnabled) {
@@ -923,7 +939,14 @@ fun BrowserScreen(
                         onChangeGroupColor = { groupId, newColor -> viewModel.changeGroupColor(groupId, newColor) },
                         onNewTabInGroup = { groupId, isIncogn -> viewModel.addNewTabInGroupById(groupId, isIncogn) },
                         onUngroupTab = { tabId -> viewModel.removeTabFromGroup(tabId) },
-                        onCreateNewGroup = { name, color, isIncogn -> viewModel.createNewTabGroup(name, color, isIncogn) }
+                        onCreateNewGroup = { name, color, isIncogn -> viewModel.createNewTabGroup(name, color, isIncogn) },
+                        onMoveTab = { from, to -> viewModel.moveTab(from, to) },
+                        onToggleTabsListView = { isList -> viewModel.setTabsListView(isList) },
+                        onToggleCustomTabOrder = { isCustom -> viewModel.setCustomTabOrder(isCustom) },
+                        onCollapseGroup = { viewModel.collapseGroup(it) },
+                        onExpandGroup = { viewModel.expandGroup(it) },
+                        onDeleteGroup = { viewModel.deleteGroup(it) },
+                        onStartVoiceListening = { viewModel.startOrionVoiceListening(context) }
                     )
                 } else if (uiState.readerModeActive) {
                     ReaderModeScreen(
@@ -967,8 +990,6 @@ fun BrowserScreen(
                                 },
                                 modifier = Modifier.fillMaxSize().testTag("webview")
                             )
-
-
 
                             // Instant Premium Loading Skeleton overlay
                             if (activeTab.isLoading || activeTab.url == "about:blank") {
@@ -1206,6 +1227,7 @@ fun BrowserScreen(
                     onTabClose = { viewModel.closeTab(it) },
                     onNewTab = { viewModel.addNewTab() },
                     onOpenTabSwitcher = { viewModel.setTabSwitcherOpen(true) },
+                    onVoiceClick = { viewModel.startOrionVoiceListening(context) },
                     isGlass = isGlass
                 )
             }
@@ -1508,7 +1530,7 @@ fun BrowserScreen(
                                 )
 
                                 // List enabled extensions
-                                for (ext in getFullExtensionsList(viewModel)) {
+                                getFullExtensionsList(viewModel).forEach { ext ->
                                     val isInstalled = isExtensionInstalled(viewModel, ext.id)
                                     val isEnabled = viewModel.isExtensionEnabled(ext.id)
                                     if (isInstalled && isEnabled) {
@@ -1693,6 +1715,15 @@ fun BrowserScreen(
             )
         }
 
+        // Orion Voice Assistant Overlay
+        if (uiState.isOrionOverlayVisible) {
+            OrionVoiceOverlay(
+                viewModel = viewModel,
+                uiState = uiState,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+
         // C. History list overlay dialog
         if (uiState.isHistoryOpen) {
             HistoryOverlay(
@@ -1707,7 +1738,8 @@ fun BrowserScreen(
                 onClearBrowsingData = { hist, cook, cach, rangeIndex ->
                     viewModel.clearBrowsingData(hist, cook, cach, rangeIndex)
                 },
-                isGlass = isGlass
+                isGlass = isGlass,
+                initialSearchQuery = uiState.historySearchQuery
             )
         }
 
@@ -1737,7 +1769,58 @@ fun BrowserScreen(
         val detectedMediaCustomState = viewModel.detectedMediaCustom.value
         val showDialogCustom = viewModel.showDownloadDialogCustom.value
 
+        val detectedMediaCustomVideoState = remember(detectedMediaCustomState) {
+            val media = detectedMediaCustomState
+            if (media != null) {
+                val mime = media.mimeType.lowercase(java.util.Locale.ROOT)
+                val ext = media.fileName.substringAfterLast('.', "").lowercase(java.util.Locale.ROOT)
+                val isVideo = mime.startsWith("video/") || 
+                              mime.contains("mpegurl") || 
+                              mime.contains("dash+xml") || 
+                              media.quality == "Resolvables" ||
+                              com.example.mediadetectorengine.MediaDetector.isSocialMediaUrl(media.url) ||
+                              listOf("mp4", "mkv", "webm", "m3u8", "mpd", "avi", "mov", "flv", "3gp", "ts").contains(ext)
+                if (isVideo) media else null
+            } else {
+                null
+            }
+        }
 
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(bottom = 85.dp, end = 20.dp),
+            contentAlignment = Alignment.BottomEnd
+        ) {
+            FloatingDownloadButton(
+                detectedMedia = detectedMediaCustomVideoState,
+                onClick = {
+                    val media = detectedMediaCustomVideoState
+                    if (media != null) {
+                        if (media.quality == "Resolvables") {
+                            isBrowserResolving = true
+                            coroutineScope.launch(Dispatchers.IO) {
+                                try {
+                                    val streams = MediaLinkResolver.resolveMedia(media.url)
+                                    withContext(Dispatchers.Main) {
+                                        browserResolvedStreams = streams
+                                        isBrowserResolving = false
+                                        showBrowserResolutionSelector = true
+                                    }
+                                } catch (e: Exception) {
+                                    withContext(Dispatchers.Main) {
+                                        isBrowserResolving = false
+                                        Toast.makeText(context, "Failed to analyze URL: ${e.message}", Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                            }
+                        } else {
+                            viewModel.showDownloadDialogCustom.value = true
+                        }
+                    }
+                }
+            )
+        }
 
         if (isBrowserResolving) {
             AlertDialog(
@@ -1779,9 +1862,9 @@ fun BrowserScreen(
             )
         }
 
-        if (showBrowserResolutionSelector && detectedMediaCustomState != null) {
+        if (showBrowserResolutionSelector && detectedMediaCustomVideoState != null) {
             ResolutionPickerSheet(
-                url = detectedMediaCustomState.url,
+                url = detectedMediaCustomVideoState.url,
                 resolvedStreams = browserResolvedStreams,
                 onDismiss = {
                     showBrowserResolutionSelector = false
@@ -1801,19 +1884,19 @@ fun BrowserScreen(
             )
         }
 
-        if (detectedMediaCustomState != null) {
+        if (detectedMediaCustomVideoState != null) {
             val scopeCustom = rememberCoroutineScope()
             MediaDownloadDialog(
                 show = showDialogCustom,
-                detectedMedia = detectedMediaCustomState,
+                detectedMedia = detectedMediaCustomVideoState,
                 onDismiss = { viewModel.showDownloadDialogCustom.value = false },
                 onConfirmDownload = { fileName, threadsCount ->
                     viewModel.showDownloadDialogCustom.value = false
                     scopeCustom.launch {
                         viewModel.customDownloadEngine.startDownload(
-                            url = detectedMediaCustomState.url,
+                            url = detectedMediaCustomVideoState.url,
                             fileName = fileName,
-                            mimeType = detectedMediaCustomState.mimeType,
+                            mimeType = detectedMediaCustomVideoState.mimeType,
                             threads = threadsCount
                         )
                     }
@@ -1847,9 +1930,12 @@ fun BrowserScreen(
                 tabId = activeTab?.id ?: "default_tab",
                 url = activeTab?.url ?: "",
                 pageText = currentCapturedText,
-                onDismiss = { showAIChatSheet = false }
+                onDismiss = { showAIChatSheet = false },
+                viewModel = viewModel
             )
         }
+
+
 
         // Offscreen WebView mounts for warm AI website sessions
         Box(
@@ -2317,7 +2403,8 @@ sealed interface TabGridItem {
         val groupId: String,
         val groupName: String,
         val groupColor: Long,
-        val tabs: List<TabState>
+        val tabs: List<TabState>,
+        val isCollapsed: Boolean = false
     ) : TabGridItem
 }
 
@@ -2335,7 +2422,14 @@ fun TabSwitcherLayout(
     onChangeGroupColor: (String, Long) -> Unit,
     onNewTabInGroup: (String, Boolean) -> Unit,
     onUngroupTab: (String) -> Unit,
-    onCreateNewGroup: (String, Long, Boolean) -> Unit
+    onCreateNewGroup: (String, Long, Boolean) -> Unit,
+    onMoveTab: (String, String) -> Unit,
+    onToggleTabsListView: (Boolean) -> Unit,
+    onToggleCustomTabOrder: (Boolean) -> Unit,
+    onCollapseGroup: (String) -> Unit,
+    onExpandGroup: (String) -> Unit,
+    onDeleteGroup: (String) -> Unit,
+    onStartVoiceListening: () -> Unit
 ) {
     val context = LocalContext.current
     var searchQuery by remember { mutableStateOf("") }
@@ -2344,13 +2438,16 @@ fun TabSwitcherLayout(
     var showNewGroupDialog by remember { mutableStateOf(false) }
     var showMoveNewGroupDialog by remember { mutableStateOf(false) }
     var selectedTabForMoveGroup by remember { mutableStateOf<TabState?>(null) }
+    var draggedItemId by remember { mutableStateOf<String?>(null) }
+    var draggingOffset by remember { mutableStateOf(Offset.Zero) }
 
     val activeTabInstance = remember(state.tabs, state.activeTabId) {
         state.tabs.find { it.id == state.activeTabId }
     }
-    var isShowingIncognitoFilter by remember { 
-        mutableStateOf(activeTabInstance?.isIncognito ?: false) 
+    var switcherFilterTab by remember { 
+        mutableStateOf(if (activeTabInstance?.isIncognito == true) 1 else 0) 
     }
+    val isShowingIncognitoFilter = switcherFilterTab == 1
 
     val filteredTabs = remember(state.tabs, searchQuery, isShowingIncognitoFilter) {
         val base = state.tabs.filter { it.isIncognito == isShowingIncognitoFilter }
@@ -2365,7 +2462,7 @@ fun TabSwitcherLayout(
     }
 
     // Grouping logic for the tab list
-    val gridItems = remember(filteredTabs) {
+    val gridItems = remember(filteredTabs, state.isCustomTabOrder, state.collapsedGroupIds) {
         val items = mutableListOf<TabGridItem>()
         val groups = filteredTabs.groupBy { it.groupId }
         
@@ -2379,15 +2476,24 @@ fun TabSwitcherLayout(
             if (groupId != null && tabsInGroup.isNotEmpty()) {
                 val groupName = tabsInGroup.first().groupName ?: "Group"
                 val groupColor = tabsInGroup.first().groupColor ?: 0xFF818CF8
-                items.add(TabGridItem.TabGroup(groupId, groupName, groupColor, tabsInGroup))
+                val isCollapsed = state.collapsedGroupIds.contains(groupId)
+                items.add(TabGridItem.TabGroup(groupId, groupName, groupColor, tabsInGroup, isCollapsed = isCollapsed))
+                
+                if (!isCollapsed) {
+                    tabsInGroup.forEach { tab ->
+                        items.add(TabGridItem.SingleTab(tab))
+                    }
+                }
             }
         }
         
-        // Sort items by last active time to show latest interactions first
-        items.sortByDescending {
-            when (it) {
-                is TabGridItem.SingleTab -> it.tab.lastActiveTime
-                is TabGridItem.TabGroup -> it.tabs.maxOfOrNull { t -> t.lastActiveTime } ?: 0L
+        if (!state.isCustomTabOrder) {
+            // Sort items by last active time to show latest interactions first
+            items.sortByDescending {
+                when (it) {
+                    is TabGridItem.SingleTab -> it.tab.lastActiveTime
+                    is TabGridItem.TabGroup -> it.tabs.maxOfOrNull { t -> t.lastActiveTime } ?: 0L
+                }
             }
         }
         items
@@ -2479,6 +2585,19 @@ fun TabSwitcherLayout(
                         }
                     },
                     actions = {
+                        IconButton(onClick = { onToggleCustomTabOrder(!state.isCustomTabOrder) }) {
+                            Icon(
+                                imageVector = if (state.isCustomTabOrder) Icons.Default.DragHandle else Icons.Default.Schedule,
+                                contentDescription = if (state.isCustomTabOrder) "Manual Order" else "Chronological Recents",
+                                tint = if (state.isCustomTabOrder) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        IconButton(onClick = { onToggleTabsListView(!state.isTabsListView) }) {
+                            Icon(
+                                imageVector = if (state.isTabsListView) Icons.Default.GridView else Icons.AutoMirrored.Filled.List,
+                                contentDescription = if (state.isTabsListView) "Grid View" else "List View"
+                            )
+                        }
                         IconButton(onClick = { isSelectionMode = true }) {
                             Icon(imageVector = Icons.Default.Edit, contentDescription = "Select Mode")
                         }
@@ -2489,36 +2608,54 @@ fun TabSwitcherLayout(
         floatingActionButton = {
             if (!isSelectionMode) {
                 var showFabMenu by remember { mutableStateOf(false) }
-                Box {
+                Column(
+                    horizontalAlignment = Alignment.End,
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    // Floating Voice Button for Orion Voice Assistant
                     FloatingActionButton(
-                        onClick = { showFabMenu = true },
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary,
-                        modifier = Modifier.testTag("new_tab_fab")
+                        onClick = onStartVoiceListening,
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.testTag("orion_voice_fab")
                     ) {
-                        Icon(imageVector = Icons.Default.Add, contentDescription = "Add options")
+                        Icon(
+                            imageVector = Icons.Default.Mic,
+                            contentDescription = "Orion Voice Assistant"
+                        )
                     }
                     
-                    DropdownMenu(
-                        expanded = showFabMenu,
-                        onDismissRequest = { showFabMenu = false }
-                    ) {
-                        DropdownMenuItem(
-                            text = { Text("New Tab") },
-                            leadingIcon = { Icon(Icons.Default.Add, null) },
-                            onClick = {
-                                showFabMenu = false
-                                onNewTab(isShowingIncognitoFilter)
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("New Tab Group") },
-                            leadingIcon = { Icon(Icons.Default.GroupWork, null) },
-                            onClick = {
-                                showFabMenu = false
-                                showNewGroupDialog = true
-                            }
-                        )
+                    Box {
+                        FloatingActionButton(
+                            onClick = { showFabMenu = true },
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.testTag("new_tab_fab")
+                        ) {
+                            Icon(imageVector = Icons.Default.Add, contentDescription = "Add options")
+                        }
+                        
+                        DropdownMenu(
+                            expanded = showFabMenu,
+                            onDismissRequest = { showFabMenu = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("New Tab") },
+                                leadingIcon = { Icon(Icons.Default.Add, null) },
+                                onClick = {
+                                    showFabMenu = false
+                                    onNewTab(isShowingIncognitoFilter)
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("New Tab Group") },
+                                leadingIcon = { Icon(Icons.Default.GroupWork, null) },
+                                onClick = {
+                                    showFabMenu = false
+                                    showNewGroupDialog = true
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -2530,7 +2667,7 @@ fun TabSwitcherLayout(
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
         ) {
-            // Normal and Incognito Tabs Categories Row (Like Chrome)
+            // Categories Switcher Row
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -2541,8 +2678,8 @@ fun TabSwitcherLayout(
                 // Normal Tabs Chip
                 val normalCount = state.tabs.count { !it.isIncognito }
                 FilterChip(
-                    selected = !isShowingIncognitoFilter,
-                    onClick = { isShowingIncognitoFilter = false },
+                    selected = switcherFilterTab == 0,
+                    onClick = { switcherFilterTab = 0 },
                     label = { Text("Normal ($normalCount)") },
                     leadingIcon = {
                         Icon(
@@ -2556,8 +2693,8 @@ fun TabSwitcherLayout(
                 // Incognito Tabs Chip
                 val incognitoCount = state.tabs.count { it.isIncognito }
                 FilterChip(
-                    selected = isShowingIncognitoFilter,
-                    onClick = { isShowingIncognitoFilter = true },
+                    selected = switcherFilterTab == 1,
+                    onClick = { switcherFilterTab = 1 },
                     label = { Text("Incognito ($incognitoCount)") },
                     leadingIcon = {
                         Icon(
@@ -2572,396 +2709,1171 @@ fun TabSwitcherLayout(
                         selectedLeadingIconColor = MaterialTheme.colorScheme.onTertiaryContainer
                     )
                 )
+
+                // Groups Tab Category Chip
+                val groupsCount = state.tabs.mapNotNull { it.groupId }.distinct().size
+                FilterChip(
+                    selected = switcherFilterTab == 2,
+                    onClick = { switcherFilterTab = 2 },
+                    label = { Text("Groups ($groupsCount)") },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Default.Folder,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
+                        selectedLabelColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                        selectedLeadingIconColor = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                )
             }
 
-            // Tab cards grid
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(2),
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                items(gridItems) { gridItem ->
-                    when (gridItem) {
-                        is TabGridItem.SingleTab -> {
-                            val tab = gridItem.tab
-                            val isActive = tab.id == state.activeTabId
-                            val isSelected = selectedTabIds.contains(tab.id)
+            if (switcherFilterTab == 2) {
+                // Beautiful layout for Tab Groups switcher list
+                val groupsList = remember(state.tabs) {
+                    state.tabs.groupBy { it.groupId }.mapNotNull { (groupId, groupTabs) ->
+                        if (groupId != null && groupTabs.isNotEmpty()) {
+                            TabGridItem.TabGroup(
+                                groupId = groupId,
+                                groupName = groupTabs.first().groupName ?: "Group",
+                                groupColor = groupTabs.first().groupColor ?: 0xFF818CF8,
+                                tabs = groupTabs
+                            )
+                        } else null
+                    }
+                }
+                
+                if (groupsList.isEmpty()) {
+                    Box(
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                            modifier = Modifier.padding(32.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.FolderOpen,
+                                contentDescription = null,
+                                modifier = Modifier.size(72.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = "No Tab Groups Created",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "Merge tabs into a group or create groups from the '+' menu to organize your workspace.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                            )
+                        }
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        items(groupsList) { group ->
+                            var showGroupDropdown by remember { mutableStateOf(false) }
+                            var showRenameDialogInList by remember { mutableStateOf(false) }
+                            var showColorPickerInList by remember { mutableStateOf(false) }
                             
                             Card(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .aspectRatio(0.75f)
                                     .clickable {
-                                        if (isSelectionMode) {
-                                            if (isSelected) selectedTabIds.remove(tab.id) else selectedTabIds.add(tab.id)
-                                        } else {
-                                            onTabSelect(tab.id)
-                                        }
-                                    }
-                                    .testTag("tab_card_${tab.id}"),
+                                        activeGroupToDetail = group
+                                    },
                                 colors = CardDefaults.cardColors(
-                                    containerColor = if (isSelected) {
-                                        MaterialTheme.colorScheme.primaryContainer
-                                    } else if (isActive) {
-                                        MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f)
-                                    } else {
-                                        MaterialTheme.colorScheme.surface
-                                    }
+                                    containerColor = MaterialTheme.colorScheme.surface
                                 ),
                                 border = BorderStroke(
-                                    width = if (isSelected) 3.dp else if (isActive) 2.dp else 0.5.dp,
-                                    color = if (isSelected) {
-                                        MaterialTheme.colorScheme.primary
-                                    } else if (isActive) {
-                                        MaterialTheme.colorScheme.secondary
-                                    } else {
-                                        MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
-                                    }
-                                )
+                                    width = 1.dp,
+                                    color = Color(group.groupColor).copy(alpha = 0.3f)
+                                ),
+                                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
                             ) {
-                                Box(modifier = Modifier.fillMaxSize()) {
-                                    Column(modifier = Modifier.fillMaxSize()) {
-                                        // Header of each tab card
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .padding(8.dp),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    val displayTabs = group.tabs.take(4)
+                                    Box(
+                                        modifier = Modifier
+                                            .size(56.dp)
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                                            .border(1.5.dp, Color(group.groupColor).copy(alpha = 0.4f), RoundedCornerShape(8.dp)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Column(
+                                            modifier = Modifier.fillMaxSize().padding(3.dp),
+                                            verticalArrangement = Arrangement.Center,
+                                            horizontalAlignment = Alignment.CenterHorizontally
                                         ) {
                                             Row(
-                                                modifier = Modifier.weight(1f),
-                                                verticalAlignment = Alignment.CenterVertically
+                                                modifier = Modifier.weight(1f).fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.spacedBy(2.dp)
                                             ) {
-                                                if (tab.favicon != null) {
-                                                    Image(
-                                                        bitmap = tab.favicon.asImageBitmap(),
-                                                        contentDescription = null,
-                                                        modifier = Modifier.size(16.dp)
-                                                    )
-                                                } else {
-                                                    Icon(
-                                                        imageVector = Icons.Default.Language,
-                                                        contentDescription = null,
-                                                        modifier = Modifier.size(16.dp),
-                                                        tint = MaterialTheme.colorScheme.primary
-                                                    )
-                                                }
-                                                Spacer(modifier = Modifier.width(6.dp))
-                                                Column {
-                                                    if (!tab.groupName.isNullOrEmpty()) {
-                                                        Text(
-                                                            text = tab.groupName,
-                                                            fontSize = 9.sp,
-                                                            fontWeight = FontWeight.Bold,
-                                                            color = Color(tab.groupColor ?: 0xFF818CF8)
-                                                        )
+                                                Box(
+                                                    modifier = Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(3.dp)).background(Color.White),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    if (displayTabs.isNotEmpty() && displayTabs[0].favicon != null) {
+                                                        Image(bitmap = displayTabs[0].favicon!!.asImageBitmap(), contentDescription = null, modifier = Modifier.size(14.dp))
+                                                    } else {
+                                                        Icon(Icons.Default.Language, null, modifier = Modifier.size(10.dp), tint = Color(group.groupColor))
                                                     }
-                                                    Text(
-                                                        text = tab.title,
-                                                        fontSize = 11.sp,
-                                                        fontWeight = FontWeight.Bold,
-                                                        color = MaterialTheme.colorScheme.onSurface,
-                                                        maxLines = 1,
-                                                        overflow = TextOverflow.Ellipsis
-                                                    )
+                                                }
+                                                Box(
+                                                    modifier = Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(3.dp)).background(Color.White),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    if (displayTabs.size > 1) {
+                                                        if (displayTabs[1].favicon != null) {
+                                                            Image(bitmap = displayTabs[1].favicon!!.asImageBitmap(), contentDescription = null, modifier = Modifier.size(14.dp))
+                                                        } else {
+                                                            Icon(Icons.Default.Language, null, modifier = Modifier.size(10.dp), tint = Color(group.groupColor))
+                                                        }
+                                                    } else {
+                                                        Box(modifier = Modifier.fillMaxSize().background(Color.White.copy(alpha = 0.3f)))
+                                                    }
                                                 }
                                             }
-
-                                            if (!isSelectionMode) {
-                                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                                    var showTabMenu by remember { mutableStateOf(false) }
-                                                    IconButton(
-                                                        onClick = { showTabMenu = true },
-                                                        modifier = Modifier.size(24.dp)
-                                                    ) {
-                                                        Icon(
-                                                            imageVector = Icons.Default.MoreVert,
-                                                            contentDescription = "Options",
-                                                            modifier = Modifier.size(14.dp)
-                                                        )
-                                                    }
-                                                    
-                                                    DropdownMenu(
-                                                        expanded = showTabMenu,
-                                                        onDismissRequest = { showTabMenu = false }
-                                                    ) {
-                                                        DropdownMenuItem(
-                                                            text = { Text("Move to New Group") },
-                                                            leadingIcon = { Icon(Icons.Default.GroupWork, null, modifier = Modifier.size(18.dp)) },
-                                                            onClick = {
-                                                                showTabMenu = false
-                                                                selectedTabForMoveGroup = tab
-                                                                showMoveNewGroupDialog = true
-                                                            }
-                                                        )
-                                                        state.tabs.mapNotNull { it.groupName }.distinct().forEach { existingGroupName ->
-                                                            DropdownMenuItem(
-                                                                text = { Text("Add to: $existingGroupName") },
-                                                                leadingIcon = { Icon(Icons.Default.Group, null, modifier = Modifier.size(18.dp)) },
-                                                                onClick = {
-                                                                    showTabMenu = false
-                                                                    val matchedTab = state.tabs.find { it.groupName == existingGroupName }
-                                                                    if (matchedTab != null) {
-                                                                        onMergeTabs(listOf(tab.id), existingGroupName, matchedTab.groupColor ?: 0xFF818CF8)
-                                                                    }
-                                                                }
-                                                            )
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                            Row(
+                                                modifier = Modifier.weight(1f).fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                            ) {
+                                                Box(
+                                                    modifier = Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(3.dp)).background(Color.White),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    if (displayTabs.size > 2) {
+                                                        if (displayTabs[2].favicon != null) {
+                                                            Image(bitmap = displayTabs[2].favicon!!.asImageBitmap(), contentDescription = null, modifier = Modifier.size(14.dp))
+                                                        } else {
+                                                            Icon(Icons.Default.Language, null, modifier = Modifier.size(10.dp), tint = Color(group.groupColor))
                                                         }
-                                                        DropdownMenuItem(
-                                                            text = { Text("Close Tab") },
-                                                            leadingIcon = { Icon(Icons.Default.Close, null, modifier = Modifier.size(18.dp)) },
-                                                            onClick = {
-                                                                showTabMenu = false
-                                                                onTabClose(tab.id)
-                                                            }
-                                                        )
-                                                    }
-                                                    
-                                                    IconButton(
-                                                        onClick = { onTabClose(tab.id) },
-                                                        modifier = Modifier.size(24.dp).testTag("close_tab_btn_${tab.id}")
-                                                    ) {
-                                                        Icon(
-                                                            imageVector = Icons.Default.Close,
-                                                            contentDescription = "Close tab",
-                                                            modifier = Modifier.size(14.dp)
-                                                        )
+                                                    } else {
+                                                        Box(modifier = Modifier.fillMaxSize().background(Color.White.copy(alpha = 0.3f)))
                                                     }
                                                 }
-                                            } else {
-                                                Checkbox(
-                                                    checked = isSelected,
-                                                    onCheckedChange = { checked ->
-                                                        if (checked == true) selectedTabIds.add(tab.id) else selectedTabIds.remove(tab.id)
-                                                    },
-                                                    modifier = Modifier.size(24.dp)
+                                                Box(
+                                                    modifier = Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(3.dp)).background(Color.White),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    if (displayTabs.size > 3) {
+                                                        if (displayTabs[3].favicon != null) {
+                                                            Image(bitmap = displayTabs[3].favicon!!.asImageBitmap(), contentDescription = null, modifier = Modifier.size(14.dp))
+                                                        } else {
+                                                            Icon(Icons.Default.Language, null, modifier = Modifier.size(10.dp), tint = Color(group.groupColor))
+                                                        }
+                                                    } else {
+                                                        Box(modifier = Modifier.fillMaxSize().background(Color.White.copy(alpha = 0.3f)))
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    
+                                    Spacer(modifier = Modifier.width(16.dp))
+                                    
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(10.dp)
+                                                    .background(Color(group.groupColor), CircleShape)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text(
+                                                text = group.groupName,
+                                                style = MaterialTheme.typography.titleMedium,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        
+                                        val maxActiveTime = group.tabs.maxOfOrNull { it.lastActiveTime } ?: System.currentTimeMillis()
+                                        val diffMs = System.currentTimeMillis() - maxActiveTime
+                                        val diffMinutes = (diffMs / (60 * 1000L)).toInt()
+                                        val diffHours = (diffMs / (3600 * 1000L)).toInt()
+                                        val diffDays = (diffMs / (24 * 3600 * 1000L)).toInt()
+                                        val updateText = when {
+                                            diffMinutes < 1 -> "Updated just now"
+                                            diffMinutes < 60 -> "Updated $diffMinutes mins ago"
+                                            diffHours < 24 -> "Updated $diffHours hr ago"
+                                            diffDays < 7 -> "Updated $diffDays days ago"
+                                            else -> "Updated ${(diffDays / 7)}w ago"
+                                        }
+                                        
+                                        Text(
+                                            text = "${group.tabs.size} tabs  •  $updateText",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    
+                                    Box {
+                                        IconButton(
+                                            onClick = { showGroupDropdown = true }
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.MoreVert,
+                                                contentDescription = "Group action menu"
+                                            )
+                                        }
+                                        
+                                        DropdownMenu(
+                                            expanded = showGroupDropdown,
+                                            onDismissRequest = { showGroupDropdown = false }
+                                        ) {
+                                            DropdownMenuItem(
+                                                text = { Text("Rename Group") },
+                                                leadingIcon = { Icon(Icons.Default.Edit, null, modifier = Modifier.size(18.dp)) },
+                                                onClick = {
+                                                    showGroupDropdown = false
+                                                    showRenameDialogInList = true
+                                                }
+                                            )
+                                            DropdownMenuItem(
+                                                text = { Text("Change Color") },
+                                                leadingIcon = { Icon(Icons.Default.Palette, null, modifier = Modifier.size(18.dp)) },
+                                                onClick = {
+                                                    showGroupDropdown = false
+                                                    showColorPickerInList = true
+                                                }
+                                            )
+                                            DropdownMenuItem(
+                                                text = { Text("Ungroup All") },
+                                                leadingIcon = { Icon(Icons.Default.LinkOff, null, modifier = Modifier.size(18.dp)) },
+                                                onClick = {
+                                                    showGroupDropdown = false
+                                                    group.tabs.forEach { onUngroupTab(it.id) }
+                                                }
+                                            )
+                                            DropdownMenuItem(
+                                                text = { Text("Close Group") },
+                                                leadingIcon = { Icon(Icons.Default.Close, null, modifier = Modifier.size(18.dp)) },
+                                                onClick = {
+                                                    showGroupDropdown = false
+                                                    group.tabs.forEach { onTabClose(it.id) }
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            if (showRenameDialogInList) {
+                                var textVal by remember { mutableStateOf(group.groupName) }
+                                AlertDialog(
+                                    onDismissRequest = { showRenameDialogInList = false },
+                                    title = { Text("Rename Group") },
+                                    text = {
+                                        OutlinedTextField(
+                                            value = textVal,
+                                            onValueChange = { textVal = it },
+                                            singleLine = true,
+                                            modifier = Modifier.fillMaxWidth()
+                                        )
+                                    },
+                                    confirmButton = {
+                                        TextButton(onClick = {
+                                            showRenameDialogInList = false
+                                            if (textVal.isNotBlank()) {
+                                                onRenameGroup(group.groupId, textVal)
+                                            }
+                                        }) {
+                                            Text("OK")
+                                        }
+                                    },
+                                    dismissButton = {
+                                        TextButton(onClick = { showRenameDialogInList = false }) {
+                                            Text("Cancel")
+                                        }
+                                    }
+                                )
+                            }
+                            
+                            if (showColorPickerInList) {
+                                val colorsGroup = listOf(0xFFF87171, 0xFF60A5FA, 0xFF34D399, 0xFFFBBF24, 0xFFA78BFA, 0xFFF472B6, 0xFF2DD4BF, 0xFFFB7185)
+                                AlertDialog(
+                                    onDismissRequest = { showColorPickerInList = false },
+                                    title = { Text("Choose Group Color") },
+                                    text = {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            colorsGroup.forEach { col ->
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(32.dp)
+                                                        .background(Color(col), CircleShape)
+                                                        .border(
+                                                            width = if (group.groupColor == col) 2.5.dp else 0.dp,
+                                                            color = if (group.groupColor == col) MaterialTheme.colorScheme.onSurface else Color.Transparent,
+                                                            shape = CircleShape
+                                                        )
+                                                        .clickable {
+                                                            onChangeGroupColor(group.groupId, col)
+                                                            showColorPickerInList = false
+                                                        }
                                                 )
                                             }
                                         }
-
-                                        Divider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.1f))
-
-                                        // Screenshot/Preview box below header
-                                        Box(
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .fillMaxWidth()
-                                                .background(MaterialTheme.colorScheme.surfaceVariant),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            if (tab.url == "orion://newtab" || tab.url == "orion://newtab-incognito") {
-                                                Box(
-                                                    modifier = Modifier
-                                                        .fillMaxSize()
-                                                        .frostedGlassBackground(state.newTabWallpaper),
-                                                    contentAlignment = Alignment.Center
-                                                ) {
-                                                    Text(
-                                                        text = if (tab.isIncognito) "Private Tab" else "New Tab",
-                                                        color = Color.White.copy(alpha = 0.6f),
-                                                        fontSize = 12.sp,
-                                                        fontWeight = FontWeight.Medium
-                                                    )
+                                    },
+                                    confirmButton = {
+                                        TextButton(onClick = { showColorPickerInList = false }) {
+                                            Text("Done")
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            } else if (state.isTabsListView) {         if (state.isTabsListView) {
+                // Tab cards vertical list with drag-and-drop to reorder
+                LazyColumn(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(gridItems) { gridItem ->
+                        when (gridItem) {
+                            is TabGridItem.SingleTab -> {
+                                val tab = gridItem.tab
+                                val isActive = tab.id == state.activeTabId
+                                val isSelected = selectedTabIds.contains(tab.id)
+                                
+                                val isCurrentDragging = draggedItemId == tab.id
+                                val translationY = if (isCurrentDragging) draggingOffset.y else 0f
+                                val scale = if (isCurrentDragging) 1.04f else 1.0f
+                                val alpha = if (isCurrentDragging) 0.85f else 1.0f
+                                val zIndex = if (isCurrentDragging) 2f else 0f
+                                
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(84.dp)
+                                        .zIndex(zIndex)
+                                        .graphicsLayer {
+                                            this.translationY = translationY
+                                            this.scaleX = scale
+                                            this.scaleY = scale
+                                            this.alpha = alpha
+                                        }
+                                        .pointerInput(tab.id) {
+                                            detectDragGesturesAfterLongPress(
+                                                onDragStart = { offset ->
+                                                    draggedItemId = tab.id
+                                                    draggingOffset = Offset.Zero
+                                                },
+                                                onDrag = { change, dragAmount ->
+                                                    change.consume()
+                                                    draggingOffset += dragAmount
+                                                    
+                                                    val threshold = 180f
+                                                    if (draggingOffset.y > threshold) {
+                                                        val currentIdx = gridItems.indexOfFirst { 
+                                                            it is TabGridItem.SingleTab && it.tab.id == tab.id 
+                                                        }
+                                                        if (currentIdx != -1 && currentIdx < gridItems.lastIndex) {
+                                                            val target = gridItems[currentIdx + 1]
+                                                            if (target is TabGridItem.SingleTab) {
+                                                                onMoveTab(tab.id, target.tab.id)
+                                                                draggingOffset = draggingOffset.copy(y = draggingOffset.y - threshold)
+                                                            }
+                                                        }
+                                                    } else if (draggingOffset.y < -threshold) {
+                                                        val currentIdx = gridItems.indexOfFirst { 
+                                                            it is TabGridItem.SingleTab && it.tab.id == tab.id 
+                                                        }
+                                                        if (currentIdx > 0) {
+                                                            val target = gridItems[currentIdx - 1]
+                                                            if (target is TabGridItem.SingleTab) {
+                                                                onMoveTab(tab.id, target.tab.id)
+                                                                draggingOffset = draggingOffset.copy(y = draggingOffset.y + threshold)
+                                                            }
+                                                        }
+                                                    }
+                                                },
+                                                onDragEnd = {
+                                                    draggedItemId = null
+                                                    draggingOffset = Offset.Zero
+                                                },
+                                                onDragCancel = {
+                                                    draggedItemId = null
+                                                    draggingOffset = Offset.Zero
                                                 }
-                                            } else if (tab.screenshot != null) {
-                                                Image(
-                                                    bitmap = tab.screenshot.asImageBitmap(),
-                                                    contentDescription = tab.title,
-                                                    modifier = Modifier.fillMaxSize(),
-                                                    contentScale = ContentScale.Crop
-                                                )
+                                            )
+                                        }
+                                        .clickable {
+                                            if (isSelectionMode) {
+                                                if (isSelected) selectedTabIds.remove(tab.id) else selectedTabIds.add(tab.id)
                                             } else {
-                                                Column(
-                                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                                    verticalArrangement = Arrangement.Center
+                                                onTabSelect(tab.id)
+                                            }
+                                        }
+                                        .testTag("tab_list_card_${tab.id}"),
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = if (isSelected) {
+                                            MaterialTheme.colorScheme.primaryContainer
+                                        } else if (isActive) {
+                                            MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f)
+                                        } else {
+                                            MaterialTheme.colorScheme.surface
+                                        }
+                                    ),
+                                    border = BorderStroke(
+                                        width = if (isSelected) 3.dp else if (isActive) 2.dp else if (tab.groupId != null) 2.5.dp else 0.5.dp,
+                                        color = if (isSelected) {
+                                            MaterialTheme.colorScheme.primary
+                                        } else if (isActive) {
+                                            MaterialTheme.colorScheme.secondary
+                                        } else if (tab.groupId != null) {
+                                            Color(tab.groupColor ?: 0xFF818CF8)
+                                        } else {
+                                            MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+                                        }
+                                    )
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .padding(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        if (tab.favicon != null) {
+                                            Image(
+                                                bitmap = tab.favicon.asImageBitmap(),
+                                                contentDescription = null,
+                                                modifier = Modifier
+                                                    .size(40.dp)
+                                                    .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
+                                                    .padding(6.dp)
+                                            )
+                                        } else {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(40.dp)
+                                                    .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp)),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Language,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(24.dp),
+                                                    tint = MaterialTheme.colorScheme.primary
+                                                )
+                                            }
+                                        }
+                                        
+                                        Spacer(modifier = Modifier.width(12.dp))
+                                        
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            if (!tab.groupName.isNullOrEmpty()) {
+                                                Text(
+                                                    text = tab.groupName,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = Color(tab.groupColor ?: 0xFF818CF8)
+                                                )
+                                            }
+                                            Text(
+                                                text = tab.title,
+                                                style = MaterialTheme.typography.titleSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            val domainStr = try {
+                                                android.net.Uri.parse(tab.url).host ?: ""
+                                            } catch (e: Exception) {
+                                                ""
+                                            }
+                                            Text(
+                                                text = domainStr.ifEmpty { "New Tab" },
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                        
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        
+                                        if (!isSelectionMode) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                var showTabMenu by remember { mutableStateOf(false) }
+                                                IconButton(
+                                                    onClick = { showTabMenu = true },
+                                                    modifier = Modifier.size(36.dp)
                                                 ) {
                                                     Icon(
-                                                        imageVector = Icons.Default.Web,
-                                                        contentDescription = null,
-                                                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                                                        modifier = Modifier.size(28.dp)
-                                                    )
-                                                    Spacer(modifier = Modifier.height(4.dp))
-                                                    val domainStr = try {
-                                                        android.net.Uri.parse(tab.url).host ?: ""
-                                                    } catch (e: Exception) {
-                                                        ""
-                                                    }
-                                                    Text(
-                                                        text = domainStr.ifEmpty { "No Preview" },
-                                                        fontSize = 9.sp,
-                                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                                                        maxLines = 1,
-                                                        overflow = TextOverflow.Ellipsis
+                                                        imageVector = Icons.Default.MoreVert,
+                                                        contentDescription = "Options"
                                                     )
                                                 }
+                                                
+                                                DropdownMenu(
+                                                    expanded = showTabMenu,
+                                                    onDismissRequest = { showTabMenu = false }
+                                                ) {
+                                                    DropdownMenuItem(
+                                                        text = { Text("Move to New Group") },
+                                                        leadingIcon = { Icon(Icons.Default.GroupWork, null, modifier = Modifier.size(18.dp)) },
+                                                        onClick = {
+                                                            showTabMenu = false
+                                                            selectedTabForMoveGroup = tab
+                                                            showMoveNewGroupDialog = true
+                                                        }
+                                                    )
+                                                    state.tabs.mapNotNull { it.groupName }.distinct().forEach { existingGroupName ->
+                                                        DropdownMenuItem(
+                                                            text = { Text("Add to: $existingGroupName") },
+                                                            leadingIcon = { Icon(Icons.Default.Group, null, modifier = Modifier.size(18.dp)) },
+                                                            onClick = {
+                                                                showTabMenu = false
+                                                                val matchedTab = state.tabs.find { it.groupName == existingGroupName }
+                                                                if (matchedTab != null) {
+                                                                    onMergeTabs(listOf(tab.id), existingGroupName, matchedTab.groupColor ?: 0xFF818CF8)
+                                                                }
+                                                            }
+                                                        )
+                                                    }
+                                                    DropdownMenuItem(
+                                                        text = { Text("Close Tab") },
+                                                        leadingIcon = { Icon(Icons.Default.Close, null, modifier = Modifier.size(18.dp)) },
+                                                        onClick = {
+                                                            showTabMenu = false
+                                                            onTabClose(tab.id)
+                                                        }
+                                                    )
+                                                }
+                                                
+                                                IconButton(
+                                                    onClick = { onTabClose(tab.id) },
+                                                    modifier = Modifier.size(36.dp).testTag("close_tab_btn_${tab.id}")
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Close,
+                                                        contentDescription = "Close tab"
+                                                    )
+                                                }
+                                            }
+                                        } else {
+                                            Checkbox(
+                                                checked = isSelected,
+                                                onCheckedChange = { checked ->
+                                                    if (checked == true) selectedTabIds.add(tab.id) else selectedTabIds.remove(tab.id)
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            is TabGridItem.TabGroup -> {
+                                val group = gridItem
+                                val hasActiveMember = group.tabs.any { it.id == state.activeTabId }
+                                
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(84.dp)
+                                        .clickable {
+                                            if (!isSelectionMode) {
+                                                activeGroupToDetail = group
+                                            }
+                                        },
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = if (hasActiveMember) {
+                                            MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f)
+                                        } else {
+                                            MaterialTheme.colorScheme.surface
+                                        }
+                                    ),
+                                    border = BorderStroke(
+                                        width = if (hasActiveMember) 2.dp else 1.5.dp,
+                                        color = Color(group.groupColor)
+                                    )
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .padding(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(40.dp)
+                                                .background(Color(group.groupColor).copy(alpha = 0.2f), RoundedCornerShape(8.dp)),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(16.dp)
+                                                    .background(Color(group.groupColor), CircleShape)
+                                            )
+                                        }
+                                        
+                                        Spacer(modifier = Modifier.width(12.dp))
+                                        
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = group.groupName,
+                                                style = MaterialTheme.typography.titleMedium,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(group.groupColor),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Text(
+                                                text = "${group.tabs.size} tabs in group",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        
+                                        if (!isSelectionMode) {
+                                            IconButton(
+                                                onClick = { group.tabs.forEach { onTabClose(it.id) } },
+                                                modifier = Modifier.size(36.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Close,
+                                                    contentDescription = "Close Group"
+                                                )
                                             }
                                         }
                                     }
                                 }
                             }
                         }
-                        is TabGridItem.TabGroup -> {
-                            val group = gridItem
-                            val hasActiveMember = group.tabs.any { it.id == state.activeTabId }
-                            
-                            Card(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .aspectRatio(0.75f)
-                                    .clickable {
-                                        if (!isSelectionMode) {
-                                            activeGroupToDetail = group
+                    }
+                }
+            } else {
+                // Tab cards grid with drag-and-drop to reorder
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(2),
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    items(gridItems) { gridItem ->
+                        when (gridItem) {
+                            is TabGridItem.SingleTab -> {
+                                val tab = gridItem.tab
+                                val isActive = tab.id == state.activeTabId
+                                val isSelected = selectedTabIds.contains(tab.id)
+                                
+                                val isCurrentDragging = draggedItemId == tab.id
+                                val translationX = if (isCurrentDragging) draggingOffset.x else 0f
+                                val translationY = if (isCurrentDragging) draggingOffset.y else 0f
+                                val scale = if (isCurrentDragging) 1.05f else 1.0f
+                                val alpha = if (isCurrentDragging) 0.85f else 1.0f
+                                val zIndex = if (isCurrentDragging) 2f else 0f
+                                
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .aspectRatio(0.75f)
+                                        .zIndex(zIndex)
+                                        .graphicsLayer {
+                                            this.translationX = translationX
+                                            this.translationY = translationY
+                                            this.scaleX = scale
+                                            this.scaleY = scale
+                                            this.alpha = alpha
                                         }
-                                    },
-                                colors = CardDefaults.cardColors(
-                                    containerColor = if (hasActiveMember) {
-                                        MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f)
-                                    } else {
-                                        MaterialTheme.colorScheme.surface
-                                    }
-                                ),
-                                border = BorderStroke(
-                                    width = if (hasActiveMember) 2.dp else 1.5.dp,
-                                    color = Color(group.groupColor)
-                                )
-                            ) {
-                                Box(modifier = Modifier.fillMaxSize()) {
-                                    Column(modifier = Modifier.fillMaxSize()) {
-                                        // Tab Group Header Page Card
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .padding(6.dp),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
+                                        .pointerInput(tab.id) {
+                                            detectDragGesturesAfterLongPress(
+                                                onDragStart = { offset ->
+                                                    draggedItemId = tab.id
+                                                    draggingOffset = Offset.Zero
+                                                },
+                                                onDrag = { change, dragAmount ->
+                                                    change.consume()
+                                                    draggingOffset += dragAmount
+                                                    
+                                                    val xThreshold = 180f
+                                                    val yThreshold = 240f
+                                                    if (draggingOffset.x > xThreshold) {
+                                                        val currentIdx = gridItems.indexOfFirst { 
+                                                            it is TabGridItem.SingleTab && it.tab.id == tab.id 
+                                                        }
+                                                        if (currentIdx != -1 && currentIdx < gridItems.lastIndex) {
+                                                            val target = gridItems[currentIdx + 1]
+                                                            if (target is TabGridItem.SingleTab) {
+                                                                onMoveTab(tab.id, target.tab.id)
+                                                                draggingOffset = draggingOffset.copy(x = draggingOffset.x - xThreshold)
+                                                            }
+                                                        }
+                                                    } else if (draggingOffset.x < -xThreshold) {
+                                                        val currentIdx = gridItems.indexOfFirst { 
+                                                            it is TabGridItem.SingleTab && it.tab.id == tab.id 
+                                                        }
+                                                        if (currentIdx > 0) {
+                                                            val target = gridItems[currentIdx - 1]
+                                                            if (target is TabGridItem.SingleTab) {
+                                                                onMoveTab(tab.id, target.tab.id)
+                                                                draggingOffset = draggingOffset.copy(x = draggingOffset.x + xThreshold)
+                                                            }
+                                                        }
+                                                    }
+                                                    
+                                                    if (draggingOffset.y > yThreshold) {
+                                                        val currentIdx = gridItems.indexOfFirst { 
+                                                            it is TabGridItem.SingleTab && it.tab.id == tab.id 
+                                                        }
+                                                        if (currentIdx != -1 && currentIdx + 2 in gridItems.indices) {
+                                                            val target = gridItems[currentIdx + 2]
+                                                            if (target is TabGridItem.SingleTab) {
+                                                                onMoveTab(tab.id, target.tab.id)
+                                                                draggingOffset = draggingOffset.copy(y = draggingOffset.y - yThreshold)
+                                                            }
+                                                        }
+                                                    } else if (draggingOffset.y < -yThreshold) {
+                                                        val currentIdx = gridItems.indexOfFirst { 
+                                                            it is TabGridItem.SingleTab && it.tab.id == tab.id 
+                                                        }
+                                                        if (currentIdx - 2 in gridItems.indices) {
+                                                            val target = gridItems[currentIdx - 2]
+                                                            if (target is TabGridItem.SingleTab) {
+                                                                onMoveTab(tab.id, target.tab.id)
+                                                                draggingOffset = draggingOffset.copy(y = draggingOffset.y + yThreshold)
+                                                            }
+                                                        }
+                                                    }
+                                                },
+                                                onDragEnd = {
+                                                    draggedItemId = null
+                                                    draggingOffset = Offset.Zero
+                                                },
+                                                onDragCancel = {
+                                                    draggedItemId = null
+                                                    draggingOffset = Offset.Zero
+                                                }
+                                            )
+                                        }
+                                        .clickable {
+                                            if (isSelectionMode) {
+                                                if (isSelected) selectedTabIds.remove(tab.id) else selectedTabIds.add(tab.id)
+                                            } else {
+                                                onTabSelect(tab.id)
+                                            }
+                                        }
+                                        .testTag("tab_card_${tab.id}"),
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = if (isSelected) {
+                                            MaterialTheme.colorScheme.primaryContainer
+                                        } else if (isActive) {
+                                            MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f)
+                                        } else {
+                                            MaterialTheme.colorScheme.surface
+                                        }
+                                    ),
+                                    border = BorderStroke(
+                                        width = if (isSelected) 3.dp else if (isActive) 2.dp else if (tab.groupId != null) 2.5.dp else 0.5.dp,
+                                        color = if (isSelected) {
+                                            MaterialTheme.colorScheme.primary
+                                        } else if (isActive) {
+                                            MaterialTheme.colorScheme.secondary
+                                        } else if (tab.groupId != null) {
+                                            Color(tab.groupColor ?: 0xFF818CF8)
+                                        } else {
+                                            MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+                                        }
+                                    )
+                                ) {
+                                    Box(modifier = Modifier.fillMaxSize()) {
+                                        Column(modifier = Modifier.fillMaxSize()) {
+                                            // Header of each tab card
                                             Row(
-                                                modifier = Modifier.weight(1f),
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(8.dp),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
                                                 verticalAlignment = Alignment.CenterVertically
                                             ) {
-                                                Box(
-                                                    modifier = Modifier
-                                                        .size(10.dp)
-                                                        .background(Color(group.groupColor), CircleShape)
-                                                )
-                                                Spacer(modifier = Modifier.width(6.dp))
-                                                Text(
-                                                    text = group.groupName,
-                                                    fontSize = 11.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = Color(group.groupColor),
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis
-                                                )
-                                                Spacer(modifier = Modifier.width(4.dp))
-                                                Text(
-                                                    text = "(${group.tabs.size} tabs)",
-                                                    fontSize = 9.sp,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                )
-                                            }
-
-                                            if (!isSelectionMode) {
-                                                IconButton(
-                                                    onClick = {
-                                                        // Close group (close all child tabs)
-                                                        group.tabs.forEach { onTabClose(it.id) }
-                                                    },
-                                                    modifier = Modifier.size(20.dp)
+                                                Row(
+                                                    modifier = Modifier.weight(1f),
+                                                    verticalAlignment = Alignment.CenterVertically
                                                 ) {
-                                                    Icon(
-                                                        imageVector = Icons.Default.Close,
-                                                        contentDescription = "Close Group",
-                                                        modifier = Modifier.size(12.dp)
+                                                    if (tab.favicon != null) {
+                                                        Image(
+                                                            bitmap = tab.favicon.asImageBitmap(),
+                                                            contentDescription = null,
+                                                            modifier = Modifier.size(16.dp)
+                                                        )
+                                                    } else {
+                                                        Icon(
+                                                            imageVector = Icons.Default.Language,
+                                                            contentDescription = null,
+                                                            modifier = Modifier.size(16.dp),
+                                                            tint = MaterialTheme.colorScheme.primary
+                                                        )
+                                                    }
+                                                    Spacer(modifier = Modifier.width(6.dp))
+                                                    Column {
+                                                        if (!tab.groupName.isNullOrEmpty()) {
+                                                            Text(
+                                                                text = tab.groupName,
+                                                                fontSize = 9.sp,
+                                                                fontWeight = FontWeight.Bold,
+                                                                color = Color(tab.groupColor ?: 0xFF818CF8)
+                                                            )
+                                                        }
+                                                        Text(
+                                                            text = tab.title,
+                                                            fontSize = 11.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            color = MaterialTheme.colorScheme.onSurface,
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis
+                                                        )
+                                                    }
+                                                }
+                                                
+                                                if (!isSelectionMode) {
+                                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                                        var showTabMenu by remember { mutableStateOf(false) }
+                                                        IconButton(
+                                                            onClick = { showTabMenu = true },
+                                                            modifier = Modifier.size(24.dp)
+                                                        ) {
+                                                            Icon(
+                                                                imageVector = Icons.Default.MoreVert,
+                                                                contentDescription = "Options",
+                                                                modifier = Modifier.size(14.dp)
+                                                            )
+                                                        }
+                                                        
+                                                        DropdownMenu(
+                                                            expanded = showTabMenu,
+                                                            onDismissRequest = { showTabMenu = false }
+                                                        ) {
+                                                            DropdownMenuItem(
+                                                                text = { Text("Move to New Group") },
+                                                                leadingIcon = { Icon(Icons.Default.GroupWork, null, modifier = Modifier.size(18.dp)) },
+                                                                onClick = {
+                                                                    showTabMenu = false
+                                                                    selectedTabForMoveGroup = tab
+                                                                    showMoveNewGroupDialog = true
+                                                                }
+                                                            )
+                                                            state.tabs.mapNotNull { it.groupName }.distinct().forEach { existingGroupName ->
+                                                                DropdownMenuItem(
+                                                                    text = { Text("Add to: $existingGroupName") },
+                                                                    leadingIcon = { Icon(Icons.Default.Group, null, modifier = Modifier.size(18.dp)) },
+                                                                    onClick = {
+                                                                        showTabMenu = false
+                                                                        val matchedTab = state.tabs.find { it.groupName == existingGroupName }
+                                                                        if (matchedTab != null) {
+                                                                            onMergeTabs(listOf(tab.id), existingGroupName, matchedTab.groupColor ?: 0xFF818CF8)
+                                                                        }
+                                                                    }
+                                                                )
+                                                            }
+                                                            DropdownMenuItem(
+                                                                text = { Text("Close Tab") },
+                                                                leadingIcon = { Icon(Icons.Default.Close, null, modifier = Modifier.size(18.dp)) },
+                                                                onClick = {
+                                                                    showTabMenu = false
+                                                                    onTabClose(tab.id)
+                                                                }
+                                                            )
+                                                        }
+                                                        
+                                                        IconButton(
+                                                            onClick = { onTabClose(tab.id) },
+                                                            modifier = Modifier.size(24.dp).testTag("close_tab_btn_${tab.id}")
+                                                        ) {
+                                                            Icon(
+                                                                imageVector = Icons.Default.Close,
+                                                                contentDescription = "Close tab",
+                                                                modifier = Modifier.size(14.dp)
+                                                            )
+                                                        }
+                                                    }
+                                                } else {
+                                                    Checkbox(
+                                                        checked = isSelected,
+                                                        onCheckedChange = { checked ->
+                                                            if (checked == true) selectedTabIds.add(tab.id) else selectedTabIds.remove(tab.id)
+                                                        },
+                                                        modifier = Modifier.size(24.dp)
                                                     )
                                                 }
                                             }
-                                        }
-
-                                        Divider(color = Color(group.groupColor).copy(alpha = 0.2f))
-
-                                        // Collage representing tabs in group
-                                        Box(
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .fillMaxWidth()
-                                                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
-                                                .padding(6.dp)
-                                        ) {
-                                            val displayTabs = group.tabs.take(4)
-                                            when (displayTabs.size) {
-                                                1 -> {
-                                                    val t = displayTabs[0]
-                                                    if (t.screenshot != null) {
-                                                        Image(bitmap = t.screenshot.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                                                    } else {
-                                                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                                            Icon(Icons.Default.Web, null, modifier = Modifier.size(24.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                                            
+                                            Divider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.1f))
+                                            
+                                            // Screenshot/Preview box below header
+                                            Box(
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .fillMaxWidth()
+                                                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                if (tab.url == "orion://newtab" || tab.url == "orion://newtab-incognito") {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .fillMaxSize()
+                                                            .frostedGlassBackground(state.newTabWallpaper),
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Text(
+                                                            text = if (tab.isIncognito) "Private Tab" else "New Tab",
+                                                            color = Color.White.copy(alpha = 0.6f),
+                                                            fontSize = 12.sp,
+                                                            fontWeight = FontWeight.Medium
+                                                        )
+                                                    }
+                                                } else if (tab.screenshot != null) {
+                                                    Image(
+                                                        bitmap = tab.screenshot.asImageBitmap(),
+                                                        contentDescription = tab.title,
+                                                        modifier = Modifier.fillMaxSize(),
+                                                        contentScale = ContentScale.Crop
+                                                    )
+                                                } else {
+                                                    Column(
+                                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                                        verticalArrangement = Arrangement.Center
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.Web,
+                                                            contentDescription = null,
+                                                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                                                            modifier = Modifier.size(28.dp)
+                                                        )
+                                                        Spacer(modifier = Modifier.height(4.dp))
+                                                        val domainStr = try {
+                                                            android.net.Uri.parse(tab.url).host ?: ""
+                                                        } catch (e: Exception) {
+                                                            ""
                                                         }
+                                                        Text(
+                                                            text = domainStr.ifEmpty { "No Preview" },
+                                                            fontSize = 9.sp,
+                                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis
+                                                        )
                                                     }
                                                 }
-                                                2 -> {
-                                                    Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                                        displayTabs.forEach { t ->
-                                                            Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            is TabGridItem.TabGroup -> {
+                                val group = gridItem
+                                val hasActiveMember = group.tabs.any { it.id == state.activeTabId }
+                                
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .aspectRatio(0.75f)
+                                        .clickable {
+                                            if (!isSelectionMode) {
+                                                activeGroupToDetail = group
+                                            }
+                                        },
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = if (hasActiveMember) {
+                                            MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f)
+                                        } else {
+                                            MaterialTheme.colorScheme.surface
+                                        }
+                                    ),
+                                    border = BorderStroke(
+                                        width = if (hasActiveMember) 2.dp else 1.5.dp,
+                                        color = Color(group.groupColor)
+                                    )
+                                ) {
+                                    Box(modifier = Modifier.fillMaxSize()) {
+                                        Column(modifier = Modifier.fillMaxSize()) {
+                                            // Tab Group Header Page Card
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(6.dp),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier.weight(1f),
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(10.dp)
+                                                            .background(Color(group.groupColor), CircleShape)
+                                                    )
+                                                    Spacer(modifier = Modifier.width(6.dp))
+                                                    Text(
+                                                        text = group.groupName,
+                                                        fontSize = 11.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = Color(group.groupColor),
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                    Spacer(modifier = Modifier.width(4.dp))
+                                                    Text(
+                                                        text = "(${group.tabs.size} tabs)",
+                                                        fontSize = 9.sp,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                    )
+                                                    Spacer(modifier = Modifier.width(4.dp))
+                                                    IconButton(
+                                                        onClick = {
+                                                            if (group.isCollapsed) {
+                                                                onExpandGroup(group.groupId)
+                                                            } else {
+                                                                onCollapseGroup(group.groupId)
+                                                            }
+                                                        },
+                                                        modifier = Modifier.size(18.dp)
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = if (group.isCollapsed) Icons.Default.ExpandMore else Icons.Default.ExpandLess,
+                                                            contentDescription = if (group.isCollapsed) "Expand Group" else "Collapse Group",
+                                                            tint = Color(group.groupColor),
+                                                            modifier = Modifier.size(12.dp)
+                                                        )
+                                                    }
+                                                }
+                                                
+                                                if (!isSelectionMode) {
+                                                    IconButton(
+                                                        onClick = {
+                                                            // Close group (close all child tabs)
+                                                            group.tabs.forEach { onTabClose(it.id) }
+                                                        },
+                                                        modifier = Modifier.size(20.dp)
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.Close,
+                                                            contentDescription = "Close Group",
+                                                            modifier = Modifier.size(12.dp)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                            
+                                            Divider(color = Color(group.groupColor).copy(alpha = 0.2f))
+                                            
+                                            // Collage representing tabs in group
+                                            Box(
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .fillMaxWidth()
+                                                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+                                                    .padding(6.dp)
+                                            ) {
+                                                val displayTabs = group.tabs.take(4)
+                                                when (displayTabs.size) {
+                                                    1 -> {
+                                                        val t = displayTabs[0]
+                                                        if (t.screenshot != null) {
+                                                            Image(bitmap = t.screenshot.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                                        } else {
+                                                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                                                Icon(Icons.Default.Web, null, modifier = Modifier.size(24.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                                                            }
+                                                        }
+                                                    }
+                                                    2 -> {
+                                                        Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                            displayTabs.forEach { t ->
+                                                                Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                                                                    if (t.screenshot != null) {
+                                                                        Image(bitmap = t.screenshot.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                                                    } else {
+                                                                        Icon(Icons.Default.Language, null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    3 -> {
+                                                        Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                            Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                                listOf(displayTabs[0], displayTabs[1]).forEach { t ->
+                                                                    Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                                                                        if (t.screenshot != null) {
+                                                                            Image(bitmap = t.screenshot.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                                                        } else {
+                                                                            Icon(Icons.Default.Language, null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                                                                val t = displayTabs[2]
                                                                 if (t.screenshot != null) {
                                                                     Image(bitmap = t.screenshot.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                                                                 } else {
-                                                                    Icon(Icons.Default.Language, null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                                                                    Icon(Icons.Default.Language, null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
                                                                 }
                                                             }
                                                         }
                                                     }
-                                                }
-                                                3 -> {
-                                                    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                                        Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                                            listOf(displayTabs[0], displayTabs[1]).forEach { t ->
-                                                                Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
-                                                                    if (t.screenshot != null) {
-                                                                        Image(bitmap = t.screenshot.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                                                                    } else {
-                                                                        Icon(Icons.Default.Language, null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                                                    else -> { // 4 or more
+                                                        Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                            Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                                listOf(displayTabs[0], displayTabs[1]).forEach { t ->
+                                                                    Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                                                                        if (t.screenshot != null) {
+                                                                            Image(bitmap = t.screenshot.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                                                        } else {
+                                                                            Icon(Icons.Default.Language, null, modifier = Modifier.size(12.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                                                                        }
                                                                     }
                                                                 }
                                                             }
-                                                        }
-                                                        Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                                                            val t = displayTabs[2]
-                                                            if (t.screenshot != null) {
-                                                                Image(bitmap = t.screenshot.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                                                            } else {
-                                                                Icon(Icons.Default.Language, null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                else -> { // 4 or more
-                                                    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                                        Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                                            listOf(displayTabs[0], displayTabs[1]).forEach { t ->
-                                                                Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
-                                                                    if (t.screenshot != null) {
-                                                                        Image(bitmap = t.screenshot.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                                                                    } else {
-                                                                        Icon(Icons.Default.Language, null, modifier = Modifier.size(12.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                        Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                                            listOf(displayTabs[2], displayTabs[3]).forEach { t ->
-                                                                Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
-                                                                    if (t.screenshot != null) {
-                                                                        Image(bitmap = t.screenshot.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                                                                    } else {
-                                                                        Icon(Icons.Default.Language, null, modifier = Modifier.size(12.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                                                            Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                                listOf(displayTabs[2], displayTabs[3]).forEach { t ->
+                                                                    Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                                                                        if (t.screenshot != null) {
+                                                                            Image(bitmap = t.screenshot.asImageBitmap(), contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                                                        } else {
+                                                                            Icon(Icons.Default.Language, null, modifier = Modifier.size(12.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                                                                        }
                                                                     }
                                                                 }
                                                             }
@@ -2976,7 +3888,7 @@ fun TabSwitcherLayout(
                         }
                     }
                 }
-            }
+            }            }
 
             // Horizontally Scrollable Recently Closed Tabs
             if (state.recentlyClosedTabs.isNotEmpty() && !isSelectionMode) {
@@ -3048,24 +3960,25 @@ fun TabSwitcherLayout(
         var showColorPicker by remember { mutableStateOf(false) }
         
         Dialog(
-            onDismissRequest = { activeGroupToDetail = null }
+            onDismissRequest = { activeGroupToDetail = null },
+            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
         ) {
             Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .fillMaxHeight(0.8f),
-                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxSize(),
+                shape = androidx.compose.ui.graphics.RectangleShape,
                 color = MaterialTheme.colorScheme.surface,
-                tonalElevation = 8.dp
+                tonalElevation = 0.dp
             ) {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(16.dp)
                 ) {
-                    // Header of Group sheet dialog
+                    // Header of Group sheet dialog (High-Fidelity Chrome Experience!)
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
@@ -3073,35 +3986,101 @@ fun TabSwitcherLayout(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier.weight(1f)
                         ) {
+                            IconButton(onClick = { activeGroupToDetail = null }) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                    contentDescription = "Back"
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(4.dp))
+                            
                             // Colored circle indicator picker toggler
                             Box(
                                 modifier = Modifier
-                                    .size(20.dp)
+                                    .size(16.dp)
                                     .background(Color(group.groupColor), CircleShape)
                                     .clickable { showColorPicker = !showColorPicker }
                             )
-                            Spacer(modifier = Modifier.width(12.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
                             
-                            OutlinedTextField(
+                            androidx.compose.foundation.text.BasicTextField(
                                 value = localGroupName,
                                 onValueChange = {
                                     localGroupName = it
                                     onRenameGroup(group.groupId, it)
                                 },
                                 textStyle = MaterialTheme.typography.titleMedium.copy(
-                                    fontWeight = FontWeight.Bold
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface
                                 ),
                                 singleLine = true,
-                                modifier = Modifier.weight(1f),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = Color(group.groupColor),
-                                    unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
-                                )
+                                modifier = Modifier.weight(1f)
                             )
                         }
                         
-                        IconButton(onClick = { activeGroupToDetail = null }) {
-                            Icon(Icons.Default.Close, contentDescription = "Close details")
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            // Plus Add Tab Icon Button as shown in video top bar!
+                            IconButton(
+                                onClick = {
+                                    onNewTabInGroup(group.groupId, isShowingIncognitoFilter)
+                                    activeGroupToDetail = null
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Add,
+                                    contentDescription = "New Tab in Group"
+                                )
+                            }
+                            
+                            // More options vert
+                            var showHeaderDropdownMenu by remember { mutableStateOf(false) }
+                            Box {
+                                IconButton(onClick = { showHeaderDropdownMenu = true }) {
+                                    Icon(
+                                        imageVector = Icons.Default.MoreVert,
+                                        contentDescription = "More options"
+                                    )
+                                }
+                                
+                                DropdownMenu(
+                                    expanded = showHeaderDropdownMenu,
+                                    onDismissRequest = { showHeaderDropdownMenu = false }
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("Rename Group") },
+                                        leadingIcon = { Icon(Icons.Default.Edit, null, modifier = Modifier.size(18.dp)) },
+                                        onClick = {
+                                            showHeaderDropdownMenu = false
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Pick Color") },
+                                        leadingIcon = { Icon(Icons.Default.Palette, null, modifier = Modifier.size(18.dp)) },
+                                        onClick = {
+                                            showHeaderDropdownMenu = false
+                                            showColorPicker = !showColorPicker
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Ungroup All") },
+                                        leadingIcon = { Icon(Icons.Default.LinkOff, null, modifier = Modifier.size(18.dp)) },
+                                        onClick = {
+                                            showHeaderDropdownMenu = false
+                                            group.tabs.forEach { onUngroupTab(it.id) }
+                                            activeGroupToDetail = null
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Close Group") },
+                                        leadingIcon = { Icon(Icons.Default.Close, null, modifier = Modifier.size(18.dp)) },
+                                        onClick = {
+                                            showHeaderDropdownMenu = false
+                                            group.tabs.forEach { onTabClose(it.id) }
+                                            activeGroupToDetail = null
+                                        }
+                                    )
+                                }
+                            }
                         }
                     }
                     
@@ -3151,27 +4130,13 @@ fun TabSwitcherLayout(
                         )
                         
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            // Add Tab inside Group Button
-                            TextButton(
-                                onClick = {
-                                    onNewTabInGroup(group.groupId, isShowingIncognitoFilter)
-                                    activeGroupToDetail = null
-                                }
-                            ) {
-                                Icon(Icons.Default.Add, contentDescription = "Add inline", modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Add tab")
-                            }
-                            
-                            // Ungroup group button
-                            TextButton(
-                                onClick = {
-                                    group.tabs.forEach { onUngroupTab(it.id) }
-                                    activeGroupToDetail = null
-                                }
-                            ) {
-                                Text("Ungroup All")
-                            }
+                            // Non-invasive inline clean indicator text or action
+                            Text(
+                                text = "Drag to customize order",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                modifier = Modifier.padding(top = 4.dp, end = 4.dp)
+                            )
                         }
                     }
                     
@@ -3959,10 +4924,13 @@ fun SettingsOverlay(
                         })
                     }
                     "ai_settings" -> {
-                        AISettingsFragment(onBack = {
-                            currentScreen = "main"
-                            viewModel.refreshSettings()
-                        })
+                        AISettingsFragment(
+                            viewModel = viewModel,
+                            onBack = {
+                                currentScreen = "main"
+                                viewModel.refreshSettings()
+                            }
+                        )
                     }
                 }
             }
@@ -4241,13 +5209,14 @@ fun HistoryOverlay(
     history: List<HistoryItem>,
     onDismiss: () -> Unit,
     onNavigate: (String) -> Unit,
-    onDelete: (Long) -> Unit,
+    onDelete: (Int) -> Unit,
     onClearAll: () -> Unit,
     onClearBrowsingData: (Boolean, Boolean, Boolean, Int) -> Unit,
-    isGlass: Boolean = false
+    isGlass: Boolean = false,
+    initialSearchQuery: String = ""
 ) {
-    var searchQuery by remember { mutableStateOf("") }
-    val selectedIds = remember { mutableStateListOf<Long>() }
+    var searchQuery by remember(initialSearchQuery) { mutableStateOf(initialSearchQuery) }
+    val selectedIds = remember { mutableStateListOf<Int>() }
     var showLocalClearDataDialog by remember { mutableStateOf(false) }
 
     val filteredHistory = remember(history, searchQuery) {
@@ -5916,6 +6885,7 @@ fun BottomTabStripLayout(
     onTabClose: (String) -> Unit,
     onNewTab: () -> Unit,
     onOpenTabSwitcher: () -> Unit,
+    onVoiceClick: () -> Unit,
     isGlass: Boolean
 ) {
     Surface(
@@ -6021,6 +6991,21 @@ fun BottomTabStripLayout(
                         }
                     }
                 }
+            }
+
+            // Orion Assistant Voice command action
+            IconButton(
+                onClick = onVoiceClick,
+                modifier = Modifier
+                    .padding(horizontal = 4.dp)
+                    .size(40.dp)
+                    .testTag("orion_voice_bottom_nav_btn")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Mic,
+                    contentDescription = "Orion Assistant",
+                    tint = if (isGlass) Color.White else MaterialTheme.colorScheme.primary
+                )
             }
 
             // Middle: Plus sign to add new tab
@@ -6643,58 +7628,776 @@ fun TranslationProgressSection(
 }
 
 @Composable
-fun YtStreamItemRow(
-    stream: ResolvedMediaStream,
-    onSelect: (ResolvedMediaStream) -> Unit
+fun OrionVoiceOverlay(
+    viewModel: BrowserViewModel,
+    uiState: BrowserUiState,
+    modifier: Modifier = Modifier
 ) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF16161F)),
-        shape = RoundedCornerShape(12.dp),
-        border = BorderStroke(1.dp, Color(0xFF23232E)),
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable { onSelect(stream) }
+    val context = LocalContext.current
+    val rmsValue = uiState.orionRmsdB
+    
+    // Smooth dynamic wave ripple scaling synced directly to live voice decibels
+    val pulseScale by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = 1f + (rmsValue * 1.5f),
+        animationSpec = androidx.compose.animation.core.spring(
+            dampingRatio = androidx.compose.animation.core.Spring.DampingRatioMediumBouncy,
+            stiffness = androidx.compose.animation.core.Spring.StiffnessLow
+        ),
+        label = "orion_rms_pulse"
+    )
+
+    // Sub-tab selection for Saved Logs mode
+    var logActiveTab by remember { mutableStateOf("notes") } // "notes", "history", "chat"
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.85f))
+            .clickable(enabled = true, onClick = { viewModel.dismissOrionVoiceOverlay() })
+            .testTag("orion_voice_overlay"),
+        contentAlignment = Alignment.BottomCenter
     ) {
-        Row(
-            modifier = Modifier.padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.85f) // Expanded layout to support scrolling notes, chat logs, and history
+                .padding(16.dp)
+                .navigationBarsPadding()
+                .clickable(enabled = false) {}, // prevent click-through
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = Color(0xFF0F172A), // Premium Dark Space Slate Blue
+                contentColor = Color.White
+            ),
+            elevation = CardDefaults.cardElevation(defaultElevation = 16.dp)
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.weight(1f)
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                val icon = if (stream.isAudio) Icons.Default.MusicNote else Icons.Default.PlayArrow
-                Icon(
-                    imageVector = icon,
-                    contentDescription = null,
-                    tint = if (stream.isAudio) Color(0xFF38BDF8) else Color(0xFFFF2E2E),
-                    modifier = Modifier.size(20.dp)
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-                Column {
-                    Text(
-                        text = stream.label,
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 12.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                // 1. TOP HEADER & SYSTEM TICKET
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Surface(
+                            shape = CircleShape,
+                            color = if (uiState.isOrionListening) Color(0xFF10B981) else Color(0xFF3B82F6),
+                            modifier = Modifier.size(10.dp)
+                        ) {}
+                        Text(
+                            text = "ORION VOICE INTELLIGENCE V3",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp,
+                            color = Color(0xFF94A3B8),
+                            letterSpacing = 1.2.sp
+                        )
+                    }
+                    IconButton(
+                        onClick = { viewModel.dismissOrionVoiceOverlay() },
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Stop voice capture",
+                            tint = Color(0xFF64748B)
+                        )
+                    }
+                }
+
+                // 2. PRIMARY MODE PILLS TABS
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF1E293B), RoundedCornerShape(12.dp))
+                        .padding(4.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val modes = listOf(
+                        "Assistant" to "🎙 Assistant",
+                        "Notes" to "📝 Voice Note",
+                        "Chat" to "💬 Voice Chat",
+                        "Saved" to "📜 Logs & History"
                     )
-                    Text(
-                        text = "Format: ${stream.ext.uppercase()} | Mime: ${stream.mimeType}",
-                        color = Color.Gray,
-                        fontSize = 9.sp
-                    )
+                    modes.forEach { (modeKey, modeTitle) ->
+                        val isSelected = uiState.orionVoiceActiveMode == modeKey
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .background(
+                                    color = if (isSelected) Color(0xFF334155) else Color.Transparent,
+                                    shape = RoundedCornerShape(8.dp)
+                                )
+                                .clickable { viewModel.setOrionVoiceActiveMode(modeKey) }
+                                .padding(vertical = 8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = modeTitle,
+                                color = if (isSelected) Color.White else Color(0xFF94A3B8),
+                                fontSize = 10.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                        }
+                    }
+                }
+
+                // 3. TARGET SPEECH LANGUAGES & WAKE WORD CONTROLS (Hide in Saved tab)
+                if (uiState.orionVoiceActiveMode != "Saved") {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFF0F172A)),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Language Selector dropdown triggers
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(
+                                text = "Lang:",
+                                fontSize = 10.sp,
+                                color = Color(0xFF64748B),
+                                fontWeight = FontWeight.Bold
+                            )
+                            val languages = listOf(
+                                Triple("English", "en-US", "EN"),
+                                Triple("Hindi", "hi-IN", "HI"),
+                                Triple("Tamil", "ta-IN", "TA"),
+                                Triple("Telugu", "te-IN", "TE"),
+                                Triple("Marathi", "mr-IN", "MR"),
+                                Triple("Bengali", "bn-IN", "BN")
+                            )
+                            Row(
+                                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                languages.forEach { (langName, langCode, shortLbl) ->
+                                    val isLangActive = uiState.orionVoiceActiveLanguageCode == langCode
+                                    Box(
+                                        modifier = Modifier
+                                            .background(
+                                                color = if (isLangActive) Color(0xFF2563EB) else Color(0xFF1E293B),
+                                                shape = RoundedCornerShape(6.dp)
+                                            )
+                                            .clickable { viewModel.setOrionVoiceActiveLanguage(langName, langCode) }
+                                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                                    ) {
+                                        Text(
+                                            text = shortLbl,
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isLangActive) Color.White else Color(0xFF94A3B8)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                    }
+                }
+
+                // 4. MAIN INTERACTION VIEW BASED ON THE ACTIVE SCREEN MODE
+                val isSavedLogsTab = uiState.orionVoiceActiveMode == "Saved"
+
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    if (!isSavedLogsTab) {
+                        // --- INTERACTIVE WAVE SPLASH VIEW FOR RECORDING MODES ---
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .size(110.dp)
+                                .padding(vertical = 4.dp)
+                        ) {
+                            // Ripple 1
+                            Box(
+                                modifier = Modifier
+                                    .graphicsLayer {
+                                        scaleX = pulseScale
+                                        scaleY = pulseScale
+                                        alpha = (1f - (rmsValue * 0.45f)).coerceIn(0.1f, 1f)
+                                    }
+                                    .size(90.dp)
+                                    .background(
+                                        color = when (uiState.orionVoiceActiveMode) {
+                                            "Notes" -> Color(0xFF10B981).copy(alpha = 0.16f)
+                                            "Chat" -> Color(0xFF8B5CF6).copy(alpha = 0.16f)
+                                            else -> Color(0xFF3B82F6).copy(alpha = 0.16f)
+                                        },
+                                        shape = CircleShape
+                                    )
+                            )
+
+                            // Ripple 2
+                            Box(
+                                modifier = Modifier
+                                    .graphicsLayer {
+                                        scaleX = 1f + (rmsValue * 0.75f)
+                                        scaleY = 1f + (rmsValue * 0.75f)
+                                    }
+                                    .size(70.dp)
+                                    .background(
+                                        color = when (uiState.orionVoiceActiveMode) {
+                                            "Notes" -> Color(0xFF34D399).copy(alpha = 0.28f)
+                                            "Chat" -> Color(0xFFA78BFA).copy(alpha = 0.28f)
+                                            else -> Color(0xFF60A5FA).copy(alpha = 0.28f)
+                                        },
+                                        shape = CircleShape
+                                    )
+                            )
+
+                            // Primary Mic circle toggle button
+                            Button(
+                                onClick = {
+                                    if (uiState.isOrionListening) {
+                                        viewModel.stopOrionVoiceListening()
+                                    } else {
+                                        viewModel.startOrionVoiceListening(context)
+                                    }
+                                },
+                                shape = CircleShape,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (uiState.isOrionListening) Color(0xFFEF4444) else {
+                                        when (uiState.orionVoiceActiveMode) {
+                                            "Notes" -> Color(0xFF059669)
+                                            "Chat" -> Color(0xFF7C3AED)
+                                            else -> Color(0xFF2563EB)
+                                        }
+                                    },
+                                    contentColor = Color.White
+                                ),
+                                modifier = Modifier
+                                    .size(54.dp)
+                                    .testTag("orion_mic_toggle_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Mic,
+                                    contentDescription = "Microphone Toggle",
+                                    modifier = Modifier.size(24.dp),
+                                    tint = Color.White
+                                )
+                            }
+                        }
+
+                        // SPEECH LIVE TRANSCRIPT (REAL-TIME STREAMING PANEL)
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(90.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = Color(0xFF1E293B)
+                            )
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(12.dp)
+                                    .verticalScroll(rememberScrollState()),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = uiState.orionTranscript,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                    color = Color.White,
+                                    lineHeight = 20.sp
+                                )
+                            }
+                        }
+
+                        // ERROR DISPLAY FALLBACK
+                        if (uiState.orionErrorMessage != null) {
+                            Text(
+                                text = uiState.orionErrorMessage,
+                                fontSize = 11.sp,
+                                color = Color(0xFFF87171),
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+
+                        // --- RENDER MODAL CONTROL CARDS ACCORDING TO SPEECH MODE ---
+                        when (uiState.orionVoiceActiveMode) {
+                            "Notes" -> {
+                                // Formatting Settings and Dictate Action Row
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Target Note Format:",
+                                        fontSize = 11.sp,
+                                        color = Color(0xFF94A3B8),
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        listOf("Text", "Markdown", "Browser").forEach { f ->
+                                            val isAct = uiState.orionNoteFormat == f
+                                            Box(
+                                                modifier = Modifier
+                                                    .background(
+                                                        color = if (isAct) Color(0xFF0F766E) else Color(0xFF334155),
+                                                        shape = RoundedCornerShape(6.dp)
+                                                    )
+                                                    .clickable { viewModel.setOrionNoteFormat(f) }
+                                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                                            ) {
+                                                Text(
+                                                    text = f,
+                                                    fontSize = 9.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = Color.White
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Button(
+                                    onClick = { viewModel.saveCurrentVoiceNote() },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(38.dp)
+                                        .testTag("save_voice_note_button"),
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Text("💾 SAVE AS " + uiState.orionNoteFormat.uppercase() + " NOTE", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+
+                            "Chat" -> {
+                                // Streaming User vs AI Conversations history panel
+                                Card(
+                                    shape = RoundedCornerShape(12.dp),
+                                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxWidth()
+                                ) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .padding(10.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = "💬 Active Chat Session Log",
+                                                fontSize = 11.sp,
+                                                color = Color(0xFFC084FC),
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            Text(
+                                                text = "🧹 Clear Session",
+                                                fontSize = 10.sp,
+                                                color = Color(0xFFEF4444),
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier.clickable { viewModel.clearVoiceChat() }
+                                            )
+                                        }
+
+                                        Spacer(modifier = Modifier.height(6.dp))
+
+                                        if (uiState.orionVoiceChatSessions.isEmpty()) {
+                                            Box(
+                                                modifier = Modifier.weight(1f).fillMaxWidth(),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Text(
+                                                    text = "No conversation in progress. Ask any question,\nor ask \"Summarize this page\" and \"Translate it\"!",
+                                                    fontSize = 11.sp,
+                                                    color = Color(0xFF64748B),
+                                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                                )
+                                            }
+                                        } else {
+                                            LazyColumn(
+                                                modifier = Modifier.weight(1f).fillMaxWidth(),
+                                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                items(uiState.orionVoiceChatSessions.size) { index ->
+                                                    val chat = uiState.orionVoiceChatSessions[index]
+                                                    val isUser = chat.role == "user"
+                                                    Row(
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
+                                                    ) {
+                                                        Card(
+                                                            shape = RoundedCornerShape(
+                                                                topStart = 12.dp,
+                                                                topEnd = 12.dp,
+                                                                bottomStart = if (isUser) 12.dp else 0.dp,
+                                                                bottomEnd = if (isUser) 0.dp else 12.dp
+                                                            ),
+                                                            colors = CardDefaults.cardColors(
+                                                                containerColor = if (isUser) Color(0xFF6D28D9) else Color(0xFF334155)
+                                                            ),
+                                                            modifier = Modifier.fillMaxWidth(0.85f)
+                                                        ) {
+                                                            Column(modifier = Modifier.padding(8.dp)) {
+                                                                Text(
+                                                                    text = if (isUser) "You:" else "Orion Assistant:",
+                                                                    fontSize = 9.sp,
+                                                                    fontWeight = FontWeight.Bold,
+                                                                    color = if (isUser) Color(0xFFDDD6FE) else Color(0xFFE2E8F0)
+                                                                )
+                                                                Spacer(modifier = Modifier.height(2.dp))
+                                                                Text(
+                                                                    text = chat.text,
+                                                                    fontSize = 11.sp,
+                                                                    color = Color.White
+                                                                )
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            else -> { // "Assistant" Mode Default
+                                // Quick guides or suggestion list
+                                Card(
+                                    shape = RoundedCornerShape(12.dp),
+                                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(12.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Text(
+                                            text = "💡 Voice Actions Router Guide:",
+                                            fontSize = 11.sp,
+                                            color = Color(0xFF38BDF8),
+                                            fontWeight = FontWeight.Bold,
+                                            letterSpacing = 0.5.sp
+                                        )
+                                        Text(
+                                            text = "• Navigating: \"Open youtube.com\", \"Go to wikipedia\"\n• Browser Control: \"Open settings\", \"Show history\", \"Downloads\"\n• Tab Management: \"Open new tab\", \"Close tab\", \"Undo close tab\"\n• Media Assist: \"Resume video\", \"Playback speed 2x\"\n• Intelligent NLP: \"Summarize this webpage\", \"Translate page to Tamil\"",
+                                            fontSize = 10.sp,
+                                            color = Color(0xFF94A3B8),
+                                            lineHeight = 15.sp
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // --- SAVED NOTES & HISTORY PANEL ENGINE ("Saved" Mode) ---
+                        Column(
+                            modifier = Modifier.fillMaxSize(),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            // Sub-navigation selector
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(Color(0xFF1E293B), RoundedCornerShape(10.dp))
+                                    .padding(2.dp)
+                            ) {
+                                val logsSubtabs = listOf(
+                                    "notes" to "Saved Notes",
+                                    "history" to "Spoken Words",
+                                    "chat" to "Chat Archives"
+                                )
+                                logsSubtabs.forEach { (tabKey, title) ->
+                                    val isTabSelected = logActiveTab == tabKey
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .background(
+                                                color = if (isTabSelected) Color(0xFF334155) else Color.Transparent,
+                                                shape = RoundedCornerShape(8.dp)
+                                            )
+                                            .clickable { logActiveTab = tabKey }
+                                            .padding(vertical = 6.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = title,
+                                            fontSize = 10.sp,
+                                            color = if (isTabSelected) Color.White else Color(0xFF94A3B8),
+                                            fontWeight = if (isTabSelected) FontWeight.Bold else FontWeight.Normal
+                                        )
+                                    }
+                                }
+                            }
+
+                            // SEARCH FILTER FIELD FOR ALL LOGS
+                            OutlinedTextField(
+                                value = uiState.historySearchQuery,
+                                onValueChange = { viewModel.setHistorySearchQuery(it) },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .testTag("orion_history_search_input"),
+                                shape = RoundedCornerShape(10.dp),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = Color(0xFF3B82F6),
+                                    unfocusedBorderColor = Color(0xFF475569),
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White,
+                                    focusedContainerColor = Color(0xFF1E293B),
+                                    unfocusedContainerColor = Color(0xFF1E293B)
+                                ),
+                                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp),
+                                placeholder = { Text("Filter logs by queries...", fontSize = 12.sp, color = Color(0xFF64748B)) },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.Search,
+                                        contentDescription = "Filter",
+                                        tint = Color(0xFF64748B),
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                },
+                                singleLine = true
+                            )
+
+                            // LIST PRESENTATION SEGMENT
+                            Card(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxWidth(),
+                                shape = RoundedCornerShape(12.dp),
+                                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B))
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .padding(8.dp)
+                                ) {
+                                    val sq = uiState.historySearchQuery.trim().lowercase()
+                                    when (logActiveTab) {
+                                        "notes" -> {
+                                            val filteredNotes = uiState.orionVoiceNotes.filter {
+                                                sq.isEmpty() || it.title.lowercase().contains(sq) || it.noteContent.lowercase().contains(sq)
+                                            }
+                                            if (filteredNotes.isEmpty()) {
+                                                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                                    Text("No saved notes found.", fontSize = 11.sp, color = Color(0xFF64748B))
+                                                }
+                                            } else {
+                                                LazyColumn(
+                                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                                    modifier = Modifier.fillMaxSize()
+                                                ) {
+                                                    items(filteredNotes.size) { noteIndex ->
+                                                        val note = filteredNotes[noteIndex]
+                                                        Card(
+                                                            colors = CardDefaults.cardColors(containerColor = Color(0xFF334155)),
+                                                            modifier = Modifier.fillMaxWidth()
+                                                        ) {
+                                                            Column(modifier = Modifier.padding(10.dp)) {
+                                                                Row(
+                                                                    modifier = Modifier.fillMaxWidth(),
+                                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                                    verticalAlignment = Alignment.CenterVertically
+                                                                ) {
+                                                                    Text(
+                                                                        text = note.title,
+                                                                        fontSize = 11.sp,
+                                                                        fontWeight = FontWeight.Bold,
+                                                                        color = Color(0xFF2DD4BF)
+                                                                    )
+                                                                    Surface(
+                                                                        shape = RoundedCornerShape(4.dp),
+                                                                        color = Color(0xFF14B8A6)
+                                                                    ) {
+                                                                        Text(
+                                                                            text = note.format,
+                                                                            fontSize = 7.sp,
+                                                                            color = Color.White,
+                                                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                                                        )
+                                                                    }
+                                                                }
+                                                                Spacer(modifier = Modifier.height(4.dp))
+                                                                Text(
+                                                                    text = note.noteContent,
+                                                                    fontSize = 10.sp,
+                                                                    color = Color(0xFFCBD5E1),
+                                                                    maxLines = 4
+                                                                )
+                                                                Spacer(modifier = Modifier.height(6.dp))
+                                                                Row(
+                                                                    modifier = Modifier.fillMaxWidth(),
+                                                                    horizontalArrangement = Arrangement.End,
+                                                                    verticalAlignment = Alignment.CenterVertically
+                                                                ) {
+                                                                    TextButton(
+                                                                        onClick = {
+                                                                            try {
+                                                                                val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                                                                val clip = android.content.ClipData.newPlainText("Orion Note", note.noteContent)
+                                                                                clipboard.setPrimaryClip(clip)
+                                                                                viewModel.playVoiceAssistantResponseSpoken("Note copied to clipboard")
+                                                                            } catch (e: Exception) {
+                                                                                e.printStackTrace()
+                                                                            }
+                                                                        },
+                                                                        modifier = Modifier.height(26.dp)
+                                                                    ) {
+                                                                        Text("📋 Copy", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                                                    }
+                                                                    TextButton(
+                                                                        onClick = { viewModel.deleteVoiceNote(note.id) },
+                                                                        modifier = Modifier.height(26.dp)
+                                                                    ) {
+                                                                        Text("🗑 Delete", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFFEF4444))
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        "history" -> {
+                                            val filteredHist = uiState.orionVoiceHistory.filter {
+                                                sq.isEmpty() || it.text.lowercase().contains(sq)
+                                            }
+                                            if (filteredHist.isEmpty()) {
+                                                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                                    Text("No spoken phrases recorded.", fontSize = 11.sp, color = Color(0xFF64748B))
+                                                }
+                                            } else {
+                                                Column(modifier = Modifier.fillMaxSize()) {
+                                                    Row(
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        horizontalArrangement = Arrangement.End
+                                                    ) {
+                                                        Text(
+                                                            text = "🧹 Clear Command History",
+                                                            fontSize = 10.sp,
+                                                            color = Color(0xFFEF4444),
+                                                            modifier = Modifier
+                                                                .clickable { viewModel.clearVoiceHistory() }
+                                                                .padding(4.dp)
+                                                        )
+                                                    }
+                                                    LazyColumn(
+                                                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                                                        modifier = Modifier.weight(1f).fillMaxWidth()
+                                                    ) {
+                                                        items(filteredHist.size) { histIdx ->
+                                                            val h = filteredHist[histIdx]
+                                                            Row(
+                                                                modifier = Modifier
+                                                                    .fillMaxWidth()
+                                                                    .background(Color(0xFF334155), RoundedCornerShape(6.dp))
+                                                                    .padding(8.dp),
+                                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                                verticalAlignment = Alignment.CenterVertically
+                                                            ) {
+                                                                Column(modifier = Modifier.weight(1.0f)) {
+                                                                    Text(
+                                                                        text = "\"" + h.text + "\"",
+                                                                        fontSize = 11.sp,
+                                                                        color = Color.White,
+                                                                        fontWeight = FontWeight.Medium
+                                                                    )
+                                                                    Text(
+                                                                        text = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(h.timestamp)),
+                                                                        fontSize = 8.sp,
+                                                                        color = Color(0xFF64748B)
+                                                                    )
+                                                                }
+                                                                Surface(
+                                                                    shape = RoundedCornerShape(4.dp),
+                                                                    color = when (h.type) {
+                                                                        "command" -> Color(0xFF2563EB)
+                                                                        "chat" -> Color(0xFF7C3AED)
+                                                                        "transcript" -> Color(0xFF0D9488)
+                                                                        else -> Color(0xFF475569)
+                                                                    }
+                                                                ) {
+                                                                    Text(
+                                                                        text = h.type.uppercase(),
+                                                                        fontSize = 7.sp,
+                                                                        fontWeight = FontWeight.Bold,
+                                                                        color = Color.White,
+                                                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                                                    )
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        "chat" -> {
+                                            // Present alternating logs archive scroll
+                                            val filteredChat = uiState.orionVoiceHistory.filter { it.type == "chat" }
+                                            if (filteredChat.isEmpty()) {
+                                                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                                    Text("No conversational chat archive found.", fontSize = 11.sp, color = Color(0xFF64748B))
+                                                }
+                                            } else {
+                                                LazyColumn(
+                                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                                    modifier = Modifier.fillMaxSize()
+                                                ) {
+                                                    items(filteredChat.size) { chatIndex ->
+                                                        val chatLog = filteredChat[chatIndex]
+                                                        Row(
+                                                            modifier = Modifier
+                                                                .fillMaxWidth()
+                                                                .background(Color(0xFF334155), RoundedCornerShape(6.dp))
+                                                                .padding(8.dp)
+                                                        ) {
+                                                            Text(
+                                                                text = "Conversation Query: \"" + chatLog.text + "\"",
+                                                                fontSize = 11.sp,
+                                                                color = Color(0xFFE2E8F0)
+                                                             )
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
-            Text(
-                text = stream.size,
-                color = Color(0xFF25D366),
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(start = 8.dp)
-            )
         }
     }
 }
