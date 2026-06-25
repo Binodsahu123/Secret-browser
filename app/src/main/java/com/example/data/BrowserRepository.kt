@@ -191,4 +191,29 @@ class BrowserRepository(private val db: BrowserDatabase) {
             url
         }
     }
+
+    // SSL domain whitelisting
+    private val sslWhitelist = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    fun isSslWhitelisted(host: String): Boolean = sslWhitelist.contains(host)
+    fun whitelistSslDomain(host: String) { sslWhitelist.add(host) }
+
+    // Tab session management
+    fun getAllTabs(): Flow<List<TabSessionEntity>> = db.tabSessionDao().getAllTabsFlow()
+
+    suspend fun saveTab(tabSession: TabSessionEntity) {
+        db.tabSessionDao().saveTab(tabSession)
+    }
+
+    suspend fun deleteTab(tabSession: TabSessionEntity) {
+        db.tabSessionDao().deleteTab(tabSession)
+    }
+
+    suspend fun deleteAllTabs() {
+        db.tabSessionDao().deleteAllTabs()
+    }
+
+    suspend fun updateScroll(tabId: String, x: Int, y: Int) {
+        db.tabSessionDao().updateScroll(tabId, x, y)
+    }
 }
+

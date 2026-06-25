@@ -25,9 +25,15 @@ class ExtensionRuntime(
         backgroundScriptManager.stopBackgroundWorker(parsedExtension.id)
     }
 
-    fun matchAndInjectContentScripts(evaluator: ScriptEvaluator, url: String) {
+    fun matchAndInjectContentScripts(evaluator: ScriptEvaluator, url: String, runAt: String = "document_idle") {
         if (!isActive) return
-        contentScriptManager.matchAndInject(evaluator, url, listOf(parsedExtension))
+        contentScriptManager.matchAndInject(
+            evaluator = evaluator,
+            url = url,
+            parsedExtensions = listOf(parsedExtension),
+            runAtFilter = runAt,
+            bootstrapScriptProvider = { bootstrapScript }
+        )
     }
 
     fun getActionPopupUrl(): String? {

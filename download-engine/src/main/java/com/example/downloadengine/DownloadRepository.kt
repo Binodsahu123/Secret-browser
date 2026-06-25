@@ -19,6 +19,18 @@ class DownloadRepository(private val context: Context) {
         return dao.getDownloadById(id)
     }
 
+    suspend fun getScheduledDownloads(): List<DownloadItem> {
+        return dao.getScheduledDownloads()
+    }
+
+    suspend fun getRunningDownloads(): List<DownloadItem> {
+        return dao.getRunningDownloads()
+    }
+
+    suspend fun getPendingDownloadsSorted(): List<DownloadItem> {
+        return dao.getPendingDownloadsSorted()
+    }
+
     suspend fun insertOrUpdateDownload(item: DownloadItem) {
         dao.insertDownload(item)
     }

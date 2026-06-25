@@ -18,7 +18,7 @@ class ExtensionEngineImpl(
     val registry = ExtensionRegistry()
     val parser = ManifestParser()
     val loader = ExtensionLoader(context, parser, database)
-    val permissionManager = PermissionManager()
+    val permissionManager = PermissionManager(context)
     val storageManager = StorageManager(database)
     val messageBus = MessageBus()
     val eventManager = EventManager(messageBus)
@@ -60,22 +60,40 @@ class ExtensionEngineImpl(
             createBridge(webView)
         }
         
-        // Load installed active extensions
+        // Load installed active extensions asynchronously with a start delay to keep startup instantaneous
         ioScope.launch {
             try {
+                // Defer extension boots by 2.0 seconds to guarantee smooth, Chrome-level instant starts
+                kotlinx.coroutines.delay(2000L)
                 val dbList = database.extensionDao().getAllExtensions()
+                
+                // Process database & manifest parsing off the main thread (on Dispatchers.IO)
+                val preparedRuntimes = mutableListOf<Pair<ParsedExtension, ExtensionRuntime?>>()
+                for (entity in dbList) {
+                    try {
+                        val parsed = loader.loadFromDatabase(entity)
+                        var runtime: ExtensionRuntime? = null
+                        if (entity.enabledState) {
+                            runtime = ExtensionRuntime(
+                                parsed, context, backgroundScriptManager,
+                                contentScriptManager, popupManager, compileBootstrapScript(parsed.id)
+                            )
+                        }
+                        preparedRuntimes.add(Pair(parsed, runtime))
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+
+                // Register and start active extensions on Main thread cleanly
                 withContext(Dispatchers.Main) {
-                    for (entity in dbList) {
+                    for (pair in preparedRuntimes) {
+                        val parsed = pair.first
+                        val runtime = pair.second
                         try {
-                            val parsed = loader.loadFromDatabase(entity)
                             registry.register(parsed)
                             ExtensionDirectoryResolver.cacheIdAndName(parsed.id, parsed.name)
-                            
-                            if (entity.enabledState) {
-                                val runtime = ExtensionRuntime(
-                                    parsed, context, backgroundScriptManager,
-                                    contentScriptManager, popupManager, compileBootstrapScript(parsed.id)
-                                )
+                            if (runtime != null) {
                                 runtimeMap[parsed.id] = runtime
                                 runtime.start()
                             }
@@ -116,7 +134,7 @@ class ExtensionEngineImpl(
     /**
      * Injects matching scripts on page reload / transition completion.
      */
-    fun injectContentScripts(webView: WebView, url: String) {
+    fun injectContentScripts(webView: WebView, url: String, runAt: String? = null) {
         if (url.startsWith("orion://") || url == "about:blank" || url.startsWith("file://")) return
 
         val evaluator = object : ScriptEvaluator {
@@ -130,20 +148,20 @@ class ExtensionEngineImpl(
 
         webView.post {
             try {
-                // Compile API bootstraps for all active extensions
                 val activeList = registry.getAllActiveExtensions()
-                for (ext in activeList) {
+                val enabledList = activeList.filter { ext ->
                     val isEnabled = runtimeMap[ext.id]?.isActive ?: false
-                    val matchesUrl = permissionManager.hasHostPermission(ext.hostPermissions, ext.permissions, url) ||
-                            ext.contentScripts.any { spec -> permissionManager.hasHostPermission(spec.matches, emptyList(), url) }
-                    if (isEnabled && matchesUrl) {
-                        val boot = compileBootstrapScript(ext.id)
-                        webView.evaluateJavascript(boot, null)
-                    }
+                    isEnabled
                 }
                 
-                // Inject matched content scripts
-                contentScriptManager.matchAndInject(evaluator, url, activeList)
+                // ContentScriptManager handles evaluating and choosing content scripts matching the specified phase
+                contentScriptManager.matchAndInject(
+                    evaluator = evaluator,
+                    url = url,
+                    parsedExtensions = enabledList,
+                    runAtFilter = runAt ?: "document_idle",
+                    bootstrapScriptProvider = { extId -> compileBootstrapScript(extId) }
+                )
             } catch (e: Exception) {
                 e.printStackTrace()
             }
@@ -206,7 +224,7 @@ class ExtensionEngineImpl(
 
     fun createBridge(webView: WebView?, tabId: String? = null): RuntimeBridge {
         return RuntimeBridge(
-            context, webView, storageManager, messageBus, delegate, eventManager, tabId, portManager, tabBridge
+            context, webView, storageManager, messageBus, delegate, eventManager, tabId, portManager, tabBridge, registry, permissionManager
         )
     }
 
@@ -273,9 +291,16 @@ class ExtensionEngineImpl(
         val messagesJsonSafe = loadExtensionMessagesJson(extensionId)
         val quotedMessages = org.json.JSONObject.quote(messagesJsonSafe)
 
+        val domUtils = domBridge.compileDomUtilities()
+        val postMessageUtils = PostMessageBridge().compilePostMessageScript()
+
         return """
             (function() {
                 const extId = "$extensionId";
+                
+                // Inject DOM and PostMessage Utility Helpers
+                $domUtils
+                $postMessageUtils
                 
                 window._orionManifests = window._orionManifests || {};
                 window._orionManifests[extId] = $quotedManifest;
@@ -937,30 +962,24 @@ class ExtensionEngineImpl(
                         },
                         cookies: {
                             get: function(details, callback) {
-                                const cookie = {
-                                    name: details.name || "",
-                                    value: "",
-                                    domain: details.url ? (new URL(details.url)).hostname : "",
-                                    path: "/",
-                                    secure: true,
-                                    httpOnly: false,
-                                    session: false,
-                                    expirationDate: Math.floor(Date.now() / 1000) + 31536000
-                                };
-                                if (callback) callback(cookie);
-                                return Promise.resolve(cookie);
+                                const p = bridgeCall("cookies.get", [details]);
+                                if (callback) p.then(callback);
+                                return p;
                             },
                             getAll: function(details, callback) {
-                                if (callback) callback([]);
-                                return Promise.resolve([]);
+                                const p = bridgeCall("cookies.getAll", [details]);
+                                if (callback) p.then(callback);
+                                return p;
                             },
                             set: function(details, callback) {
-                                if (callback) callback(details);
-                                return Promise.resolve(details);
+                                const p = bridgeCall("cookies.set", [details]);
+                                if (callback) p.then(callback);
+                                return p;
                             },
                             remove: function(details, callback) {
-                                if (callback) callback(details);
-                                return Promise.resolve(details);
+                                const p = bridgeCall("cookies.remove", [details]);
+                                if (callback) p.then(callback);
+                                return p;
                             },
                             onChanged: {
                                 addListener: function(cb) {},

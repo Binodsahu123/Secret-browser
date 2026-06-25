@@ -24,7 +24,8 @@ class MainActivity : ComponentActivity() {
         androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         val recordAudioGranted = permissions[android.Manifest.permission.RECORD_AUDIO] == true
-        android.util.Log.i("MainActivity", "Voice permissions result. RECORD_AUDIO: $recordAudioGranted")
+        val cameraGranted = permissions[android.Manifest.permission.CAMERA] == true
+        android.util.Log.i("MainActivity", "Permissions result. RECORD_AUDIO: $recordAudioGranted, CAMERA: $cameraGranted")
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -40,11 +41,12 @@ class MainActivity : ComponentActivity() {
 
         viewModel.handleIncomingIntent(intent)
 
-        // Request RECORD_AUDIO and POST_NOTIFICATIONS permissions automatically on first launch
-        val permissionsToRequest = mutableListOf(android.Manifest.permission.RECORD_AUDIO)
+        // Browser Startup: Request necessary permissions (Notifications + Microphone)
+        val permissionsToRequest = mutableListOf<String>()
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             permissionsToRequest.add(android.Manifest.permission.POST_NOTIFICATIONS)
         }
+        permissionsToRequest.add(android.Manifest.permission.RECORD_AUDIO)
         
         val permissionsArray = permissionsToRequest.toTypedArray()
         val allGranted = permissionsArray.all {
@@ -72,6 +74,28 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         if (::viewModel.isInitialized) {
             viewModel.handleIncomingIntent(intent)
+        }
+    }
+
+    override fun onPause() {
+        if (::viewModel.isInitialized) {
+            viewModel.captureActiveVideoState()
+            viewModel.saveTabsState()
+        }
+        super.onPause()
+    }
+
+    override fun onStop() {
+        if (::viewModel.isInitialized) {
+            viewModel.saveTabsState()
+        }
+        super.onStop()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::viewModel.isInitialized) {
+            viewModel.onAppResume()
         }
     }
 

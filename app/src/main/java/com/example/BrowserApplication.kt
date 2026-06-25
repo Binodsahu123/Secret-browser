@@ -12,6 +12,7 @@ class BrowserApplication : Application() {
         
         // Initialize DevTools ConsoleEngine persistence
         try {
+            com.example.browser.OrionDeveloperEngine.initFromPrefs(this)
             com.example.developertoolsengine.ConsoleEngine.instance.initializePersistence(filesDir)
         } catch (e: Exception) {
             e.printStackTrace()

@@ -32,6 +32,7 @@ dependencies {
     implementation(libs.androidx.compose.material.icons.extended)
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.androidx.room.ktx)
     implementation(libs.okhttp)
     implementation(project(":download-engine"))
     implementation(project(":media-detector-engine"))

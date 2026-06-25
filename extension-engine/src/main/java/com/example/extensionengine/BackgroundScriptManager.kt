@@ -80,9 +80,6 @@ class BackgroundScriptManager(
 
                         override fun onPageFinished(view: WebView?, url: String?) {
                             super.onPageFinished(view, url)
-                            
-                            // Load API bootstrap rules
-                            evaluateJavascript(bootstrapScript, null)
 
                             // Load actual background JS scripts
                             val extensionDir = ExtensionDirectoryResolver.getExtensionDir(context, ext.id, ext.name)
@@ -91,15 +88,45 @@ class BackgroundScriptManager(
                                     val code = readExtensionFile(extensionDir, scriptFile)
                                     if (code.isNotBlank()) {
                                         val wrapper = """
-                                            (function() {
-                                                try {
-                                                     const browser = window._orionGetExtensionContext("${ext.id}");
-                                                     const chrome = browser;
-                                                     $code
-                                                } catch(e) {
-                                                     console.error("Background Script Exec Error in $scriptFile: ", e);
-                                                }
-                                            })();
+                                             (function() {
+                                                 // Ensure APIs are always loaded and bound before background execution
+                                                 if (typeof window._orionGetExtensionContext === 'undefined') {
+                                                     try {
+                                                         $bootstrapScript
+                                                     } catch(e) {
+                                                         console.error("API Bootstrap Failed for background script: ", e);
+                                                     }
+                                                 }
+                                                 
+                                                 try {
+                                                      const browser = window._orionGetExtensionContext("${ext.id}");
+                                                      const chrome = browser;
+                                                      
+                                                      // Redefine window, self, and globalThis references inside our function scope using Proxies
+                                                      const window = new Proxy(globalThis, {
+                                                          get(target, prop) {
+                                                              if (prop === 'chrome') return chrome;
+                                                              if (prop === 'browser') return browser;
+                                                              if (prop === 'window' || prop === 'self' || prop === 'globalThis') return window;
+                                                              let val = target[prop];
+                                                              if (typeof val === 'function') {
+                                                                  try {
+                                                                      return val.bind(target);
+                                                                  } catch(e) {
+                                                                      return val;
+                                                                  }
+                                                              }
+                                                              return val;
+                                                          }
+                                                      });
+                                                      const self = window;
+                                                      const globalThis = window;
+                                                      
+                                                      $code
+                                                 } catch(e) {
+                                                      console.error("Background Script Exec Error in $scriptFile: ", e);
+                                                 }
+                                             })();
                                         """.trimIndent()
                                         evaluateJavascript(wrapper, null)
                                     }

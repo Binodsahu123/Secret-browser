@@ -14,8 +14,8 @@ class ExtensionManager(
         engine.setupWebView(webView, tabId)
     }
 
-    fun injectContentScripts(webView: WebView, url: String) {
-        engine.injectContentScripts(webView, url)
+    fun injectContentScripts(webView: WebView, url: String, runAt: String? = null) {
+        engine.injectContentScripts(webView, url, runAt)
     }
 
     suspend fun installExtension(uri: Uri): ParsedExtension {

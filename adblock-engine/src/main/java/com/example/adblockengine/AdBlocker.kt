@@ -22,16 +22,52 @@ object AdBlocker {
     val whitelistedSites = ConcurrentHashMap.newKeySet<String>()
     val blockedSites = ConcurrentHashMap.newKeySet<String>()
     val dynamicRules = ConcurrentHashMap.newKeySet<String>()
+
+    // Compiled high-speed lookups for subresource requests (O(1) lookup + suffix check)
+    val dynamicBlockedHosts = ConcurrentHashMap.newKeySet<String>()
+    val dynamicKeywords = ConcurrentHashMap.newKeySet<String>()
     
-    private val staticAdDomains = hashSetOf(
+    private val staticAdHosts = hashSetOf(
         "doubleclick.net", "google-analytics.com", "googlesyndication.com",
         "googleadservices.com", "adservice.google.com", "googletagservices.com",
         "adsystem.com", "adservice.com", "adnxs.com", "adsymptotic.com",
         "adroll.com", "mopub.com", "rubiconproject.com", "pubmatic.com",
-        "taboola.com", "outbrain.com", "adsrvr.org", "sponsor", "advertis",
-        "analytics", "tracking", "scorecardresearch", "appads", "adcolony",
+        "taboola.com", "outbrain.com", "adsrvr.org", "scorecardresearch"
+    )
+
+    private val staticAdKeywords = hashSetOf(
+        "sponsor", "advertis", "analytics", "tracking", "appads", "adcolony",
         "unityads", "chartboost", "vungle"
     )
+
+    fun compileRules() {
+        val hosts = mutableSetOf<String>()
+        val keywords = mutableSetOf<String>()
+        for (rule in dynamicRules) {
+            val trimmed = rule.trim()
+            if (trimmed.isEmpty()) continue
+            if (trimmed.startsWith("||")) {
+                var host = trimmed.substring(2)
+                val limit = host.indexOfAny(charArrayOf('^', '/', '$', '*'))
+                if (limit != -1) {
+                    host = host.substring(0, limit)
+                }
+                host = host.trim().lowercase()
+                if (host.isNotEmpty()) {
+                    hosts.add(host)
+                }
+            } else {
+                val clean = trimmed.split("$")[0].trim().lowercase()
+                if (clean.isNotEmpty()) {
+                    keywords.add(clean)
+                }
+            }
+        }
+        dynamicBlockedHosts.clear()
+        dynamicBlockedHosts.addAll(hosts)
+        dynamicKeywords.clear()
+        dynamicKeywords.addAll(keywords)
+    }
 
     fun init(context: Context) {
         // Load cached rules on startup if available
@@ -40,6 +76,7 @@ object AdBlocker {
             if (file.exists()) {
                 val rules = file.readLines()
                 dynamicRules.addAll(rules.filter { it.isNotBlank() })
+                compileRules()
             }
             
             // Load whitelisted domains from simple preferences
@@ -98,19 +135,36 @@ object AdBlocker {
             val fullUrlLower = url.lowercase()
 
             // 2. static domain checks
-            for (ad in staticAdDomains) {
-                if (reqHost.contains(ad) || reqPath.contains(ad)) {
+            for (ad in staticAdHosts) {
+                if (reqHost == ad || reqHost.endsWith("." + ad)) {
+                    return true
+                }
+            }
+            for (kw in staticAdKeywords) {
+                if (reqHost.contains(kw) || reqPath.contains(kw)) {
                     return true
                 }
             }
 
-            // 3. Dynamic rules checks (EasyList fragments)
-            for (rule in dynamicRules) {
-                if (rule.startsWith("||")) {
-                    val target = rule.substring(2)
-                    if (reqHost.contains(target)) return true
-                } else if (fullUrlLower.contains(rule)) {
+            // 3. Dynamic compiled rule domain checks: O(1) hash lookups!
+            if (dynamicBlockedHosts.contains(reqHost)) {
+                return true
+            }
+            var index = reqHost.indexOf('.')
+            while (index != -1) {
+                val parent = reqHost.substring(index + 1)
+                if (parent.isNotEmpty() && dynamicBlockedHosts.contains(parent)) {
                     return true
+                }
+                index = reqHost.indexOf('.', index + 1)
+            }
+
+            // 4. Dynamic keyword rules check
+            if (dynamicKeywords.isNotEmpty()) {
+                for (keyword in dynamicKeywords) {
+                    if (fullUrlLower.contains(keyword)) {
+                        return true
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -172,6 +226,7 @@ object AdBlocker {
         if (newRules.isNotEmpty()) {
             dynamicRules.clear()
             dynamicRules.addAll(newRules)
+            compileRules()
             
             // Persist locally
             try {

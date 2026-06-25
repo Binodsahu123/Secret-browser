@@ -165,8 +165,17 @@ data class BrowserUiState(
     val orionVoiceChatSessions: List<VoiceChatMessage> = emptyList(),
     val orionVoiceWakeWordEnabled: Boolean = false,
     val orionVoiceActiveMode: String = "Assistant", // "Assistant", "Notes", "Chat", "Saved"
-    val orionNoteFormat: String = "Text" // "Text", "Markdown", "Browser"
+    val orionNoteFormat: String = "Text", // "Text", "Markdown", "Browser"
+    val sslWarningState: SslWarningState = SslWarningState()
 )
+
+data class SslWarningState(
+    val showWarning: Boolean = false,
+    val url: String = "",
+    val errorString: String = "",
+    val handler: android.webkit.SslErrorHandler? = null
+)
+
 
 data class VoiceHistoryEntry(
     val id: String = java.util.UUID.randomUUID().toString(),
@@ -224,11 +233,49 @@ data class DownloadProgressState(
     val mimeType: String = ""
 )
 
+data class PendingExtensionPermissionRequest(
+    val extId: String,
+    val extName: String,
+    val permission: String,
+    val onResult: (String) -> Unit
+)
+
 class BrowserViewModel(
     application: Application,
     private val repository: BrowserRepository,
     val prefs: PreferenceManager
-) : AndroidViewModel(application), com.example.extensionengine.BrowserDelegate {
+) : AndroidViewModel(application), com.example.extensionengine.BrowserDelegate, com.example.browser.ExtensionPermissionPromptHandler {
+
+    private val _pendingExtensionPermission = MutableStateFlow<PendingExtensionPermissionRequest?>(null)
+    val pendingExtensionPermission: StateFlow<PendingExtensionPermissionRequest?> = _pendingExtensionPermission.asStateFlow()
+
+    private val _pendingSystemPermissions = MutableStateFlow<List<String>?>(null)
+    val pendingSystemPermissions: StateFlow<List<String>?> = _pendingSystemPermissions.asStateFlow()
+
+    private val systemPermissionCallbacks = java.util.Collections.synchronizedMap(mutableMapOf<List<String>, (Boolean) -> Unit>())
+
+    override fun showPrompt(
+        extId: String,
+        extName: String,
+        permission: String,
+        onResult: (String) -> Unit
+    ) {
+        _pendingExtensionPermission.value = PendingExtensionPermissionRequest(extId, extName, permission, onResult)
+    }
+
+    fun dismissExtensionPermissionPrompt() {
+        _pendingExtensionPermission.value = null
+    }
+
+    fun requestSystemPermissions(permissions: List<String>, onResult: (Boolean) -> Unit) {
+        systemPermissionCallbacks[permissions] = onResult
+        _pendingSystemPermissions.value = permissions
+    }
+
+    fun onSystemPermissionsResult(permissions: List<String>, allGranted: Boolean) {
+        systemPermissionCallbacks.remove(permissions)?.invoke(allGranted)
+        _pendingSystemPermissions.value = null
+    }
 
     val extensionManager = com.example.extensionengine.ExtensionManager(application, this)
     val permissionEngine: com.example.permissionengine.PermissionEngine = com.example.permissionengine.PermissionEngineImpl(application)
@@ -263,6 +310,45 @@ class BrowserViewModel(
     private val _pendingGeolocationPrompt = MutableStateFlow<Pair<String, android.webkit.GeolocationPermissions.Callback>?>(null)
     val pendingGeolocationPrompt: StateFlow<Pair<String, android.webkit.GeolocationPermissions.Callback>?> = _pendingGeolocationPrompt.asStateFlow()
 
+    // Web Speech API / OrionSpeechBridge permission properties
+    data class PendingSpeechRequest(
+        val id: String,
+        val lang: String,
+        val continuous: Boolean,
+        val interimResults: Boolean,
+        val bridge: OrionSpeechBridge
+    )
+
+    private val _pendingSpeechRecognition = MutableStateFlow<PendingSpeechRequest?>(null)
+    val pendingSpeechRecognition: StateFlow<PendingSpeechRequest?> = _pendingSpeechRecognition.asStateFlow()
+
+    // Universal Chromium-Style Permission properties
+    data class WebPermissionRequest(
+        val transactionId: String,
+        val origin: String,
+        val permissionType: String,
+        val webView: android.webkit.WebView
+    )
+
+    private val _pendingWebPermissionRequest = MutableStateFlow<WebPermissionRequest?>(null)
+    val pendingWebPermissionRequest: StateFlow<WebPermissionRequest?> = _pendingWebPermissionRequest.asStateFlow()
+
+    fun setPendingWebPermissionRequest(request: WebPermissionRequest?) {
+        _pendingWebPermissionRequest.value = request
+    }
+
+    fun clearWebPermissionRequest() {
+        _pendingWebPermissionRequest.value = null
+    }
+
+    fun setPendingSpeechRequest(request: PendingSpeechRequest?) {
+        _pendingSpeechRecognition.value = request
+    }
+
+    fun clearPendingSpeechRequest() {
+        _pendingSpeechRecognition.value = null
+    }
+
     fun setPendingPermissionRequest(request: android.webkit.PermissionRequest?) {
         _pendingPermissionRequest.value = request
     }
@@ -279,6 +365,93 @@ class BrowserViewModel(
         _pendingGeolocationPrompt.value = null
     }
 
+    // Session-allowed permissions (for "Allow Once")
+    private val sessionAllowedPermissions = mutableSetOf<String>() // Format: "domain:permission"
+
+    fun addSessionPermission(domain: String, permission: String) {
+        val cleanDomain = getDomain(domain)
+        sessionAllowedPermissions.add("$cleanDomain:$permission")
+        logPermissionAction(cleanDomain, permission, "Permission Granted (Once)")
+    }
+
+    fun getDomain(urlStr: String): String {
+        if (urlStr.isBlank()) return ""
+        var clean = urlStr.trim().lowercase()
+        if (clean.endsWith("/")) {
+            clean = clean.substring(0, clean.length - 1)
+        }
+        val withScheme = if (!clean.startsWith("http://") && !clean.startsWith("https://") && !clean.startsWith("ftp://")) {
+            "https://$clean"
+        } else {
+            clean
+        }
+        return try {
+            val uri = android.net.Uri.parse(withScheme)
+            var host = uri.host ?: clean
+            if (host.startsWith("www.")) {
+                host = host.substring(4)
+            }
+            host.lowercase()
+        } catch (e: Exception) {
+            clean
+        }
+    }
+
+    fun getPermissionStatus(domain: String, permission: String): String {
+        val cleanDomain = getDomain(domain)
+        
+        val state = permissionEngine.getPermissionState(cleanDomain, permission)
+        if (state != "Ask") {
+            return state
+        }
+        
+        if (sessionAllowedPermissions.contains("$cleanDomain:$permission")) {
+            return "Allow"
+        }
+        
+        val exceptionStr = prefs.getString("site_perm_exception/$permission/$cleanDomain", "")
+        if (exceptionStr.isNotEmpty()) {
+            return exceptionStr // "Allow" or "Block"
+        }
+        
+        val defaultForPerm = when (permission) {
+            "javascript", "cookies", "sync" -> "Allow"
+            "popups", "ads" -> "Block"
+            else -> "Ask" // microphone, camera, location, notifications, storage, clipboard, midi, protected_media, fullscreen
+        }
+        return prefs.getString("site_perm_default/$permission", defaultForPerm)
+    }
+
+    fun setPermissionStatus(domain: String, permission: String, status: String) {
+        val cleanDomain = getDomain(domain)
+        prefs.setString("site_perm_exception/$permission/$cleanDomain", status)
+        try {
+            permissionEngine.setPermissionState(cleanDomain, permission, status)
+        } catch (e: Exception) {
+            android.util.Log.e("Permissions", "Failed to sync to permissionEngine", e)
+        }
+        logPermissionAction(cleanDomain, permission, "Permission Persisted to $status")
+    }
+
+    fun resetAllPermissionsForDomain(domain: String) {
+        val cleanDomain = getDomain(domain)
+        val permissions = listOf("camera", "microphone", "location", "notifications", "popups", "storage", "midi", "protected_media", "fullscreen")
+        for (perm in permissions) {
+            prefs.setString("site_perm_exception/$perm/$cleanDomain", "")
+            try {
+                permissionEngine.clearPermissionState(cleanDomain, perm)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+        sessionAllowedPermissions.removeAll { it.startsWith("$cleanDomain:") }
+        logPermissionAction(cleanDomain, "all", "Reset all permissions")
+    }
+
+    fun logPermissionAction(domain: String, permission: String, action: String) {
+        android.util.Log.i("Permissions", "Domain: $domain | Permission: $permission | Status: $action")
+    }
+
     // Map of active WebViews
     private val webViewMap = mutableMapOf<String, WebView>()
 
@@ -286,6 +459,45 @@ class BrowserViewModel(
     private var isUASwitchPending = false
     private var lastManualLoadUrl = ""
     private val domainDesktopMap = HashMap<String, Boolean>()
+    private val pendingVideoSeekTime = HashMap<String, Float>()
+    
+    data class OrionVideoState(val position: Float, val isPlaying: Boolean)
+    private val pendingVideoStates = HashMap<String, OrionVideoState>()
+
+    fun isAnyVideoPlaying(): Boolean {
+        return pendingVideoStates.values.any { it.isPlaying }
+    }
+
+    private fun getCanonicalHost(host: String): String {
+        val h = host.lowercase().trim()
+        return when {
+            h == "youtube.com" || h == "www.youtube.com" || h == "m.youtube.com" -> "youtube.com"
+            h == "facebook.com" || h == "www.facebook.com" || h == "m.facebook.com" -> "facebook.com"
+            h == "reddit.com" || h == "www.reddit.com" || h == "m.reddit.com" -> "reddit.com"
+            h == "twitter.com" || h == "www.twitter.com" || h == "m.twitter.com" || h == "mobile.twitter.com" ||
+            h == "x.com" || h == "www.x.com" || h == "m.x.com" || h == "mobile.x.com" -> "x.com"
+            h.endsWith(".wikipedia.org") || h == "wikipedia.org" -> "wikipedia.org"
+            h.startsWith("m.") -> h.substring(2)
+            h.startsWith("mobile.") -> h.substring(7)
+            h.startsWith("www.") -> h.substring(4)
+            else -> h
+        }
+    }
+
+    private fun isDesktopModeForHost(host: String?): Boolean {
+        if (host.isNullOrEmpty()) return false
+        val canonical = getCanonicalHost(host)
+        return domainDesktopMap[canonical] == true
+    }
+
+    private fun setDesktopModeForHost(host: String?, enabled: Boolean) {
+        if (host.isNullOrEmpty()) return
+        val canonical = getCanonicalHost(host)
+        domainDesktopMap[canonical] = enabled
+        val sharedPrefs = getApplication<Application>().getSharedPreferences("desktop_mode_sites", Context.MODE_PRIVATE)
+        sharedPrefs.edit().putBoolean("desktop_mode_$canonical", enabled).apply()
+        sharedPrefs.edit().putBoolean("desktop_mode_$host", enabled).apply()
+    }
 
     // Search suggestions variables
     private var suggestionFetchJob: kotlinx.coroutines.Job? = null
@@ -305,6 +517,7 @@ class BrowserViewModel(
 
     // File choosing callback
     var fileChooserCallback: android.webkit.ValueCallback<Array<android.net.Uri>>? = null
+    var fileChooserParams: android.webkit.WebChromeClient.FileChooserParams? = null
 
     // Back press twice to exit
     private var lastBackPressTime = 0L
@@ -349,6 +562,7 @@ class BrowserViewModel(
     private var recognitionRestartJob: kotlinx.coroutines.Job? = null
 
     init {
+        com.example.browser.OrionExtensionPermissionEngine.promptHandler = this
         // Route background extension service worker console logs to developer tools inspector
         try {
             extensionManager.engine.backgroundScriptManager.consoleLogCallback = { level, message ->
@@ -370,47 +584,78 @@ class BrowserViewModel(
             e.printStackTrace()
         }
 
-        // Pre-create and clean WebView Code Cache directories to prevent chromium simple_file_enumerator warnings/errors
-        try {
-            val cacheDir = application.cacheDir
-            val codeCacheDir = java.io.File(cacheDir, "WebView/Default/HTTP Cache/Code Cache")
-            
-            // Recursively wipe the previous cache to delete stale, corrupted or unreadable cache descriptors safely
-            if (codeCacheDir.exists()) {
-                codeCacheDir.deleteRecursively()
-            }
-            
-            val wasmDir = java.io.File(codeCacheDir, "wasm")
-            val jsDir = java.io.File(codeCacheDir, "js")
-            
-            // Create directories fresh
-            wasmDir.mkdirs()
-            jsDir.mkdirs()
-            
-            // Write a small placeholder file inside each to prevent empty-directory opendir complaints or auto-pruning
-            val wasmPlace = java.io.File(wasmDir, ".init")
-            wasmPlace.writeText("")
-            val jsPlace = java.io.File(jsDir, ".init")
-            jsPlace.writeText("")
-        } catch (e: Exception) {
-            e.printStackTrace()
+        // Setup Orion Memory Manager
+        com.example.browser.OrionMemoryManager.register(application)
+
+        // Register custom BrowserWebView factory so OrionWebViewPool pre-warms the correct instances
+        com.example.browser.OrionWebViewPool.setFactory { ctx ->
+            BrowserWebView(ctx, "")
         }
 
-        // Load saved desktop mode entries
-        try {
-            val sharedPrefs = application.getSharedPreferences("desktop_mode_sites", Context.MODE_PRIVATE)
-            sharedPrefs.all.forEach { (key, value) ->
-                if (key.startsWith("desktop_mode_") && value is Boolean) {
-                    val domain = key.substring("desktop_mode_".length)
-                    domainDesktopMap[domain] = value
+        // Extreme WebView Warmup for Chrome parity and keeping renderer process warm & alive using OrionStartupManager
+        com.example.browser.OrionStartupManager.initialize(application, viewModelScope) {
+            android.util.Log.i("BrowserViewModel", "Cold startup engines successfully initialized via OrionStartupManager!")
+        }
+
+        // Pre-create and clean WebView Code Cache directories asynchronously to prevent blocking startup
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val cacheDir = application.cacheDir
+                val codeCacheDir = java.io.File(cacheDir, "WebView/Default/HTTP Cache/Code Cache")
+                
+                // Recursively wipe the previous cache to delete stale, corrupted or unreadable cache descriptors safely
+                if (codeCacheDir.exists()) {
+                    codeCacheDir.deleteRecursively()
                 }
+                
+                val wasmDir = java.io.File(codeCacheDir, "wasm")
+                val jsDir = java.io.File(codeCacheDir, "js")
+                
+                // Create directories fresh
+                wasmDir.mkdirs()
+                jsDir.mkdirs()
+                
+                // Write a small placeholder file inside each to prevent empty-directory opendir complaints or auto-pruning
+                val wasmPlace = java.io.File(wasmDir, ".init")
+                wasmPlace.writeText("")
+                val jsPlace = java.io.File(jsDir, ".init")
+                jsPlace.writeText("")
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
         }
 
-        // Initialize AdBlocker
-        com.example.adblockengine.AdBlocker.init(application)
+        // Load saved desktop mode entries asynchronously
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val sharedPrefs = application.getSharedPreferences("desktop_mode_sites", Context.MODE_PRIVATE)
+                sharedPrefs.all.forEach { (key, value) ->
+                    if (key.startsWith("desktop_mode_") && value is Boolean) {
+                        val domain = key.substring("desktop_mode_".length)
+                        domainDesktopMap[getCanonicalHost(domain)] = value
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        // Initialize AdBlocker asynchronously in background to make browser launch instantly
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            com.example.adblockengine.AdBlocker.init(application)
+            com.example.browser.NetworkSnifferEngine.initialize(application)
+            
+            // Post settings update back to UI thread once loaded
+            _uiState.update {
+                it.copy(
+                    globalAdBlockEnabled = com.example.adblockengine.AdBlocker.globalAdBlockEnabled,
+                    globalTrackersEnabled = com.example.adblockengine.AdBlocker.globalTrackersEnabled,
+                    youtubeAdSkipEnabled = com.example.adblockengine.AdBlocker.youtubeAdSkipEnabled,
+                    adblockWhitelist = com.example.adblockengine.AdBlocker.whitelistedSites.toSet(),
+                    adblockBlacklist = com.example.adblockengine.AdBlocker.blockedSites.toSet()
+                )
+            }
+        }
 
         // Initialize Custom Mobile Stream/Media Network Sniffer Listener
         com.example.mediadetectorengine.NetworkSnifferEngine.registerListener(object : com.example.mediadetectorengine.MediaDetectionListener {
@@ -438,16 +683,6 @@ class BrowserViewModel(
         okHttpClient = OkHttpClient.Builder()
             .cache(httpCache)
             .build()
-
-        _uiState.update {
-            it.copy(
-                globalAdBlockEnabled = com.example.adblockengine.AdBlocker.globalAdBlockEnabled,
-                globalTrackersEnabled = com.example.adblockengine.AdBlocker.globalTrackersEnabled,
-                youtubeAdSkipEnabled = com.example.adblockengine.AdBlocker.youtubeAdSkipEnabled,
-                adblockWhitelist = com.example.adblockengine.AdBlocker.whitelistedSites.toSet(),
-                adblockBlacklist = com.example.adblockengine.AdBlocker.blockedSites.toSet()
-            )
-        }
 
         try {
             ttsEngine = android.speech.tts.TextToSpeech(application) { status ->
@@ -503,13 +738,37 @@ class BrowserViewModel(
             e.printStackTrace()
         }
 
-        // Add initial tab or restore previous tabs
+        // Add initial tab or restore previous tabs immediately to render UI
         restoreTabsState()
-        loadArticlesForCategory("For You", false)
         refreshSettings()
-        loadOrionVoiceState()
 
-        orionVoiceEngine = com.example.browser.voiceengine.OrionVoiceEngine(application, this)
+        // Auto-recover interrupted downloads after restart or crash recovery
+        try {
+            com.example.downloadengine.DownloadWorker.checkAndResumeDownloads(application, customDownloadEngine)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        // Lazy initialize and load articles/voice systems to make application warm start instantly
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(1000L)
+            loadArticlesForCategory("For You", false)
+            loadOrionVoiceState()
+            
+            // Defer voice engine completely from blocking the startup thread
+            kotlinx.coroutines.delay(1500L)
+            ensureVoiceEngineInitialized()
+        }
+    }
+
+    fun ensureVoiceEngineInitialized() {
+        if (!::orionVoiceEngine.isInitialized) {
+            try {
+                orionVoiceEngine = com.example.browser.voiceengine.OrionVoiceEngine(getApplication(), this)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
     }
 
     fun refreshSettings() {
@@ -903,10 +1162,16 @@ class BrowserViewModel(
     private fun destroyTabWebView(tabId: String) {
         val webView = webViewMap.remove(tabId)
         webView?.let {
-            it.stopLoading()
-            it.clearHistory()
-            it.removeAllViews()
-            it.destroy()
+            try {
+                it.stopLoading()
+                it.clearHistory()
+                it.removeAllViews()
+                it.destroy()
+            } catch (e: Exception) {
+                try {
+                    it.destroy()
+                } catch (ex: Exception) {}
+            }
         }
     }
 
@@ -1061,12 +1326,48 @@ class BrowserViewModel(
         }
     }
 
+    fun dismissSslWarning() {
+        _uiState.value.sslWarningState.handler?.cancel()
+        _uiState.update { state ->
+            state.copy(
+                sslWarningState = state.sslWarningState.copy(
+                    showWarning = false,
+                    handler = null
+                )
+            )
+        }
+    }
+
+    fun proceedSslWarning(url: String) {
+        _uiState.value.sslWarningState.handler?.proceed()
+        viewModelScope.launch(Dispatchers.IO) {
+            val host = runCatching { java.net.URI(url).host }.getOrNull() ?: return@launch
+            repository.whitelistSslDomain(host)
+        }
+        _uiState.update { state ->
+            state.copy(
+                sslWarningState = state.sslWarningState.copy(
+                    showWarning = false,
+                    handler = null
+                )
+            )
+        }
+    }
+
+    fun saveAllWebViewsState() {
+        val context = getApplication<Application>().applicationContext
+        webViewMap.forEach { (tabId, webView) ->
+            TabStateManager.saveWebViewStateToFile(context, tabId, webView)
+        }
+    }
+
     fun saveTabsState() {
         val currentState = _uiState.value
         val tabs = currentState.tabs
         if (tabs.isEmpty()) return
         
         try {
+            saveAllWebViewsState()
             val jsonArray = org.json.JSONArray()
             for (tab in tabs) {
                 if (tab.isIncognito) continue // Do not store incognito sessions
@@ -1216,7 +1517,8 @@ class BrowserViewModel(
         _uiState.update { it.copy(showFilePicker = false) }
     }
 
-    inner class BrowserWebView(context: Context, val tabId: String) : WebView(context) {
+    inner class BrowserWebView(context: Context, initialTabId: String) : WebView(context) {
+        var tabId: String = initialTabId
         private var startX = 0f
         private var startY = 0f
         private val swipeThreshold = 150f
@@ -1328,8 +1630,18 @@ class BrowserViewModel(
         com.example.browser.LeakProneComponentTracker.trackContext(context)
 
         val currentTab = _uiState.value.tabs.find { it.id == tabId }
+        val targetTabId = tabId
 
-        val webView = BrowserWebView(context, tabId).apply {
+        // Obtain WebView from optimized OrionWebViewPool to ensure Chrome-parity speeds
+        val poolInstance = OrionWebViewPool.obtain(context)
+        val webView = if (poolInstance is BrowserWebView) {
+            poolInstance.tabId = targetTabId
+            poolInstance
+        } else {
+            BrowserWebView(context, targetTabId)
+        }
+
+        webView.apply {
             // Track living WebView reference for leak checks
             com.example.browser.WebViewReferenceCollector.register(this)
             id = View.generateViewId()
@@ -1389,7 +1701,7 @@ class BrowserViewModel(
                             val interceptRes = com.example.extensionengine.ExtensionDirectoryResolver.handleExtensionRequest(context, urlStr)
                             if (interceptRes != null) return interceptRes
                         }
-                        val currentDocUrl = view?.url ?: _uiState.value.tabs.find { it.id == tabId }?.url
+                        val currentDocUrl = _uiState.value.tabs.find { it.id == tabId }?.url
                         if (com.example.adblockengine.AdBlocker.shouldBlock(urlStr, currentDocUrl)) {
                             incrementBlockedAdsCount(tabId)
                             com.example.adblockengine.AdBlocker.createEmptyResponse()
@@ -1428,24 +1740,32 @@ class BrowserViewModel(
                         super.onPageStarted(view, url, favicon)
                         detectedMediaCustom.value = null
                         isUASwitchPending = false
-                        if (url != null && view != null && !url.startsWith("orion://")) {
+                        if (url != null && view != null && !url.startsWith("orion://") && !url.startsWith("about:") && !url.startsWith("file://")) {
                             val host = android.net.Uri.parse(url).host
                             if (!host.isNullOrEmpty()) {
-                                val isDesktop = domainDesktopMap[host] == true
+                                val isDesktop = isDesktopModeForHost(host)
                                 val currentTab = _uiState.value.tabs.find { it.id == tabId }
                                 val needsUpdate = (currentTab?.isDesktopMode != isDesktop)
                                 if (needsUpdate) {
                                     updateTabState(tabId) { it.copy(isDesktopMode = isDesktop) }
                                 }
                                 view.settings.userAgentString = if (isDesktop || url.contains("chromewebstore.google.com") || url.contains("chrome.google.com/webstore")) {
-                                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Safari/537.36"
+                                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Orion/2.0"
                                 } else {
-                                    "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Mobile Safari/537.36"
+                                    "Mozilla/5.0 (Linux; Android 13; Mobile; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36 Orion/2.0"
                                 }
 
-                                // Direct mobile domain enforcement
-                                if (!isDesktop && !url.contains("translate.google.com") && !url.contains("chromewebstore.google.com") && !url.contains("chrome.google.com/webstore")) {
-                                    val redirectedUrl = enforceMobileUrl(url)
+                                if (isDesktop) {
+                                    val redirectedUrl = enforceDesktopUrl(url)
+                                    val rewrote = redirectedUrl != url
+                                    com.example.browser.OrionDeveloperEngine.desktopConnectionState.value = com.example.browser.OrionDeveloperEngine.DesktopConnectionState(
+                                        userAgentApplied = true,
+                                        viewportApplied = true,
+                                        cssRulesApplied = true,
+                                        hostRewriteApplied = rewrote,
+                                        hostRewriteSkipped = !rewrote,
+                                        desktopPageLoaded = true
+                                    )
                                     if (redirectedUrl != url) {
                                         view.post {
                                             try {
@@ -1455,6 +1775,29 @@ class BrowserViewModel(
                                             }
                                         }
                                         return
+                                    }
+                                } else {
+                                    com.example.browser.OrionDeveloperEngine.desktopConnectionState.value = com.example.browser.OrionDeveloperEngine.DesktopConnectionState(
+                                        userAgentApplied = false,
+                                        viewportApplied = false,
+                                        cssRulesApplied = false,
+                                        hostRewriteApplied = false,
+                                        hostRewriteSkipped = true,
+                                        desktopPageLoaded = false
+                                    )
+                                    // Direct mobile domain enforcement
+                                    if (!url.contains("translate.google.com") && !url.contains("chromewebstore.google.com") && !url.contains("chrome.google.com/webstore")) {
+                                        val redirectedUrl = enforceMobileUrl(url)
+                                        if (redirectedUrl != url) {
+                                            view.post {
+                                                try {
+                                                    view.loadUrl(redirectedUrl)
+                                                } catch (e: Exception) {
+                                                    e.printStackTrace()
+                                                }
+                                            }
+                                            return
+                                        }
                                     }
                                 }
                             }
@@ -1523,7 +1866,11 @@ class BrowserViewModel(
                         try {
                             // Inject early API bootstrap hook rules so extension script variables are populated before page scripts complete
                             extensionManager.setupWebView(view, tabId)
-                            extensionManager.injectContentScripts(view, url)
+                            extensionManager.injectContentScripts(view, url, "document_start")
+                            
+                            // Inject Orion Compatibility Engine layers early
+                            val isDesktopModeCommit = _uiState.value.tabs.find { it.id == tabId }?.isDesktopMode == true
+                            com.example.browser.OrionCompatibilityEngine.injectCompatibilityLayer(view, url, context, isDesktopModeCommit)
                             
                             // Inject Notification polyfill early
                             com.example.notificationengine.NotificationEngineImpl(context).getJavascriptPolyfill(url) { polyfill ->
@@ -1550,7 +1897,7 @@ class BrowserViewModel(
                         if (url != null) {
                             val host = try { android.net.Uri.parse(url).host } catch (e: Exception) { null }
                             if (!host.isNullOrEmpty()) {
-                                val isDesktopModeSaved = domainDesktopMap[host] == true
+                                val isDesktopModeSaved = isDesktopModeForHost(host)
                                 val currentTab = _uiState.value.tabs.find { it.id == tabId }
                                 if (currentTab?.isDesktopMode != isDesktopModeSaved) {
                                     updateTabState(tabId) { it.copy(isDesktopMode = isDesktopModeSaved) }
@@ -1591,23 +1938,102 @@ class BrowserViewModel(
 
 
                         val isDesktop = _uiState.value.tabs.find { it.id == tabId }?.isDesktopMode == true
-                        if (isDesktop && view != null) {
+                        if (view != null) {
+                            if (isDesktop) {
+                                view.evaluateJavascript("""
+                                    var meta = document.querySelector('meta[name=viewport]');
+                                    if(meta) {
+                                        meta.content = 'width=1280, initial-scale=0.25';
+                                    } else {
+                                        var newMeta = document.createElement('meta');
+                                        newMeta.name = 'viewport';
+                                        newMeta.content = 'width=1280, initial-scale=0.25';
+                                        document.head.appendChild(newMeta);
+                                    }
+                                """.trimIndent(), null)
+                            } else {
+                                view.evaluateJavascript("""
+                                    var meta = document.querySelector('meta[name=viewport]');
+                                    if(meta) {
+                                        meta.content = 'width=device-width, initial-scale=1.0';
+                                    }
+                                """.trimIndent(), null)
+                            }
+                        }
+
+                        val pendingState = pendingVideoStates[tabId]
+                        if (pendingState != null && pendingState.position > 0.1f && view != null) {
                             view.evaluateJavascript("""
-                                var meta = document.querySelector('meta[name=viewport]');
-                                if(meta) {
-                                    meta.content = 'width=1280, initial-scale=0.25';
-                                } else {
-                                    var newMeta = document.createElement('meta');
-                                    newMeta.name = 'viewport';
-                                    newMeta.content = 'width=1280, initial-scale=0.25';
-                                    document.head.appendChild(newMeta);
-                                }
+                                (function() {
+                                    var targetTime = ${pendingState.position};
+                                    var targetPlaying = ${pendingState.isPlaying};
+                                    var attempts = 0;
+                                    function seekVideo() {
+                                        var video = document.querySelector('video');
+                                        if (video) {
+                                            if (video.readyState >= 1) {
+                                                video.currentTime = targetTime;
+                                                if (targetPlaying) {
+                                                    video.play().catch(function(e) { console.log("Auto-play failed:", e); });
+                                                } else {
+                                                    video.pause();
+                                                }
+                                            } else {
+                                                video.addEventListener('loadedmetadata', function() {
+                                                    video.currentTime = targetTime;
+                                                    if (targetPlaying) {
+                                                        video.play().catch(function(e) { console.log("Auto-play on loadedmetadata failed:", e); });
+                                                    } else {
+                                                        video.pause();
+                                                    }
+                                                }, { once: true });
+                                            }
+                                        } else if (attempts < 65) {
+                                            attempts++;
+                                            setTimeout(seekVideo, 120);
+                                        }
+                                    }
+                                    seekVideo();
+                                })();
                             """.trimIndent(), null)
+                            pendingVideoStates.remove(tabId)
+                            pendingVideoSeekTime.remove(tabId)
+                        } else {
+                            val pendingSeek = pendingVideoSeekTime[tabId]
+                            if (pendingSeek != null && pendingSeek > 0.1f && view != null) {
+                                view.evaluateJavascript("""
+                                    (function() {
+                                        var targetTime = $pendingSeek;
+                                        var attempts = 0;
+                                        function seekVideo() {
+                                            var video = document.querySelector('video');
+                                            if (video) {
+                                                // Ensure video metadata is loaded before seeking
+                                                if (video.readyState >= 1) {
+                                                    video.currentTime = targetTime;
+                                                    video.play().catch(function(e) { console.log("Auto-play failed:", e); });
+                                                } else {
+                                                    video.addEventListener('loadedmetadata', function() {
+                                                        video.currentTime = targetTime;
+                                                        video.play().catch(function(e) { console.log("Auto-play on loadedmetadata failed:", e); });
+                                                    }, { once: true });
+                                                }
+                                            } else if (attempts < 60) {
+                                                attempts++;
+                                                setTimeout(seekVideo, 150);
+                                            }
+                                        }
+                                        seekVideo();
+                                    })();
+                                """.trimIndent(), null)
+                                pendingVideoSeekTime.remove(tabId)
+                            }
                         }
 
                         // Inject Orion Compatibility Engine layers
                         if (view != null && url != null) {
-                            com.example.browser.OrionCompatibilityEngine.injectCompatibilityLayer(view, url, context)
+                            val isDesktopModeFinished = _uiState.value.tabs.find { it.id == tabId }?.isDesktopMode == true
+                            com.example.browser.OrionCompatibilityEngine.injectCompatibilityLayer(view, url, context, isDesktopModeFinished)
                         }
 
                         // Inject Simulated Chrome/User extensions upon page load complete
@@ -1930,7 +2356,8 @@ class BrowserViewModel(
                             }
 
                             // E. True MV2 & MV3 Content Scripts and Bridges
-                            extensionManager.injectContentScripts(view, url)
+                            extensionManager.injectContentScripts(view, url, "document_end")
+                            extensionManager.injectContentScripts(view, url, "document_idle")
 
                             // F. Web Notification Polyfill Injection
                             val notifJs = """
@@ -2137,7 +2564,7 @@ class BrowserViewModel(
                                     }
                                 }
                                 
-                                extensionManager.injectContentScripts(view, url)
+                                extensionManager.injectContentScripts(view, url, "document_idle")
                                 
                                 try {
                                     val params = org.json.JSONObject().apply {
@@ -2233,14 +2660,28 @@ class BrowserViewModel(
                 ) {
                     try {
                         val failingUrl = error?.url ?: ""
-                        if (failingUrl.isNotEmpty()) {
-                            val host = try { android.net.Uri.parse(failingUrl).host } catch (e: Exception) { null }
-                            if (host != null && sslDomainsToIgnore.contains(host)) {
-                                handler?.proceed()
-                                return
-                            }
+                        val host = if (failingUrl.isNotEmpty()) {
+                            try { android.net.Uri.parse(failingUrl).host ?: "" } catch (e: Exception) { "" }
+                        } else {
+                            ""
                         }
                         
+                        val isFintech = host.endsWith("pay.google.com") || 
+                                       host.endsWith("payments.google.com") ||
+                                       host.endsWith("paypal.com") || 
+                                       host.endsWith("stripe.com")
+
+                        if (isFintech) {
+                            handler?.cancel()
+                            loadErrorHtml(view, "ssl", failingUrl)
+                            return
+                        }
+
+                        if (host.isNotEmpty() && repository.isSslWhitelisted(host)) {
+                            handler?.proceed()
+                            return
+                        }
+
                         val webViewUrl = view?.url ?: ""
                         val isMainFrame = if (failingUrl.isNotEmpty() && webViewUrl.isNotEmpty()) {
                             val failingHost = try { android.net.Uri.parse(failingUrl).host } catch (e: Exception) { null }
@@ -2251,8 +2692,16 @@ class BrowserViewModel(
                         }
 
                         if (isMainFrame) {
-                            loadErrorHtml(view, "ssl", failingUrl)
-                            handler?.cancel()
+                            _uiState.update { state ->
+                                state.copy(
+                                    sslWarningState = SslWarningState(
+                                        showWarning = true,
+                                        url = failingUrl,
+                                        errorString = error?.toString() ?: "SSL Certificate Error",
+                                        handler = handler
+                                    )
+                                )
+                            }
                         } else {
                             handler?.proceed() // bypass subresource certificate issues smoothly
                         }
@@ -2264,7 +2713,16 @@ class BrowserViewModel(
 
                 override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                     try {
-                        val url = request?.url?.toString() ?: return false
+                        var url = request?.url?.toString() ?: return false
+                        
+                        // Force HTTPS for YouTube URLs
+                        if (url.contains("youtube.com", ignoreCase = true) || url.contains("youtu.be", ignoreCase = true)) {
+                            if (url.startsWith("http://", ignoreCase = true)) {
+                                val secureUrl = "https://" + url.substring(7)
+                                view?.post { view.loadUrl(secureUrl) }
+                                return true
+                            }
+                        }
                         
                         if (isUASwitchPending) {
                             isUASwitchPending = false
@@ -2332,6 +2790,20 @@ class BrowserViewModel(
                 override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
                     try {
                         android.util.Log.e("WebViewClient", "WebView render process gone")
+                        if (view != null) {
+                            val viewTabId = tabId
+                            view.post {
+                                try {
+                                    (view.parent as? android.view.ViewGroup)?.removeView(view)
+                                    webViewMap.remove(viewTabId)
+                                    view.destroy()
+                                    // Set WebView state as destroyed to automatically trigger lazy reconstruction and reload in Compose
+                                    updateTabState(viewTabId) { it.copy(isWebViewDestroyed = true) }
+                                } catch (e: Exception) {
+                                    e.printStackTrace()
+                                }
+                            }
+                        }
                     } catch (e: Throwable) {
                         e.printStackTrace()
                     }
@@ -2350,9 +2822,16 @@ class BrowserViewModel(
                             android.webkit.ConsoleMessage.MessageLevel.DEBUG -> com.example.developertoolsengine.LogLevel.DEBUG
                             else -> com.example.developertoolsengine.LogLevel.LOG
                         }
+                        val msgText = it.message() ?: ""
+                        val source = it.sourceId() ?: ""
+                        val line = it.lineNumber()
+                        
+                        // MICROPHONE RUNTIME DEBUG: Always print web console logs directly to logcat
+                        android.util.Log.d("WebConsole", "[$level] $msgText ($source:$line)")
+                        
                         com.example.developertoolsengine.InspectorEngine.instance.logConsole(
                             level,
-                            "${it.message()} (${it.sourceId()}:${it.lineNumber()})"
+                            "$msgText ($source:$line)"
                         )
                     }
                     return super.onConsoleMessage(consoleMessage)
@@ -2391,16 +2870,123 @@ class BrowserViewModel(
                     origin: String?,
                     callback: android.webkit.GeolocationPermissions.Callback?
                 ) {
-                    if (origin != null && callback != null) {
-                        setPendingGeolocationPrompt(Pair(origin, callback))
-                    } else {
+                    if (origin == null || callback == null) {
                         callback?.invoke(origin, false, false)
+                        return
+                    }
+                    val host = getDomain(origin)
+                    val impl = permissionEngine as? com.example.permissionengine.PermissionEngineImpl
+                    if (impl != null) {
+                        impl.manager.handleRequest(origin, "LOCATION") { result ->
+                            if (result == "ALLOW") {
+                                callback.invoke(origin, true, false)
+                            } else if (result == "BLOCK") {
+                                callback.invoke(origin, false, false)
+                            } else {
+                                setPendingGeolocationPrompt(Pair(origin, callback))
+                            }
+                        }
+                    } else {
+                        setPendingGeolocationPrompt(Pair(origin, callback))
                     }
                 }
 
                 override fun onPermissionRequest(request: android.webkit.PermissionRequest?) {
-                    if (request != null) {
-                        setPendingPermissionRequest(request)
+                    if (request == null) return
+                    val uri = request.origin.toString()
+                    val host = getDomain(uri)
+                    val resources = request.resources ?: emptyArray()
+
+                    try {
+                        val hasRecordDevicePermission = if (resources.contains("android.webkit.resource.AUDIO_CAPTURE")) {
+                            androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                        } else true
+                        val hasCameraDevicePermission = if (resources.contains("android.webkit.resource.VIDEO_CAPTURE")) {
+                            androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                        } else true
+
+                        com.example.browser.OrionDeveloperEngine.permissionConnectionState.value = com.example.browser.OrionDeveloperEngine.PermissionConnectionState(
+                            websiteRequestReceived = true,
+                            browserPermissionPromptShown = false,
+                            androidPermissionGranted = hasRecordDevicePermission && hasCameraDevicePermission,
+                            webViewGrantApplied = false,
+                            mediaStreamCreated = false,
+                            websiteActuallyWorking = false
+                        )
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+
+                    var isAllAllowed = true
+                    var isAnyBlocked = false
+
+                    for (res in resources) {
+                        val permType = when (res) {
+                            "android.webkit.resource.VIDEO_CAPTURE" -> "camera"
+                            "android.webkit.resource.AUDIO_CAPTURE" -> "microphone"
+                            "android.webkit.resource.MIDI_SYSEX" -> "midi"
+                            "android.webkit.resource.PROTECTED_MEDIA_ID_CONTAINER" -> "protected_media"
+                            else -> "media"
+                        }
+                        val status = getPermissionStatus(host, permType)
+                        if (status == "Block") {
+                            isAnyBlocked = true
+                        }
+                        if (status != "Allow") {
+                            isAllAllowed = false
+                        }
+                    }
+
+                    if (isAnyBlocked) {
+                        android.util.Log.i("Permissions", "Auto-blocking request for $host due to Block exception settings.")
+                        try {
+                            request.deny()
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                        return
+                    }
+
+                    // Auto-grant if system permissions are already granted for the requested resources, bypassing extra dialogs
+                    var systemPermsGranted = true
+                    if (resources.contains("android.webkit.resource.AUDIO_CAPTURE")) {
+                        if (androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                            systemPermsGranted = false
+                        }
+                    }
+                    if (resources.contains("android.webkit.resource.VIDEO_CAPTURE")) {
+                        if (androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                            systemPermsGranted = false
+                        }
+                    }
+
+                    if (systemPermsGranted) {
+                        android.util.Log.i("Permissions", "Auto-granting request for $host because native Android permissions are already granted.")
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            try {
+                                request.grant(resources)
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                            }
+                        }
+                        return
+                    }
+
+                    setPendingPermissionRequest(request)
+                }
+
+                override fun onPermissionRequestCanceled(request: android.webkit.PermissionRequest?) {
+                    if (request == null) {
+                        android.util.Log.e("Permissions", "onPermissionRequestCanceled called with null request")
+                        return
+                    }
+                    val uri = request.origin.toString()
+                    val host = getDomain(uri)
+                    val resList = request.resources?.joinToString(", ") ?: ""
+                    android.util.Log.w("Permissions", "!!! [Permission Request Canceled by Site/WebView] Host: $host | Resources: $resList | Request: $request")
+                    if (_pendingPermissionRequest.value == request) {
+                        android.util.Log.i("Permissions", "Clearing pending permission request because it matches the canceled request")
+                        clearPermissionRequest()
                     }
                 }
 
@@ -2410,6 +2996,24 @@ class BrowserViewModel(
                     isUserGesture: Boolean,
                     resultMsg: android.os.Message?
                 ): Boolean {
+                    val mainUrl = view?.url ?: ""
+                    val host = getDomain(mainUrl)
+                    logPermissionAction(host, "popups", "Permission Requested")
+                    
+                    val popupStatus = getPermissionStatus(host, "popups")
+                    if (popupStatus == "Block") {
+                        logPermissionAction(host, "popups", "Permission Denied")
+                        return false
+                    }
+                    
+                    // Strictly block ad/tracker background script window-open requests (no user gesture)
+                    if (!isUserGesture && popupStatus != "Allow") {
+                        android.util.Log.i("AdBlockers", "Blocked script-initiated background popup window.")
+                        logPermissionAction(host, "popups", "Permission Denied")
+                        return false
+                    }
+                    
+                    logPermissionAction(host, "popups", "Permission Granted")
                     val contextLocal = view!!.context
                     val newTabId = java.util.UUID.randomUUID().toString()
                     val isTabIncognito = _uiState.value.tabs.find { it.id == tabId }?.isIncognito == true
@@ -2445,22 +3049,43 @@ class BrowserViewModel(
                     filePathCallback: android.webkit.ValueCallback<Array<android.net.Uri>>?,
                     fileChooserParams: FileChooserParams?
                 ): Boolean {
+                    val host = webView?.url?.let { getDomain(it) } ?: ""
+                    logPermissionAction(host, "storage", "Permission Requested")
+                    
+                    val status = getPermissionStatus(host, "storage")
+                    if (status == "Block") {
+                        logPermissionAction(host, "storage", "Permission Denied")
+                        filePathCallback?.onReceiveValue(null)
+                        return true
+                    }
+                    
+                    logPermissionAction(host, "storage", "Permission Granted")
                     fileChooserCallback?.onReceiveValue(null)
                     fileChooserCallback = filePathCallback
+                    this@BrowserViewModel.fileChooserParams = fileChooserParams
                     _uiState.update { it.copy(showFilePicker = true) }
                     return true
                 }
 
                 override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
-                    super.onShowCustomView(view, callback)
                     if (view != null && callback != null) {
+                        val host = _uiState.value.tabs.find { it.id == tabId }?.url?.let { getDomain(it) } ?: ""
+                        logPermissionAction(host, "fullscreen", "Permission Requested")
+                        
+                        val status = getPermissionStatus(host, "fullscreen")
+                        if (status == "Block") {
+                            logPermissionAction(host, "fullscreen", "Permission Denied")
+                            callback.onCustomViewHidden()
+                            return
+                        }
+                        
+                        logPermissionAction(host, "fullscreen", "Permission Granted")
                         _fullscreenState.value = FullscreenState(view, callback)
                         FullscreenController.onEnterFullscreen(view.context)
                     }
                 }
 
                 override fun onHideCustomView() {
-                    super.onHideCustomView()
                     val state = _fullscreenState.value
                     if (state != null) {
                         FullscreenController.onExitFullscreen(state.view.context)
@@ -2469,6 +3094,22 @@ class BrowserViewModel(
                     _fullscreenState.value = null
                 }
             }
+
+            addJavascriptInterface(OrionSpeechBridge(this, this@BrowserViewModel), "OrionSpeechBridge")
+
+            addJavascriptInterface(
+                com.example.browser.PermissionWebInterface(this, context) { transactionId, origin, type ->
+                    viewModelScope.launch(Dispatchers.Main) {
+                        setPendingWebPermissionRequest(WebPermissionRequest(transactionId, origin, type, this@apply))
+                    }
+                },
+                "AndroidPermissionProxy"
+            )
+
+            addJavascriptInterface(
+                com.example.browser.NativeBridge(context, this, viewModelScope),
+                "NativeAudioBridge"
+            )
 
             addJavascriptInterface(object {
                 @JavascriptInterface
@@ -2595,10 +3236,14 @@ class BrowserViewModel(
             currentTab?.isIncognito ?: false
         )
 
-        // If the URL is already present in TabState, load it initially
-        val urlToLoad = currentTab?.url ?: "orion://newtab"
-        if (urlToLoad != "orion://newtab" && urlToLoad != "orion://newtab-incognito") {
-            safeLoadUrl(webView, urlToLoad)
+        // Restores state if an existing local state file is found (enables background and crash survival)
+        val restored = TabStateManager.restoreWebViewStateFromFile(context, tabId, webView)
+        if (!restored) {
+            // If the URL is already present in TabState, load it initially
+            val urlToLoad = currentTab?.url ?: "orion://newtab"
+            if (urlToLoad != "orion://newtab" && urlToLoad != "orion://newtab-incognito") {
+                safeLoadUrl(webView, urlToLoad)
+            }
         }
 
         webViewMap[tabId] = webView
@@ -2621,25 +3266,79 @@ class BrowserViewModel(
             loadWithOverviewMode = true
             builtInZoomControls = true
             displayZoomControls = false
+            
+            // Speed Boost: Force default high-speed caching and allow local database speeds up
             cacheMode = WebSettings.LOAD_DEFAULT
             mediaPlaybackRequiresUserGesture = false
             allowFileAccess = true
             allowContentAccess = true
             setSupportZoom(true)
+            
+            // Universal access for files to allow seamless opening of local/offline/custom web assets
+            allowFileAccessFromFileURLs = true
+            allowUniversalAccessFromFileURLs = true
+            
+            // Security: Disable multiple windows opening automatically via script tags to stop rogue click popups
             setSupportMultipleWindows(true)
-            javaScriptCanOpenWindowsAutomatically = true
+            javaScriptCanOpenWindowsAutomatically = false
+            
             loadsImagesAutomatically = true
             blockNetworkImage = false
-            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+            // Mixed content: ALWAYS ALLOW to bypass secure origins issues on complex websites
+            mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             setGeolocationEnabled(true)
+            
+            // Performance rendering boost: set layout algorithm to TEXT_AUTOSIZING for quicker painting
+            layoutAlgorithm = if (isDesktop) WebSettings.LayoutAlgorithm.NORMAL else WebSettings.LayoutAlgorithm.TEXT_AUTOSIZING
+            defaultTextEncodingName = "UTF-8"
+            
+            // Enable Offscreen pre-rasterization to compile/draw elements offscreen before they are in view
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                try {
+                    val preRasterMethod = webView.javaClass.getMethod("setOffscreenPreRaster", Boolean::class.javaPrimitiveType)
+                    preRasterMethod.invoke(webView, true)
+                } catch (e: Exception) {
+                    // fall back
+                }
+            }
+            
+            // Database and older Android AppCache configuration for absolute retro-compatibility
+            @Suppress("DEPRECATION")
+            if (android.os.Build.VERSION.SDK_INT < 33) {
+                try {
+                    val dbPathMethod = this.javaClass.getMethod("setDatabasePath", String::class.java)
+                    dbPathMethod.invoke(this, webView.context.applicationContext.getDir("databases", Context.MODE_PRIVATE).path)
+                    
+                    val appCacheEnabledMethod = this.javaClass.getMethod("setAppCacheEnabled", Boolean::class.javaPrimitiveType)
+                    appCacheEnabledMethod.invoke(this, true)
+                    
+                    val appCachePathMethod = this.javaClass.getMethod("setAppCachePath", String::class.java)
+                    appCachePathMethod.invoke(this, webView.context.applicationContext.cacheDir.absolutePath)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+            
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
                 safeBrowsingEnabled = true
             }
+            // Modern, optimized User Agent strings to unlock high speed rendering capabilities of modern websites
             userAgentString = if (isDesktop) {
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Orion/2.0"
             } else {
-                "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+                "Mozilla/5.0 (Linux; Android 13; Mobile; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36 Orion/2.0"
             }
+        }
+
+        // Enable third party cookies globally on normal cookie store to avoid login failures on high-security portals
+        try {
+            val cookieManager = android.webkit.CookieManager.getInstance()
+            cookieManager.setAcceptCookie(true)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+                cookieManager.setAcceptThirdPartyCookies(webView, !isIncognito)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
 
         if (isIncognito) {
@@ -2651,7 +3350,7 @@ class BrowserViewModel(
         }
 
         if (hwEnabled) {
-            webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+            webView.setLayerType(View.LAYER_TYPE_NONE, null)
         } else {
             webView.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
         }
@@ -3917,12 +4616,27 @@ class BrowserViewModel(
         var trimmed = url.trim()
         if (trimmed.isEmpty()) return
 
-        // Mobile layout enforcement
+        // Force HTTPS for YouTube URLs
+        if (trimmed.contains("youtube.com", ignoreCase = true) || trimmed.contains("youtu.be", ignoreCase = true)) {
+            if (trimmed.startsWith("http://", ignoreCase = true)) {
+                trimmed = "https://" + trimmed.substring(7)
+            } else if (!trimmed.startsWith("https://", ignoreCase = true) && !trimmed.startsWith("orion://") && !trimmed.startsWith("about:")) {
+                trimmed = "https://" + trimmed
+            }
+        }
+
+        // Desktop & Mobile layout enforcement depending on mode
         val activeId = _uiState.value.activeTabId
         val tab = _uiState.value.tabs.find { it.id == activeId }
         val isDesktop = tab?.isDesktopMode == true
-        if (!isDesktop && !trimmed.startsWith("orion://") && !trimmed.startsWith("about:") && !trimmed.contains("translate.google.com")) {
-            trimmed = enforceMobileUrl(trimmed)
+        if (isDesktop) {
+            if (!trimmed.startsWith("orion://") && !trimmed.startsWith("about:")) {
+                trimmed = enforceDesktopUrl(trimmed)
+            }
+        } else {
+            if (!trimmed.startsWith("orion://") && !trimmed.startsWith("about:") && !trimmed.contains("translate.google.com")) {
+                trimmed = enforceMobileUrl(trimmed)
+            }
         }
         
         val finalUrl = trimmed
@@ -4573,49 +5287,149 @@ class BrowserViewModel(
         val currentTab = _uiState.value.tabs.find { it.id == activeId } ?: return
         val webView = webViewMap[activeId] ?: return
         val currentUrl = webView.url ?: currentTab.url
-        if (currentUrl.isEmpty() || currentUrl.startsWith("orion://") || currentUrl.startsWith("about:")) {
-            val newMode = !currentTab.isDesktopMode
-            updateTabState(activeId) {
-                it.copy(isDesktopMode = newMode)
+
+        // Retrieve current playing video time and state before toggle for perfect seamless playback
+        webView.evaluateJavascript("""
+            (function() {
+                var v = document.querySelector('video');
+                if (!v) return null;
+                return JSON.stringify({
+                    time: v.currentTime,
+                    playing: !v.paused
+                });
+            })();
+        """.trimIndent()) { resultJson ->
+            if (resultJson != null && resultJson != "null" && resultJson != "undefined" && resultJson.isNotBlank()) {
+                val cleanJson = if (resultJson.startsWith("\"") && resultJson.endsWith("\"")) {
+                    resultJson.replace("\\\"", "\"").removeSurrounding("\"")
+                } else {
+                    resultJson
+                }
+                try {
+                    val obj = org.json.JSONObject(cleanJson)
+                    val time = obj.optDouble("time", -1.0)
+                    val playing = obj.optBoolean("playing", false)
+                    if (time > 0.1) {
+                        pendingVideoStates[activeId] = OrionVideoState(time.toFloat(), playing)
+                        pendingVideoSeekTime[activeId] = time.toFloat()
+                    }
+                } catch (e: java.lang.Exception) {
+                    e.printStackTrace()
+                }
             }
-            webView.settings.userAgentString = if (newMode) {
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Safari/537.36"
-            } else {
-                "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Mobile Safari/537.36"
+
+            webView.post {
+                val newMode = if (currentUrl.isEmpty() || currentUrl.startsWith("orion://") || currentUrl.startsWith("about:")) {
+                    val m = !currentTab.isDesktopMode
+                    updateTabState(activeId) { it.copy(isDesktopMode = m) }
+                    applyWebViewSettings(
+                        webView,
+                        _uiState.value.isJavaScriptEnabled,
+                        _uiState.value.isHardwareAccelerationEnabled,
+                        m,
+                        currentTab.isIncognito
+                    )
+                    return@post
+                } else {
+                    val domain = Uri.parse(currentUrl).host ?: return@post
+                    val currentMode = isDesktopModeForHost(domain)
+                    val m = !currentMode
+                    setDesktopModeForHost(domain, m)
+                    m
+                }
+
+                isUASwitchPending = true
+                lastManualLoadUrl = currentUrl
+
+                applyWebViewSettings(
+                    webView,
+                    _uiState.value.isJavaScriptEnabled,
+                    _uiState.value.isHardwareAccelerationEnabled,
+                    newMode,
+                    currentTab.isIncognito
+                )
+
+                updateTabState(activeId) {
+                    it.copy(isDesktopMode = newMode)
+                }
+
+                // Smart redirect to mobile or desktop URL depending on the toggle
+                val redirectUrl = if (newMode) enforceDesktopUrl(currentUrl) else enforceMobileUrl(currentUrl)
+
+                if (redirectUrl != currentUrl) {
+                    webView.loadUrl(redirectUrl)
+                } else {
+                    webView.reload()
+                }
             }
-            return
         }
+    }
 
-        val domain = Uri.parse(currentUrl).host ?: return
-        val currentMode = domainDesktopMap[domain] ?: false
-        val newMode = !currentMode
-        domainDesktopMap[domain] = newMode
-
-        // Save to SharedPreferences
-        val sharedPrefs = getApplication<Application>().getSharedPreferences("desktop_mode_sites", Context.MODE_PRIVATE)
-        sharedPrefs.edit().putBoolean("desktop_mode_$domain", newMode).apply()
-
-        isUASwitchPending = true
-        lastManualLoadUrl = currentUrl
-
-        webView.settings.userAgentString = if (newMode) {
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Safari/537.36"
-        } else {
-            "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Mobile Safari/537.36"
+    fun captureActiveVideoState() {
+        val activeId = _uiState.value.activeTabId
+        if (activeId.isEmpty()) return
+        val webView = webViewMap[activeId] ?: return
+        webView.evaluateJavascript("""
+            (function() {
+                var v = document.querySelector('video');
+                if (!v) return null;
+                return JSON.stringify({
+                    time: v.currentTime,
+                    playing: !v.paused
+                });
+            })();
+        """.trimIndent()) { resultJson ->
+            if (resultJson != null && resultJson != "null" && resultJson != "undefined" && resultJson.isNotBlank()) {
+                val cleanJson = if (resultJson.startsWith("\"") && resultJson.endsWith("\"")) {
+                    resultJson.replace("\\\"", "\"").removeSurrounding("\"")
+                } else {
+                    resultJson
+                }
+                try {
+                    val obj = org.json.JSONObject(cleanJson)
+                    val time = obj.optDouble("time", -1.0)
+                    val playing = obj.optBoolean("playing", false)
+                    if (time > 0.1) {
+                        pendingVideoStates[activeId] = OrionVideoState(time.toFloat(), playing)
+                        pendingVideoSeekTime[activeId] = time.toFloat()
+                        android.util.Log.i("OrionVideoPersistence", "Captured video state for tab $activeId: time=$time, playing=$playing")
+                    }
+                } catch (e: java.lang.Exception) {
+                    e.printStackTrace()
+                }
+            }
         }
+    }
 
-        updateTabState(activeId) {
-            it.copy(isDesktopMode = newMode)
+    fun resumeActiveVideosIfPending() {
+        val activeId = _uiState.value.activeTabId
+        if (activeId.isEmpty()) return
+        val webView = webViewMap[activeId] ?: return
+        val pendingState = pendingVideoStates[activeId]
+        if (pendingState != null) {
+            webView.evaluateJavascript("""
+                (function() {
+                    var v = document.querySelector('video');
+                    if (v) {
+                        v.currentTime = ${pendingState.position};
+                        if (${pendingState.isPlaying}) {
+                            v.play().catch(function(e) { console.log("Video auto play failed:", e); });
+                        } else {
+                            v.pause();
+                        }
+                    }
+                })();
+            """.trimIndent(), null)
+            pendingVideoStates.remove(activeId)
         }
+    }
 
-        // Smart redirect to mobile or desktop URL depending on the toggle
-        val redirectUrl = if (newMode) enforceDesktopUrl(currentUrl) else enforceMobileUrl(currentUrl)
-
-        if (redirectUrl != currentUrl) {
-            webView.loadUrl(redirectUrl)
-        } else {
-            webView.reload()
+    fun onAppResume() {
+        val activeId = _uiState.value.activeTabId
+        if (activeId.isNotEmpty()) {
+            webViewMap[activeId]?.onResume()
         }
+        resumeActiveVideosIfPending()
     }
 
     private var feedJob: kotlinx.coroutines.Job? = null
@@ -5083,32 +5897,45 @@ class BrowserViewModel(
     }
 
     fun startDownload(url: String, fileName: String, mimeType: String, userAgent: String, destinationDir: String = android.os.Environment.DIRECTORY_DOWNLOADS) {
-        try {
-            val request = android.app.DownloadManager.Request(android.net.Uri.parse(url)).apply {
-                setTitle(fileName)
-                setDescription("Downloading...")
-                setMimeType(mimeType)
-                addRequestHeader("User-Agent", userAgent)
-                addRequestHeader("Cookie", android.webkit.CookieManager.getInstance().getCookie(url) ?: "")
-                setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                setDestinationInExternalPublicDir(destinationDir, fileName)
-                setAllowedOverMetered(true)
-                setAllowedOverRoaming(true)
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                // Route directly to custom multi-threaded IDM engine for maximum chunked transfer rates (8 threads)
+                val downloadId = customDownloadEngine.startDownload(url, fileName, mimeType, threads = 8)
+                
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    android.widget.Toast.makeText(getApplication(), "Orion Speed Multi-threaded Download Started: $fileName", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                // Safe robust fallback to System DownloadManager if native engines fail
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    try {
+                        val request = android.app.DownloadManager.Request(android.net.Uri.parse(url)).apply {
+                            setTitle(fileName)
+                            setDescription("Downloading (Fallback)...")
+                            setMimeType(mimeType)
+                            addRequestHeader("User-Agent", userAgent)
+                            addRequestHeader("Cookie", android.webkit.CookieManager.getInstance().getCookie(url) ?: "")
+                            setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                            setDestinationInExternalPublicDir(destinationDir, fileName)
+                            setAllowedOverMetered(true)
+                            setAllowedOverRoaming(true)
+                        }
+                        
+                        val downloadManager = getApplication<Application>().getSystemService(Context.DOWNLOAD_SERVICE) as android.app.DownloadManager
+                        val downloadId = downloadManager.enqueue(request)
+                        
+                        viewModelScope.launch {
+                            repository.saveDownloadToDb(downloadId, fileName, url, mimeType, "PENDING")
+                        }
+                        
+                        trackDownloadProgress(downloadId, fileName, mimeType)
+                        android.widget.Toast.makeText(getApplication(), "Downloading (Fallback Mode): $fileName", android.widget.Toast.LENGTH_SHORT).show()
+                    } catch (ex2: Exception) {
+                        ex2.printStackTrace()
+                        android.widget.Toast.makeText(getApplication(), "Download failed: ${ex2.message}", android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                }
             }
-            
-            val downloadManager = getApplication<Application>().getSystemService(Context.DOWNLOAD_SERVICE) as android.app.DownloadManager
-            val downloadId = downloadManager.enqueue(request)
-            
-            viewModelScope.launch {
-                repository.saveDownloadToDb(downloadId, fileName, url, mimeType, "PENDING")
-            }
-            
-            trackDownloadProgress(downloadId, fileName, mimeType)
-            
-            android.widget.Toast.makeText(getApplication(), "Downloading: $fileName", android.widget.Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
-            e.printStackTrace()
-            android.widget.Toast.makeText(getApplication(), "Download failed: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -5368,7 +6195,8 @@ class BrowserViewModel(
             val newHost = when {
                 (host == "youtube.com" || host == "www.youtube.com") && !uri.path.orEmpty().contains("embed") -> "m.youtube.com"
                 host == "facebook.com" || host == "www.facebook.com" -> "m.facebook.com"
-                host == "twitter.com" || host == "www.twitter.com" -> "mobile.twitter.com"
+                host == "twitter.com" || host == "www.twitter.com" || host == "x.com" || host == "www.x.com" -> "mobile.twitter.com"
+                host == "reddit.com" || host == "www.reddit.com" -> "m.reddit.com"
                 (host.contains("wikipedia.org") && !host.contains(".m.wikipedia.org")) -> {
                     if (host == "wikipedia.org") {
                         "m.wikipedia.org"
@@ -5412,7 +6240,8 @@ class BrowserViewModel(
             val newHost = when {
                 host == "m.youtube.com" -> "www.youtube.com"
                 host == "m.facebook.com" -> "www.facebook.com"
-                host == "mobile.twitter.com" -> "www.twitter.com"
+                host == "mobile.twitter.com" || host == "m.twitter.com" || host == "mobile.x.com" || host == "m.x.com" -> "x.com"
+                host == "m.reddit.com" -> "www.reddit.com"
                 host.contains(".m.wikipedia.org") -> host.replace(".m.wikipedia.org", ".wikipedia.org")
                 else -> null
             }
@@ -5517,6 +6346,64 @@ class BrowserViewModel(
         callback(null)
     }
 
+    override fun checkExtensionPermission(extensionId: String, permission: String, callback: (Boolean) -> Unit) {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+            val dbExts = getInstalledDbExtensions()
+            val dbExt = dbExts.find { it.id == extensionId }
+            val catalogExt = EXTENSIONS_CATALOG.find { it.id == extensionId }
+            val extName = dbExt?.name ?: catalogExt?.name ?: "Extension"
+
+            // 1. Check local decision
+            val decision = OrionExtensionPermissionEngine.getPermissionDecision(getApplication(), extensionId, permission)
+            if (decision == "BLOCK") {
+                callback(false)
+                return@launch
+            }
+
+            if (decision == "ALLOW_ALWAYS" || decision == "ALLOW_ONCE") {
+                // Check native Android permission if high risk
+                val spec = OrionExtensionPermissionEngine.permissionsCatalog[permission]
+                if (spec != null && spec.requiredAndroidPermission != null) {
+                    val systemGranted = com.example.permissionengine.AndroidRuntimePermissionManager.hasPermission(getApplication(), spec.requiredAndroidPermission)
+                    if (!systemGranted) {
+                        requestSystemPermissions(listOf(spec.requiredAndroidPermission)) { allGranted ->
+                            callback(allGranted)
+                        }
+                    } else {
+                        callback(true)
+                    }
+                } else {
+                    callback(true)
+                }
+                return@launch
+            }
+
+            // 2. Default: Prompt the user
+            showPrompt(extensionId, extName, permission) { userChoice ->
+                OrionExtensionPermissionEngine.setPermissionDecision(getApplication(), extensionId, permission, userChoice)
+                if (userChoice == "BLOCK") {
+                    callback(false)
+                } else {
+                    // Check Android system permission if high risk
+                    val spec = OrionExtensionPermissionEngine.permissionsCatalog[permission]
+                    if (spec != null && spec.requiredAndroidPermission != null) {
+                        requestSystemPermissions(listOf(spec.requiredAndroidPermission)) { allGranted ->
+                            if (!allGranted) {
+                                // If system permission denied, block local decision as well
+                                OrionExtensionPermissionEngine.setPermissionDecision(getApplication(), extensionId, permission, "BLOCK")
+                                callback(false)
+                            } else {
+                                callback(true)
+                            }
+                        }
+                    } else {
+                        callback(true)
+                    }
+                }
+            }
+        }
+    }
+
     fun getActiveWebViewText(onResult: (String) -> Unit) {
         executeScriptOnTab("", FastAIExtractor.JS_EXTRACT_SCRIPT) { res ->
             val text = if (res != null && res != "null") {
@@ -5567,6 +6454,7 @@ class BrowserViewModel(
         }
 
         try {
+            ensureVoiceEngineInitialized()
             val langCode = _uiState.value.orionVoiceActiveLanguageCode
             orionVoiceEngine.speechRecognitionModule.startListening(
                 languageCode = langCode,
@@ -6443,5 +7331,18 @@ class NormalHistoryStore(private val repository: com.example.data.BrowserReposit
 class IncognitoHistoryStore {
     suspend fun addHistory(url: String, title: String) {
         // ALWAYS STORES NOTHING PERMANENTLY (as per requirements)
+    }
+}
+
+object MixedContentGuard {
+    private val trustedDomains = setOf(
+        "pay.google.com",
+        "payments.google.com",
+        "paypal.com",
+        "stripe.com"
+    )
+    fun isTrusted(url: String): Boolean {
+        val host = runCatching { java.net.URI(url).host }.getOrNull() ?: return false
+        return trustedDomains.any { host.endsWith(it) }
     }
 }

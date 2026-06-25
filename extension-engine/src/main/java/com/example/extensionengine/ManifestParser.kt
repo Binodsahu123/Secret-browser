@@ -6,7 +6,8 @@ import java.security.MessageDigest
 data class ContentScriptSpec(
     val matches: List<String>,
     val js: List<String>,
-    val css: List<String>
+    val css: List<String>,
+    val runAt: String = "document_idle"
 )
 
 data class ParsedExtension(
@@ -124,8 +125,10 @@ class ManifestParser {
                     }
                 }
 
+                val runAt = scriptObj.optString("run_at", "document_idle")
+
                 if (matches.isNotEmpty() && (js.isNotEmpty() || css.isNotEmpty())) {
-                    contentScripts.add(ContentScriptSpec(matches, js, css))
+                    contentScripts.add(ContentScriptSpec(matches, js, css, runAt))
                 }
             }
         }

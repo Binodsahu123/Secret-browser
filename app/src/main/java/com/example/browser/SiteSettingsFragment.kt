@@ -26,17 +26,16 @@ data class SitePermissionType(
 )
 
 val permissionTypes = listOf(
-    SitePermissionType("location", "📍 Location", "📍", "Ask"),
-    SitePermissionType("camera", "📷 Camera", "📷", "Ask"),
     SitePermissionType("microphone", "🎤 Microphone", "🎤", "Ask"),
+    SitePermissionType("camera", "📷 Camera", "📷", "Ask"),
+    SitePermissionType("location", "📍 Location", "📍", "Ask"),
     SitePermissionType("notifications", "🔔 Notifications", "🔔", "Ask"),
-    SitePermissionType("javascript", "⚡ JavaScript", "⚡", "Allow"),
-    SitePermissionType("cookies", "🍪 Cookies", "🍪", "Allow"),
-    SitePermissionType("popups", "🔒 Pop-ups", "🔒", "Block"),
-    SitePermissionType("ads", "📢 Ads", "📢", "Block"),
-    SitePermissionType("sync", "🔄 Background sync", "🔄", "Allow"),
-    SitePermissionType("files", "📁 File access", "📁", "Ask"),
-    SitePermissionType("clipboard", "🖥️ Clipboard", "🖥️", "Ask")
+    SitePermissionType("storage", "📁 Storage (File Access)", "📁", "Ask"),
+    SitePermissionType("clipboard", "🖥️ Clipboard", "🖥️", "Ask"),
+    SitePermissionType("midi", "🎹 MIDI Sysex", "🎹", "Ask"),
+    SitePermissionType("protected_media", "🛡️ Protected Media", "🛡️", "Ask"),
+    SitePermissionType("fullscreen", "📺 Fullscreen Mode", "📺", "Ask"),
+    SitePermissionType("popups", "🔒 Pop-ups & Redirects", "🔒", "Block")
 )
 
 @Composable

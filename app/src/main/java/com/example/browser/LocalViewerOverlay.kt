@@ -47,6 +47,13 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.graphics.graphicsLayer
 import java.util.Locale
 import java.io.File
+import androidx.compose.foundation.lazy.items
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.AnnotatedString
+import java.util.zip.ZipFile
+import java.util.zip.ZipEntry
+import com.example.downloadengine.DownloadScheduler
 
 @Composable
 fun LocalViewerOverlay(
@@ -169,6 +176,13 @@ fun LocalViewerOverlay(
                             lowerMime.startsWith("text/") || lowerMime.contains("javascript") ||
                             lowerMime.contains("json") || lowerMime.contains("xml")
 
+                    val isArchive = lowerName.endsWith(".zip") || lowerName.endsWith(".apk") ||
+                            lowerName.endsWith(".aab") || lowerName.endsWith(".jar") ||
+                            lowerName.endsWith(".rar") || lowerName.endsWith(".7z") ||
+                            lowerName.endsWith(".tar") || lowerName.endsWith(".gz") ||
+                            lowerMime.contains("zip") || lowerMime.contains("compressed") ||
+                            lowerMime.contains("archive")
+
                     when {
                         activeFile.mimeType.startsWith("video/") -> {
                             VideoPlayerView(filePath = activeFile.filePath)
@@ -188,6 +202,13 @@ fun LocalViewerOverlay(
                                 filePath = activeFile.filePath,
                                 fileName = activeFile.fileName,
                                 mimeType = activeFile.mimeType
+                            )
+                        }
+                        isArchive -> {
+                            ZipExplorerView(
+                                filePath = activeFile.filePath,
+                                fileName = activeFile.fileName,
+                                onClose = onDismiss
                             )
                         }
                         isTextOrCode -> {
@@ -910,6 +931,13 @@ fun TextCodeRendererView(filePath: String, fileName: String, mimeType: String) {
         }
     }
 
+    val extension = remember(fileName) { fileName.substringAfterLast(".", "") }
+    val annotatedLines = remember(fileContent, extension) {
+        fileContent.split("\n").map { line ->
+            SyntaxHighlightingEngine.highlight(line, extension)
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -924,13 +952,12 @@ fun TextCodeRendererView(filePath: String, fileName: String, mimeType: String) {
             border = BorderStroke(1.dp, Color(0xFF1E293B))
         ) {
             Box(modifier = Modifier.fillMaxSize()) {
-                val lines = remember(fileContent) { fileContent.split("\n") }
                 androidx.compose.foundation.lazy.LazyColumn(
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(12.dp)
                 ) {
-                    itemsIndexed(lines) { index, line ->
+                    itemsIndexed(annotatedLines) { index, line ->
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -945,7 +972,6 @@ fun TextCodeRendererView(filePath: String, fileName: String, mimeType: String) {
                             )
                             Text(
                                 text = line,
-                                color = Color(0xFF38BDF8), // Tech cyan syntax
                                 fontSize = 12.sp,
                                 fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
                             )
@@ -953,6 +979,1039 @@ fun TextCodeRendererView(filePath: String, fileName: String, mimeType: String) {
                     }
                 }
             }
+        }
+    }
+}
+
+object SyntaxHighlightingEngine {
+    // Colors for syntax styling: IDM style / Dracula dark theme style
+    val KeywordColor = Color(0xFFFF79C6) // Pink
+    val TypeColor = Color(0xFF8BE9FD)    // Cyan
+    val StringColor = Color(0xFFF1FA8C)  // Yellow
+    val CommentColor = Color(0xFF6272A4) // Gray-blue
+    val NumberColor = Color(0xFFBD93F9)  // Purple
+    val DefaultColor = Color(0xFFF8F8F2) // Whiteish
+    val TagColor = Color(0xFFFF5555)     // Red (HTML/XML tags)
+    val AttrColor = Color(0xFF50FA7B)    // Green (HTML/XML attributes)
+
+    val Keywords = setOf(
+        // Java & Kotlin & C & C++
+        "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class", "const",
+        "continue", "default", "do", "double", "else", "enum", "extends", "final", "finally", "float",
+        "for", "goto", "if", "implements", "import", "instanceof", "int", "interface", "long", "native",
+        "new", "package", "private", "protected", "public", "return", "short", "static", "strictfp",
+        "super", "switch", "synchronized", "this", "throw", "throws", "transient", "try", "void",
+        "volatile", "while", "val", "var", "fun", "null", "true", "false", "object", "companion",
+        "sealed", "data", "override", "open", "internal", "as", "is", "in", "when", "by", "init",
+        "constructor", "as?", "in!", "out", "let", "run", "also", "apply", "takeIf", "takeUnless",
+        // Python
+        "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif",
+        "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda",
+        "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield",
+        // JS & TS
+        "let", "const", "var", "function", "class", "export", "import", "default", "from", "as",
+        "if", "else", "switch", "case", "default", "for", "while", "do", "break", "continue",
+        "return", "try", "catch", "finally", "throw", "new", "this", "typeof", "instanceof", "in",
+        "of", "delete", "void", "debugger", "await", "async", "yield", "super", "extends", "static",
+        "get", "set", "constructor", "arguments", "eval", "interface", "type", "namespace", "module",
+        "declare", "keyof", "readonly", "any", "unknown", "never", "string", "number", "boolean",
+        // C#
+        "using", "namespace", "struct", "delegate", "event", "readonly", "volatile", "virtual",
+        "override", "sealed", "abstract", "partial", "ref", "out", "in", "params", "lock", "async",
+        "await", "foreach", "goto", "checked", "unchecked", "unsafe", "fixed", "as", "is", "sizeof",
+        "typeof", "stackalloc",
+        // PHP
+        "echo", "print", "global", "static", "function", "class", "public", "private", "protected",
+        "return", "if", "else", "elseif", "while", "do", "for", "foreach", "break", "continue", "switch",
+        "case", "default", "include", "require", "include_once", "require_once", "use", "namespace",
+        // Go
+        "package", "import", "func", "var", "const", "struct", "interface", "map", "chan", "go",
+        "select", "defer", "if", "else", "switch", "case", "default", "for", "range", "break",
+        "continue", "return", "fallthrough", "type",
+        // Rust
+        "pub", "fn", "let", "mut", "use", "mod", "struct", "enum", "impl", "trait", "match", "if",
+        "else", "loop", "while", "for", "in", "break", "continue", "return", "unsafe", "const",
+        "static", "type", "as", "where", "self", "Self", "dyn", "ref",
+        // Swift
+        "let", "var", "func", "class", "struct", "enum", "protocol", "extension", "init", "deinit",
+        "self", "Self", "import", "public", "private", "fileprivate", "internal", "open", "guard",
+        "if", "else", "switch", "case", "default", "for", "in", "while", "repeat", "break", "continue",
+        "fallthrough", "return", "throw", "throws", "try", "try!", "try?", "nil", "true", "false"
+    )
+
+    val Types = setOf(
+        "String", "Int", "Long", "Double", "Float", "Boolean", "Byte", "Short", "Char", "Unit", "Any",
+        "List", "Map", "Set", "ArrayList", "HashMap", "HashSet", "Array", "Exception", "Runnable",
+        "Thread", "Integer", "Character", "Object", "System", "Console", "Task", "Action", "Func",
+        "Vector", "slice", "str", "bool", "int", "float", "dict", "tuple", "list", "set", "object",
+        "nil", "None", "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128",
+        "usize", "f32", "f64", "char", "bool", "Option", "Result", "Some", "None", "Ok", "Err", "Box",
+        "Rc", "Arc", "RefCell", "Cell", "String", "str"
+    )
+
+    fun highlight(line: String, extension: String): androidx.compose.ui.text.AnnotatedString {
+        val ext = extension.lowercase(Locale.ROOT)
+        return when {
+            ext == "xml" || ext == "html" || ext == "svg" -> highlightXmlHtml(line)
+            ext == "json" -> highlightJson(line)
+            ext == "yaml" || ext == "yml" -> highlightYaml(line)
+            ext == "md" || ext == "markdown" -> highlightMarkdown(line)
+            else -> highlightGeneralCode(line)
+        }
+    }
+
+    private fun highlightGeneralCode(line: String): androidx.compose.ui.text.AnnotatedString {
+        val builder = androidx.compose.ui.text.AnnotatedString.Builder()
+        
+        // Let's check for single line comment first
+        val commentIndex = line.indexOf("//")
+        val hashCommentIndex = if (line.trim().startsWith("#") && !line.trim().startsWith("#include")) 0 else -1
+        val finalCommentIdx = when {
+            commentIndex != -1 && hashCommentIndex != -1 -> minOf(commentIndex, hashCommentIndex)
+            commentIndex != -1 -> commentIndex
+            hashCommentIndex != -1 -> hashCommentIndex
+            else -> -1
+        }
+
+        val codePart = if (finalCommentIdx != -1) line.substring(0, finalCommentIdx) else line
+        val commentPart = if (finalCommentIdx != -1) line.substring(finalCommentIdx) else ""
+
+        // Simple tokenizer for codePart
+        var index = 0
+        var insideString = false
+        var stringChar = ' '
+        var currentWord = StringBuilder()
+
+        fun flushWord() {
+            if (currentWord.isNotEmpty()) {
+                val word = currentWord.toString()
+                when {
+                    Keywords.contains(word) -> {
+                        builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = KeywordColor, fontWeight = FontWeight.Bold))
+                        builder.append(word)
+                        builder.pop()
+                    }
+                    Types.contains(word) -> {
+                        builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = TypeColor))
+                        builder.append(word)
+                        builder.pop()
+                    }
+                    word.all { it.isDigit() } -> {
+                        builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = NumberColor))
+                        builder.append(word)
+                        builder.pop()
+                    }
+                    else -> {
+                        builder.append(word)
+                    }
+                }
+                currentWord = StringBuilder()
+            }
+        }
+
+        while (index < codePart.length) {
+            val char = codePart[index]
+            if (insideString) {
+                builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = StringColor))
+                builder.append(char)
+                builder.pop()
+                if (char == stringChar && (index == 0 || codePart[index - 1] != '\\')) {
+                    insideString = false
+                }
+                index++
+            } else {
+                if (char == '"' || char == '\'') {
+                    flushWord()
+                    insideString = true
+                    stringChar = char
+                    builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = StringColor))
+                    builder.append(char)
+                    builder.pop()
+                    index++
+                } else if (char.isLetterOrDigit() || char == '_') {
+                    currentWord.append(char)
+                    index++
+                } else {
+                    flushWord()
+                    builder.append(char)
+                    index++
+                }
+            }
+        }
+        flushWord()
+
+        // Append comment if exists
+        if (commentPart.isNotEmpty()) {
+            builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = CommentColor))
+            builder.append(commentPart)
+            builder.pop()
+        }
+
+        return builder.toAnnotatedString()
+    }
+
+    private fun highlightXmlHtml(line: String): androidx.compose.ui.text.AnnotatedString {
+        val builder = androidx.compose.ui.text.AnnotatedString.Builder()
+        var index = 0
+        var insideTag = false
+        var insideString = false
+        var stringChar = ' '
+        var currentToken = StringBuilder()
+
+        fun flushToken() {
+            if (currentToken.isNotEmpty()) {
+                val tok = currentToken.toString()
+                if (insideTag) {
+                    when {
+                        tok.startsWith("<") || tok.startsWith("/") || tok.endsWith(">") -> {
+                            builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = TagColor, fontWeight = FontWeight.Bold))
+                            builder.append(tok)
+                            builder.pop()
+                        }
+                        tok.contains("=") -> {
+                            builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = AttrColor))
+                            builder.append(tok)
+                            builder.pop()
+                        }
+                        else -> {
+                            builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = TagColor))
+                            builder.append(tok)
+                            builder.pop()
+                        }
+                    }
+                } else {
+                    builder.append(tok)
+                }
+                currentToken = StringBuilder()
+            }
+        }
+
+        while (index < line.length) {
+            val char = line[index]
+            if (insideString) {
+                builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = StringColor))
+                builder.append(char)
+                builder.pop()
+                if (char == stringChar) {
+                    insideString = false
+                }
+                index++
+            } else {
+                when (char) {
+                    '<' -> {
+                        flushToken()
+                        insideTag = true
+                        builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = TagColor, fontWeight = FontWeight.Bold))
+                        builder.append('<')
+                        builder.pop()
+                        index++
+                    }
+                    '>' -> {
+                        flushToken()
+                        insideTag = false
+                        builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = TagColor, fontWeight = FontWeight.Bold))
+                        builder.append('>')
+                        builder.pop()
+                        index++
+                    }
+                    '"', '\'' -> {
+                        flushToken()
+                        insideString = true
+                        stringChar = char
+                        builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = StringColor))
+                        builder.append(char)
+                        builder.pop()
+                        index++
+                    }
+                    ' ', '\t', '\n', '\r' -> {
+                        flushToken()
+                        builder.append(char)
+                        index++
+                    }
+                    else -> {
+                        currentToken.append(char)
+                        index++
+                    }
+                }
+            }
+        }
+        flushToken()
+        return builder.toAnnotatedString()
+    }
+
+    private fun highlightJson(line: String): androidx.compose.ui.text.AnnotatedString {
+        val builder = androidx.compose.ui.text.AnnotatedString.Builder()
+        var index = 0
+        var insideString = false
+        var isKey = true
+        var currentToken = StringBuilder()
+
+        fun flushToken() {
+            if (currentToken.isNotEmpty()) {
+                val tok = currentToken.toString()
+                when {
+                    tok.all { it.isDigit() } -> {
+                        builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = NumberColor))
+                        builder.append(tok)
+                        builder.pop()
+                    }
+                    tok == "true" || tok == "false" || tok == "null" -> {
+                        builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = KeywordColor, fontWeight = FontWeight.Bold))
+                        builder.append(tok)
+                        builder.pop()
+                    }
+                    else -> {
+                        builder.append(tok)
+                    }
+                }
+                currentToken = StringBuilder()
+            }
+        }
+
+        while (index < line.length) {
+            val char = line[index]
+            if (insideString) {
+                val col = if (isKey) TypeColor else StringColor
+                builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = col))
+                builder.append(char)
+                builder.pop()
+                if (char == '"' && (index == 0 || line[index - 1] != '\\')) {
+                    insideString = false
+                }
+                index++
+            } else {
+                when (char) {
+                    '"' -> {
+                        flushToken()
+                        insideString = true
+                        val col = if (isKey) TypeColor else StringColor
+                        builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = col))
+                        builder.append(char)
+                        builder.pop()
+                        index++
+                    }
+                    ':' -> {
+                        flushToken()
+                        isKey = false
+                        builder.append(':')
+                        index++
+                    }
+                    ',' -> {
+                        flushToken()
+                        isKey = true
+                        builder.append(',')
+                        index++
+                    }
+                    '{', '}', '[', ']' -> {
+                        flushToken()
+                        builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = KeywordColor, fontWeight = FontWeight.Bold))
+                        builder.append(char)
+                        builder.pop()
+                        index++
+                    }
+                    ' ', '\t' -> {
+                        flushToken()
+                        builder.append(char)
+                        index++
+                    }
+                    else -> {
+                        currentToken.append(char)
+                        index++
+                    }
+                }
+            }
+        }
+        flushToken()
+        return builder.toAnnotatedString()
+    }
+
+    private fun highlightYaml(line: String): androidx.compose.ui.text.AnnotatedString {
+        val builder = androidx.compose.ui.text.AnnotatedString.Builder()
+        val trimmed = line.trimStart()
+        val colonIdx = trimmed.indexOf(":")
+        
+        if (trimmed.startsWith("#")) {
+            builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = CommentColor))
+            builder.append(line)
+            builder.pop()
+            return builder.toAnnotatedString()
+        }
+
+        if (colonIdx != -1) {
+            // Key is everything before colon
+            val leadingWhitespace = line.length - trimmed.length
+            builder.append(line.substring(0, leadingWhitespace))
+            
+            val key = trimmed.substring(0, colonIdx)
+            builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = TypeColor, fontWeight = FontWeight.Bold))
+            builder.append(key)
+            builder.pop()
+            
+            builder.append(":")
+            
+            val valPart = trimmed.substring(colonIdx + 1)
+            var valIdx = 0
+            var insideValString = false
+            var currentToken = StringBuilder()
+
+            fun flushToken() {
+                if (currentToken.isNotEmpty()) {
+                    val tok = currentToken.toString()
+                    when {
+                        tok.trim().all { it.isDigit() } -> {
+                            builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = NumberColor))
+                            builder.append(tok)
+                            builder.pop()
+                        }
+                        tok.trim() == "true" || tok.trim() == "false" || tok.trim() == "null" || tok.trim() == "yes" || tok.trim() == "no" -> {
+                            builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = KeywordColor, fontWeight = FontWeight.Bold))
+                            builder.append(tok)
+                            builder.pop()
+                        }
+                        else -> {
+                            builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = StringColor))
+                            builder.append(tok)
+                            builder.pop()
+                        }
+                    }
+                    currentToken = StringBuilder()
+                }
+            }
+
+            while (valIdx < valPart.length) {
+                val char = valPart[valIdx]
+                if (insideValString) {
+                    builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = StringColor))
+                    builder.append(char)
+                    builder.pop()
+                    if (char == '"' || char == '\'') {
+                        insideValString = false
+                    }
+                    valIdx++
+                } else {
+                    if (char == '"' || char == '\'') {
+                        flushToken()
+                        insideValString = true
+                        builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = StringColor))
+                        builder.append(char)
+                        builder.pop()
+                        valIdx++
+                    } else {
+                        currentToken.append(char)
+                        valIdx++
+                    }
+                }
+            }
+            flushToken()
+        } else {
+            builder.append(line)
+        }
+        return builder.toAnnotatedString()
+    }
+
+    private fun highlightMarkdown(line: String): androidx.compose.ui.text.AnnotatedString {
+        val builder = androidx.compose.ui.text.AnnotatedString.Builder()
+        val trimmed = line.trimStart()
+        when {
+            trimmed.startsWith("#") -> {
+                builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = TypeColor, fontWeight = FontWeight.Bold, fontSize = 14.sp))
+                builder.append(line)
+                builder.pop()
+            }
+            trimmed.startsWith("-") || trimmed.startsWith("*") || trimmed.startsWith(">") -> {
+                builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = KeywordColor, fontWeight = FontWeight.Bold))
+                builder.append(line.take(line.length - trimmed.length + 1))
+                builder.pop()
+                builder.append(line.substring(line.length - trimmed.length + 1))
+            }
+            trimmed.startsWith("`") -> {
+                builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = StringColor, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace))
+                builder.append(line)
+                builder.pop()
+            }
+            else -> {
+                var index = 0
+                var insideInlineCode = false
+                var insideBold = false
+                var currentToken = StringBuilder()
+
+                fun flushToken() {
+                    if (currentToken.isNotEmpty()) {
+                        val tok = currentToken.toString()
+                        when {
+                            insideInlineCode -> builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = StringColor, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace))
+                            insideBold -> builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = DefaultColor, fontWeight = FontWeight.Bold))
+                            else -> builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = DefaultColor))
+                        }
+                        builder.append(tok)
+                        builder.pop()
+                        currentToken = StringBuilder()
+                    }
+                }
+
+                while (index < line.length) {
+                    val char = line[index]
+                    when (char) {
+                        '`' -> {
+                            flushToken()
+                            insideInlineCode = !insideInlineCode
+                            builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = StringColor))
+                            builder.append('`')
+                            builder.pop()
+                            index++
+                        }
+                        '*' -> {
+                            // Check for ** (bold)
+                            if (index + 1 < line.length && line[index + 1] == '*') {
+                                flushToken()
+                                insideBold = !insideBold
+                                builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = KeywordColor, fontWeight = FontWeight.Bold))
+                                builder.append("**")
+                                builder.pop()
+                                index += 2
+                            } else {
+                                currentToken.append('*')
+                                index++
+                            }
+                        }
+                        else -> {
+                            currentToken.append(char)
+                            index++
+                        }
+                    }
+                }
+                flushToken()
+            }
+        }
+        return builder.toAnnotatedString()
+    }
+}
+
+data class ZipNode(
+    val name: String,
+    val fullPath: String,
+    val isDirectory: Boolean,
+    val size: Long,
+    val compressedSize: Long
+)
+
+fun getMimeType(fileName: String): String {
+    val ext = fileName.substringAfterLast(".", "").lowercase(Locale.ROOT)
+    return when (ext) {
+        "pdf" -> "application/pdf"
+        "png" -> "image/png"
+        "jpg", "jpeg" -> "image/jpeg"
+        "gif" -> "image/gif"
+        "webp" -> "image/webp"
+        "svg" -> "image/svg+xml"
+        "mp3" -> "audio/mpeg"
+        "wav" -> "audio/wav"
+        "m4a" -> "audio/mp4"
+        "flac" -> "audio/flac"
+        "aac" -> "audio/aac"
+        "mp4" -> "video/mp4"
+        "webm" -> "video/webm"
+        "mkv" -> "video/x-matroska"
+        "avi" -> "video/avi"
+        "mov" -> "video/quicktime"
+        "txt" -> "text/plain"
+        "html" -> "text/html"
+        "css" -> "text/css"
+        "js", "ts" -> "application/javascript"
+        "json" -> "application/json"
+        "xml" -> "application/xml"
+        "md" -> "text/markdown"
+        else -> "application/octet-stream"
+    }
+}
+
+@Composable
+fun ZipExplorerView(
+    filePath: String,
+    fileName: String,
+    onClose: () -> Unit
+) {
+    val context = LocalContext.current
+    var currentFolder by remember { mutableStateOf("") }
+    var searchQuery by remember { mutableStateOf("") }
+    
+    // Loaded zip entries and state
+    val zipFile = remember(filePath) {
+        try {
+            java.util.zip.ZipFile(File(filePath))
+        } catch (e: Exception) {
+            null
+        }
+    }
+    
+    DisposableEffect(filePath) {
+        onDispose {
+            try {
+                zipFile?.close()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    // Active sub-preview inside zip file
+    var activePreviewFile by remember { mutableStateOf<ActiveViewerFile?>(null) }
+
+    if (zipFile == null) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("Error opening Zip/Archive file", color = Color.White)
+        }
+        return
+    }
+
+    if (activePreviewFile != null) {
+        // Render sub-preview overlay inside the ZIP explorer!
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xFF0F172A))
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                // Header with custom Close back to Archive
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color.Black.copy(alpha = 0.4f))
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = { activePreviewFile = null }) {
+                            Icon(
+                                imageVector = Icons.Default.ArrowBack,
+                                contentDescription = "Back to Archive",
+                                tint = Color.White
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text(
+                                text = activePreviewFile!!.fileName,
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Preview in Archive",
+                                color = Color.Gray,
+                                fontSize = 10.sp
+                            )
+                        }
+                    }
+                    IconButton(onClick = { activePreviewFile = null }) {
+                        Icon(imageVector = Icons.Default.Close, contentDescription = "Close Preview", tint = Color.White)
+                    }
+                }
+                
+                Box(modifier = Modifier.weight(1f)) {
+                    val preview = activePreviewFile!!
+                    val lowerName = preview.fileName.lowercase()
+                    val lowerMime = preview.mimeType.lowercase()
+                    val isTextOrCode = lowerName.endsWith(".java") || lowerName.endsWith(".kt") ||
+                            lowerName.endsWith(".xml") || lowerName.endsWith(".json") ||
+                            lowerName.endsWith(".txt") || lowerName.endsWith(".html") ||
+                            lowerName.endsWith(".css") || lowerName.endsWith(".js") ||
+                            lowerName.endsWith(".md") || lowerName.endsWith(".properties") ||
+                            lowerName.endsWith(".gradle") || lowerName.endsWith(".kts") ||
+                            lowerMime.startsWith("text/") || lowerMime.contains("javascript") ||
+                            lowerMime.contains("json") || lowerMime.contains("xml")
+
+                    when {
+                        preview.mimeType.startsWith("video/") -> VideoPlayerView(filePath = preview.filePath)
+                        preview.mimeType.startsWith("audio/") -> {
+                            AudioPreviewPlayerView(filePath = preview.filePath, fileName = preview.fileName)
+                        }
+                        preview.mimeType.contains("pdf") -> PdfRendererView(filePath = preview.filePath)
+                        preview.mimeType.startsWith("image/") || isImageFile(preview.fileName) -> {
+                            ImageOfflineViewer(filePath = preview.filePath, fileName = preview.fileName, mimeType = preview.mimeType)
+                        }
+                        isTextOrCode -> {
+                            TextCodeRendererView(filePath = preview.filePath, fileName = preview.fileName, mimeType = preview.mimeType)
+                        }
+                        else -> {
+                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Text("No high-fidelity browser viewing available for this file type inside archives.", color = Color.White.copy(alpha = 0.6f), fontSize = 13.sp)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return
+    }
+
+    // Main ZIP explorer contents
+    // Let's first parse items in currentFolder and support search filtration
+    val rawCurrentNodes = remember(zipFile, currentFolder) {
+        val nodes = mutableMapOf<String, ZipNode>()
+        try {
+            val entries = zipFile.entries()
+            while (entries.hasMoreElements()) {
+                val entry = entries.nextElement()
+                val name = entry.name
+                val normalized = if (name.endsWith("/")) name else name
+
+                if (currentFolder.isEmpty()) {
+                    val firstSlash = normalized.indexOf('/')
+                    if (firstSlash == -1) {
+                        nodes[name] = ZipNode(name, name, false, entry.size, entry.compressedSize)
+                    } else {
+                        val folderName = normalized.substring(0, firstSlash + 1)
+                        nodes[folderName] = ZipNode(folderName, folderName, true, 0L, 0L)
+                    }
+                } else {
+                    if (normalized.startsWith(currentFolder) && normalized != currentFolder) {
+                        val relative = normalized.substring(currentFolder.length)
+                        val firstSlash = relative.indexOf('/')
+                        if (firstSlash == -1) {
+                            nodes[relative] = ZipNode(relative, normalized, false, entry.size, entry.compressedSize)
+                        } else {
+                            val folderName = relative.substring(0, firstSlash + 1)
+                            val fullFolder = currentFolder + folderName
+                            nodes[folderName] = ZipNode(folderName, fullFolder, true, 0L, 0L)
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        nodes.values.sortedWith(compareBy({ !it.isDirectory }, { it.name }))
+    }
+
+    val filteredCurrentNodes = remember(rawCurrentNodes, searchQuery) {
+        if (searchQuery.isBlank()) rawCurrentNodes
+        else rawCurrentNodes.filter { it.name.contains(searchQuery, ignoreCase = true) }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+    ) {
+        // Breadcrumbs & Search
+        Card(
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                // Breadcrumbs row
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.FolderZip,
+                        contentDescription = "Zip Root",
+                        tint = Color(0xFFFFD700),
+                        modifier = Modifier
+                            .clickable { currentFolder = "" }
+                            .size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "/",
+                        color = Color.White.copy(alpha = 0.5f),
+                        fontSize = 14.sp
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    
+                    if (currentFolder.isNotEmpty()) {
+                        val parts = currentFolder.split("/").filter { it.isNotEmpty() }
+                        var acc = ""
+                        parts.forEachIndexed { idx, part ->
+                            acc += "$part/"
+                            val targetAcc = acc
+                            Text(
+                                text = part,
+                                color = if (idx == parts.lastIndex) Color(0xFF38BDF8) else Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                modifier = Modifier.clickable { currentFolder = targetAcc }
+                            )
+                            if (idx < parts.lastIndex) {
+                                Text(
+                                    text = " > ",
+                                    color = Color.White.copy(alpha = 0.3f),
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+                    } else {
+                        Text(
+                            text = "Root Folder",
+                            color = Color.White.copy(alpha = 0.7f),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Search field inside ZIP explorer
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    placeholder = { Text("Search files in current folder...", color = Color.Gray, fontSize = 12.sp) },
+                    singleLine = true,
+                    textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 13.sp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Color(0xFFFF2E2E),
+                        unfocusedBorderColor = Color(0xFF475569)
+                    ),
+                    shape = RoundedCornerShape(8.dp),
+                    leadingIcon = {
+                        Icon(imageVector = Icons.Default.Search, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(16.dp))
+                    }
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // Back navigation button
+        if (currentFolder.isNotEmpty()) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        val parts = currentFolder.dropLast(1).split("/")
+                        currentFolder = if (parts.size <= 1) "" else parts.dropLast(1).joinToString("/", postfix = "/")
+                    }
+                    .padding(vertical = 8.dp)
+            ) {
+                Icon(imageVector = Icons.Default.ArrowBack, contentDescription = "Up", tint = Color(0xFF38BDF8), modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(10.dp))
+                Text("... Go Up One Level", color = Color(0xFF38BDF8), fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+
+        // List of entries in current folder
+        androidx.compose.foundation.lazy.LazyColumn(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            items(filteredCurrentNodes) { node ->
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A).copy(alpha = 0.4f)),
+                    border = BorderStroke(1.dp, Color(0xFF1E293B)),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            if (node.isDirectory) {
+                                currentFolder = node.fullPath
+                                searchQuery = ""
+                            } else {
+                                // Extract file to temp cache for direct preview!
+                                try {
+                                    val entry = zipFile.getEntry(node.fullPath)
+                                    if (entry != null) {
+                                        val tempDir = File(context.cacheDir, "zip_temp_previews")
+                                        if (!tempDir.exists()) tempDir.mkdirs()
+                                        
+                                        // Clean cache if too many previews accumulated
+                                        tempDir.listFiles()?.forEach { it.delete() }
+                                        
+                                        val cleanName = node.name.substringAfterLast("/")
+                                        val tempFile = File(tempDir, cleanName)
+                                        zipFile.getInputStream(entry).use { input ->
+                                            tempFile.outputStream().use { output ->
+                                                input.copyTo(output)
+                                            }
+                                        }
+                                        val mime = getMimeType(cleanName)
+                                        activePreviewFile = ActiveViewerFile(
+                                            filePath = tempFile.absolutePath,
+                                            fileName = cleanName,
+                                            mimeType = mime
+                                        )
+                                    }
+                                } catch (e: Exception) {
+                                    android.widget.Toast.makeText(context, "Cannot preview file: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            val icon = if (node.isDirectory) Icons.Default.Folder else {
+                                val mime = getMimeType(node.name)
+                                when {
+                                    mime.startsWith("image/") -> Icons.Default.Image
+                                    mime.startsWith("video/") -> Icons.Default.Movie
+                                    mime.startsWith("audio/") -> Icons.Default.MusicNote
+                                    mime.contains("pdf") -> Icons.Default.PictureAsPdf
+                                    else -> Icons.Default.InsertDriveFile
+                                }
+                            }
+                            val tint = if (node.isDirectory) Color(0xFFFFD700) else Color(0xFF818CF8)
+                            Icon(imageVector = icon, contentDescription = null, tint = tint, modifier = Modifier.size(24.dp))
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text(
+                                    text = if (node.isDirectory) node.name.dropLast(1) else node.name,
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = if (node.isDirectory) FontWeight.Bold else FontWeight.Normal,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                if (!node.isDirectory) {
+                                    Text(
+                                        text = "Size: ${formatFileSize(node.size)} (Compressed: ${formatFileSize(node.compressedSize)})",
+                                        color = Color.Gray,
+                                        fontSize = 10.sp
+                                    )
+                                }
+                            }
+                        }
+                        
+                        if (!node.isDirectory) {
+                            IconButton(
+                                onClick = {
+                                    try {
+                                        val entry = zipFile.getEntry(node.fullPath)
+                                        if (entry != null) {
+                                            val category = DownloadScheduler.getCategoryForMimeType(getMimeType(node.name))
+                                            val outDir = File(DownloadScheduler.getDownloadDirectory(context, category), "Extracted")
+                                            if (!outDir.exists()) outDir.mkdirs()
+                                            
+                                            val flatName = node.name.substringAfterLast("/")
+                                            val outFile = File(outDir, flatName)
+                                            zipFile.getInputStream(entry).use { input ->
+                                                outFile.outputStream().use { output ->
+                                                    input.copyTo(output)
+                                                }
+                                            }
+                                            android.widget.Toast.makeText(context, "Extracted to: ${outFile.absolutePath}", android.widget.Toast.LENGTH_LONG).show()
+                                        }
+                                    } catch (e: Exception) {
+                                        android.widget.Toast.makeText(context, "Extraction failed: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                            ) {
+                                Icon(imageVector = Icons.Default.Unarchive, contentDescription = "Extract file", tint = Color(0xFF50FA7B), modifier = Modifier.size(20.dp))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun AudioPreviewPlayerView(filePath: String, fileName: String) {
+    val context = LocalContext.current
+    val mediaPlayer = remember { android.media.MediaPlayer() }
+    var isPlaying by remember { mutableStateOf(false) }
+    var duration by remember { mutableIntStateOf(0) }
+    var position by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(filePath) {
+        try {
+            mediaPlayer.setDataSource(filePath)
+            mediaPlayer.prepare()
+            mediaPlayer.start()
+            isPlaying = true
+            duration = mediaPlayer.duration
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    LaunchedEffect(isPlaying) {
+        while (isPlaying) {
+            position = mediaPlayer.currentPosition
+            kotlinx.coroutines.delay(200)
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            try {
+                mediaPlayer.stop()
+                mediaPlayer.release()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(imageVector = Icons.Default.MusicNote, contentDescription = null, tint = Color(0xFF818CF8), modifier = Modifier.size(64.dp))
+        Spacer(modifier = Modifier.height(16.dp))
+        Text(text = fileName, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+        Spacer(modifier = Modifier.height(20.dp))
+        
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(text = formatDuration(position), color = Color.White, fontSize = 11.sp)
+            Slider(
+                value = position.toFloat(),
+                onValueChange = {
+                    mediaPlayer.seekTo(it.toInt())
+                    position = it.toInt()
+                },
+                valueRange = 0f..(duration.toFloat().coerceAtLeast(1f)),
+                colors = SliderDefaults.colors(thumbColor = Color(0xFF818CF8)),
+                modifier = Modifier.weight(1f)
+            )
+            Text(text = formatDuration(duration), color = Color.White, fontSize = 11.sp)
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        IconButton(
+            onClick = {
+                if (mediaPlayer.isPlaying) {
+                    mediaPlayer.pause()
+                    isPlaying = false
+                } else {
+                    mediaPlayer.start()
+                    isPlaying = true
+                }
+            },
+            modifier = Modifier.background(Color(0xFF818CF8), CircleShape)
+        ) {
+            Icon(
+                imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                contentDescription = null,
+                tint = Color.White
+            )
         }
     }
 }

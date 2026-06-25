@@ -105,3 +105,32 @@ interface DownloadDao {
     suspend fun deleteDownload(id: Long)
 }
 
+@Dao
+interface TabSessionDao {
+    @Query("""
+        SELECT * FROM tab_sessions 
+        WHERE isIncognito = 0 
+        ORDER BY lastActiveTime DESC
+    """)
+    fun getAllTabsFlow(): Flow<List<TabSessionEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun saveTab(tab: TabSessionEntity)
+
+    @Delete
+    suspend fun deleteTab(tab: TabSessionEntity)
+
+    @Query("DELETE FROM tab_sessions")
+    suspend fun deleteAllTabs()
+
+    @Query("""
+        UPDATE tab_sessions 
+        SET scrollX=:x, scrollY=:y 
+        WHERE id=:tabId
+    """)
+    suspend fun updateScroll(
+        tabId: String, x: Int, y: Int
+    )
+}
+
+

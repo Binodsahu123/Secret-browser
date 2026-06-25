@@ -37,6 +37,9 @@ object TabStateManager {
             val webView = webViewMap.remove(id)
             webView?.let {
                 try {
+                    // Save WebView state to file before shredding it!
+                    saveWebViewStateToFile(it.context, id, it)
+                    
                     it.stopLoading()
                     it.clearHistory()
                     it.removeAllViews()
@@ -54,6 +57,42 @@ object TabStateManager {
             } else {
                 tab
             }
+        }
+    }
+
+    fun saveWebViewStateToFile(context: android.content.Context, tabId: String, webView: WebView) {
+        try {
+            val bundle = android.os.Bundle()
+            webView.saveState(bundle)
+            val file = java.io.File(context.cacheDir, "webview_state_$tabId.bin")
+            val parcel = android.os.Parcel.obtain()
+            bundle.writeToParcel(parcel, 0)
+            val bytes = parcel.marshall()
+            parcel.recycle()
+            file.writeBytes(bytes)
+            android.util.Log.i("TabStateManager", "Saved state file for tab $tabId: ${file.length()} bytes")
+        } catch (e: Exception) {
+            android.util.Log.e("TabStateManager", "Failed to save state file for tab $tabId", e)
+        }
+    }
+
+    fun restoreWebViewStateFromFile(context: android.content.Context, tabId: String, webView: WebView): Boolean {
+        try {
+            val file = java.io.File(context.cacheDir, "webview_state_$tabId.bin")
+            if (!file.exists()) return false
+            val bytes = file.readBytes()
+            val parcel = android.os.Parcel.obtain()
+            parcel.unmarshall(bytes, 0, bytes.size)
+            parcel.setDataPosition(0)
+            val bundle = android.os.Bundle()
+            bundle.readFromParcel(parcel)
+            parcel.recycle()
+            webView.restoreState(bundle)
+            android.util.Log.i("TabStateManager", "Restored state file for tab $tabId successfully")
+            return true
+        } catch (e: Exception) {
+            android.util.Log.e("TabStateManager", "Failed to restore state file for tab $tabId", e)
+            return false
         }
     }
 }

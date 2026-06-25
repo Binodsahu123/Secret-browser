@@ -10,7 +10,7 @@ data class DownloadItem(
     val title: String,
     val url: String,
     val mimeType: String,
-    val status: String, // "PENDING", "RUNNING", "PAUSED", "COMPLETED", "FAILED", "CANCELLED"
+    val status: String, // "PENDING", "RUNNING", "PAUSED", "COMPLETED", "FAILED", "CANCELLED", "SCHEDULED"
     val progress: Int = 0,
     val filePath: String = "",
     val totalSize: Long = 0L,
@@ -18,13 +18,25 @@ data class DownloadItem(
     val speed: String = "0 KB/s",
     val timestamp: Long = System.currentTimeMillis(),
     val threads: Int = 4,
-    val category: String = "Documents" // "Videos", "Audio", "Images", "Documents", "Archives"
+    val category: String = "Documents", // "Videos", "Audio", "Images", "Documents", "Archives"
+    val scheduledTime: Long = 0L, // 0 means not scheduled, otherwise epoch millis
+    val errorMessage: String = "", // details of the failure if any
+    val queueOrder: Int = 0 // queuing position order number
 )
 
 @Dao
 interface DownloadDao {
     @Query("SELECT * FROM swift_downloads ORDER BY timestamp DESC")
     fun getAllDownloadsFlow(): Flow<List<DownloadItem>>
+
+    @Query("SELECT * FROM swift_downloads WHERE status = 'SCHEDULED'")
+    suspend fun getScheduledDownloads(): List<DownloadItem>
+
+    @Query("SELECT * FROM swift_downloads WHERE status = 'RUNNING'")
+    suspend fun getRunningDownloads(): List<DownloadItem>
+
+    @Query("SELECT * FROM swift_downloads WHERE status = 'PENDING' ORDER BY queueOrder ASC, timestamp ASC")
+    suspend fun getPendingDownloadsSorted(): List<DownloadItem>
 
     @Query("SELECT * FROM swift_downloads WHERE category = :category ORDER BY timestamp DESC")
     fun getDownloadsByCategoryFlow(category: String): Flow<List<DownloadItem>>
@@ -48,7 +60,7 @@ interface DownloadDao {
     suspend fun deleteAll()
 }
 
-@Database(entities = [DownloadItem::class], version = 2, exportSchema = false)
+@Database(entities = [DownloadItem::class], version = 3, exportSchema = false)
 abstract class DownloadDatabase : RoomDatabase() {
     abstract fun downloadDao(): DownloadDao
 

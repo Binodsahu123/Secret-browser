@@ -93,7 +93,12 @@ fun BrowserScreen(
     val fullscreenState by viewModel.fullscreenState.collectAsState()
     val notificationRequestOrigin by viewModel.notificationRequestOrigin.collectAsState()
     val pendingPermissionRequest by viewModel.pendingPermissionRequest.collectAsState()
+    val pendingWebPermissionRequest by viewModel.pendingWebPermissionRequest.collectAsState()
     val pendingGeolocationPrompt by viewModel.pendingGeolocationPrompt.collectAsState()
+    val pendingSpeechRecognition by viewModel.pendingSpeechRecognition.collectAsState()
+
+    val pendingExtensionPermission by viewModel.pendingExtensionPermission.collectAsState()
+    val pendingSystemPermissions by viewModel.pendingSystemPermissions.collectAsState()
 
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
@@ -117,7 +122,22 @@ fun BrowserScreen(
         showDelayedNotificationDialog = false
     }
 
+    val startupPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+    ) { _ -> }
+
     LaunchedEffect(Unit) {
+        val permissionsToRequest = mutableListOf<String>()
+        if (androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            permissionsToRequest.add(android.Manifest.permission.CAMERA)
+        }
+        if (androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            permissionsToRequest.add(android.Manifest.permission.RECORD_AUDIO)
+        }
+        if (permissionsToRequest.isNotEmpty()) {
+            startupPermissionLauncher.launch(permissionsToRequest.toTypedArray())
+        }
+
         if (android.os.Build.VERSION.SDK_INT >= 33) {
             val hasPermission = androidx.core.content.ContextCompat.checkSelfPermission(
                 context,
@@ -136,12 +156,49 @@ fun BrowserScreen(
         contract = androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         val allGranted = permissions.values.all { it }
+        
+        val extPerms = viewModel.pendingSystemPermissions.value
+        if (extPerms != null) {
+            viewModel.onSystemPermissionsResult(extPerms, allGranted)
+            return@rememberLauncherForActivityResult
+        }
+
         val currentRequest = viewModel.pendingPermissionRequest.value
+        
+        com.example.browser.OrionDeveloperEngine.permissionConnectionState.value = com.example.browser.OrionDeveloperEngine.permissionConnectionState.value.copy(
+            androidPermissionGranted = allGranted
+        )
+
         if (currentRequest != null) {
+            val host = viewModel.getDomain(currentRequest.origin.toString())
             if (allGranted) {
-                currentRequest.grant(currentRequest.resources)
+                try {
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        try {
+                            currentRequest.grant(currentRequest.resources)
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                            android.widget.Toast.makeText(context, "पहला प्रयास पूर्ण नहीं हो सका। कृपया दोबारा माइक बटन पर क्लिक करें। (First attempt failed. Please click the mic button on the page again.)", android.widget.Toast.LENGTH_LONG).show()
+                        }
+                    }
+                    viewModel.logPermissionAction(host, currentRequest.resources.toList().joinToString("-"), "Permission Granted")
+                    com.example.browser.OrionDeveloperEngine.permissionConnectionState.value = com.example.browser.OrionDeveloperEngine.permissionConnectionState.value.copy(
+                        webViewGrantApplied = true,
+                        mediaStreamCreated = true,
+                        websiteActuallyWorking = true
+                    )
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    // Showing a Toast to guide user because the first request gets invalidated when transitioning/pausing the activity
+                    android.widget.Toast.makeText(context, "म्यूट/माइक चालू हो गया है! कृपया दोबारा माइक बटन पर क्लिक करें। (Microphone ready! Please click the mic button on the page again to record.)", android.widget.Toast.LENGTH_LONG).show()
+                }
             } else {
-                currentRequest.deny()
+                try {
+                    currentRequest.deny()
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+                viewModel.logPermissionAction(host, currentRequest.resources.toList().joinToString("-"), "Permission Denied")
             }
             viewModel.clearPermissionRequest()
         }
@@ -153,31 +210,83 @@ fun BrowserScreen(
         val currentPrompt = viewModel.pendingGeolocationPrompt.value
         if (currentPrompt != null) {
             val (origin, callback) = currentPrompt
+            val host = viewModel.getDomain(origin)
             callback.invoke(origin, isGranted, false)
+            if (isGranted) {
+                viewModel.logPermissionAction(host, "location", "Permission Granted")
+            } else {
+                viewModel.logPermissionAction(host, "location", "Permission Denied")
+            }
             viewModel.clearGeolocationPrompt()
         }
     }
 
-    val filePickerLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
-        contract = androidx.activity.result.contract.ActivityResultContracts.GetMultipleContents()
-    ) { uris ->
-        if (uris != null && uris.isNotEmpty()) {
-            viewModel.fileChooserCallback?.onReceiveValue(uris.toTypedArray())
-        } else {
-            viewModel.fileChooserCallback?.onReceiveValue(null)
+    val speechPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        val currentRequest = viewModel.pendingSpeechRecognition.value
+        if (currentRequest != null) {
+            if (isGranted) {
+                currentRequest.bridge.startSpeechWithPermission(
+                    currentRequest.id,
+                    currentRequest.lang,
+                    currentRequest.continuous,
+                    currentRequest.interimResults
+                )
+            } else {
+                currentRequest.bridge.triggerJsError(currentRequest.id, "not-allowed")
+                currentRequest.bridge.triggerJsEnd(currentRequest.id)
+            }
+            viewModel.clearPendingSpeechRequest()
         }
+    }
+
+    val universalPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val allGranted = permissions.values.all { it }
+        val currentRequest = viewModel.pendingWebPermissionRequest.value
+        if (currentRequest != null) {
+            com.example.browser.DynamicPermissionEngine.savePermissionDecision(
+                context,
+                currentRequest.origin,
+                currentRequest.permissionType,
+                allGranted
+            )
+            com.example.browser.DynamicPermissionEngine.completeRequest(currentRequest.transactionId, allGranted)
+            viewModel.clearWebPermissionRequest()
+        }
+    }
+
+    val filePickerLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val uris = if (result.resultCode == android.app.Activity.RESULT_OK) {
+            val dataIntent = result.data
+            android.webkit.WebChromeClient.FileChooserParams.parseResult(result.resultCode, dataIntent)
+        } else {
+            null
+        }
+        viewModel.fileChooserCallback?.onReceiveValue(uris)
         viewModel.fileChooserCallback = null
+        viewModel.fileChooserParams = null
         viewModel.resetFilePickerState()
     }
 
     LaunchedEffect(uiState.showFilePicker) {
         if (uiState.showFilePicker) {
             try {
-                filePickerLauncher.launch("*/*")
+                val intent = viewModel.fileChooserParams?.createIntent() ?: android.content.Intent(android.content.Intent.ACTION_GET_CONTENT).apply {
+                    type = "*/*"
+                    putExtra(android.content.Intent.EXTRA_ALLOW_MULTIPLE, true)
+                    addCategory(android.content.Intent.CATEGORY_OPENABLE)
+                }
+                filePickerLauncher.launch(intent)
             } catch (e: Exception) {
                 e.printStackTrace()
                 viewModel.fileChooserCallback?.onReceiveValue(null)
                 viewModel.fileChooserCallback = null
+                viewModel.fileChooserParams = null
                 viewModel.resetFilePickerState()
             }
         }
@@ -191,6 +300,7 @@ fun BrowserScreen(
     var showAddShortcutDialog by remember { mutableStateOf(false) }
     var showGroupTabDialog by remember { mutableStateOf(false) }
     var showAboutDialog by remember { mutableStateOf(false) }
+    var showDeveloperOptionsDialog by remember { mutableStateOf(false) }
     var showExtensionsDialog by remember { mutableStateOf(false) }
     var showActiveExtensionsSheet by remember { mutableStateOf(false) }
     var selectedExtensionIdForPopup by remember { mutableStateOf<String?>(null) }
@@ -839,6 +949,18 @@ fun BrowserScreen(
                                 }
                             )
 
+                            val isDevModeActive = OrionDeveloperEngine.isDeveloperModeEnabled.collectAsState().value
+                            if (isDevModeActive) {
+                                DropdownMenuItem(
+                                    text = { Text("Developer Options", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary) },
+                                    leadingIcon = { Icon(Icons.Default.Terminal, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                                    onClick = {
+                                        showMenu = false
+                                        showDeveloperOptionsDialog = true
+                                    }
+                                )
+                            }
+
                             DropdownMenuItem(
                                 text = { Text("Settings") },
                                 leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null) },
@@ -974,33 +1096,7 @@ fun BrowserScreen(
                                 modifier = Modifier.fillMaxSize().testTag("webview")
                             )
 
-                            // Instant Premium Loading Skeleton overlay
-                            if (activeTab.isLoading || activeTab.url == "about:blank") {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .background(MaterialTheme.colorScheme.background),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Column(
-                                        horizontalAlignment = Alignment.CenterHorizontally,
-                                        verticalArrangement = Arrangement.Center,
-                                        modifier = Modifier.padding(24.dp)
-                                    ) {
-                                        CircularProgressIndicator(
-                                            color = MaterialTheme.colorScheme.primary,
-                                            strokeWidth = 3.dp,
-                                            modifier = Modifier.size(48.dp)
-                                        )
-                                        Spacer(modifier = Modifier.height(16.dp))
-                                        Text(
-                                            text = "Loading Secure Connection...",
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f)
-                                        )
-                                    }
-                                }
-                            }
+                            // No blocking full-screen loading skeleton overlay to ensure webpage renders immediately like Chrome
                         }
                     }
                 }
@@ -1680,6 +1776,14 @@ fun BrowserScreen(
             )
         }
 
+        if (showDeveloperOptionsDialog) {
+            OrionDeveloperEngineOverlay(
+                show = showDeveloperOptionsDialog,
+                onDismiss = { showDeveloperOptionsDialog = false },
+                viewModel = viewModel
+            )
+        }
+
         // B. Bookmarks list overlay dialog
         if (uiState.isBookmarksOpen) {
             BookmarksOverlay(
@@ -1800,6 +1904,70 @@ fun BrowserScreen(
                         } else {
                             viewModel.showDownloadDialogCustom.value = true
                         }
+                    }
+                }
+            )
+        }
+
+        if (uiState.sslWarningState.showWarning) {
+            AlertDialog(
+                onDismissRequest = { viewModel.dismissSslWarning() },
+                title = {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = "Warning",
+                            tint = Color(0xFFCF6679)
+                        )
+                        Text(
+                            text = "Security Warning",
+                            style = MaterialTheme.typography.titleLarge,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(
+                            text = "The connection to this site is not secure.",
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "URL: ${uiState.sslWarningState.url}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = "Error detail: ${uiState.sslWarningState.errorString}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFFCF6679)
+                        )
+                        Text(
+                            text = "Do you want to proceed anyway?",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = { viewModel.proceedSslWarning(uiState.sslWarningState.url) },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer,
+                            contentColor = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    ) {
+                        Text("Proceed Anyway")
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = { viewModel.dismissSslWarning() }
+                    ) {
+                        Text("Cancel / Go Back")
                     }
                 }
             )
@@ -2036,6 +2204,7 @@ fun BrowserScreen(
                 blockedCount = activeTab.blockedAdsCount,
                 isAdBlockWhitelisted = isWhitelisted,
                 historyItems = history,
+                viewModel = viewModel,
                 onToggleAdBlock = { viewModel.toggleAdBlockForSite(activeTab.url) },
                 onOpenSearch = { query ->
                     try {
@@ -2188,7 +2357,71 @@ fun BrowserScreen(
 
         pendingPermissionRequest?.let { request ->
             val originUrl = request.origin.toString()
+            val host = viewModel.getDomain(originUrl)
             val resourcesList = request.resources.toList()
+
+            val permissionMappedTypes = remember(resourcesList) {
+                resourcesList.map { res ->
+                    when (res) {
+                        "android.webkit.resource.VIDEO_CAPTURE" -> "camera"
+                        "android.webkit.resource.AUDIO_CAPTURE" -> "microphone"
+                        "android.webkit.resource.MIDI_SYSEX" -> "midi"
+                        "android.webkit.resource.PROTECTED_MEDIA_ID_CONTAINER" -> "protected_media"
+                        else -> "media"
+                    }
+                }
+            }
+
+            val isAllAllowed = remember(host, permissionMappedTypes) {
+                permissionMappedTypes.all { viewModel.getPermissionStatus(host, it) == "Allow" }
+            }
+
+            val listToRequest = remember(resourcesList) {
+                val list = mutableListOf<String>()
+                if (resourcesList.contains("android.webkit.resource.VIDEO_CAPTURE")) {
+                    list.add(android.Manifest.permission.CAMERA)
+                }
+                if (resourcesList.contains("android.webkit.resource.AUDIO_CAPTURE")) {
+                    list.add(android.Manifest.permission.RECORD_AUDIO)
+                }
+                list
+            }
+
+            val listToPrompt = remember(listToRequest) {
+                listToRequest.filter {
+                    androidx.core.content.ContextCompat.checkSelfPermission(context, it) != android.content.pm.PackageManager.PERMISSION_GRANTED
+                }
+            }
+
+            LaunchedEffect(request) {
+                com.example.browser.OrionDeveloperEngine.permissionConnectionState.value = com.example.browser.OrionDeveloperEngine.permissionConnectionState.value.copy(
+                    browserPermissionPromptShown = true
+                )
+                if (isAllAllowed) {
+                    if (listToPrompt.isNotEmpty()) {
+                        systemPermissionLauncher.launch(listToPrompt.toTypedArray())
+                    } else {
+                        try {
+                            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                try {
+                                    request.grant(request.resources)
+                                } catch (e: Exception) {
+                                    e.printStackTrace()
+                                }
+                            }
+                            com.example.browser.OrionDeveloperEngine.permissionConnectionState.value = com.example.browser.OrionDeveloperEngine.permissionConnectionState.value.copy(
+                                webViewGrantApplied = true,
+                                mediaStreamCreated = true,
+                                websiteActuallyWorking = true
+                            )
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                        viewModel.clearPermissionRequest()
+                    }
+                }
+            }
+
             val permissionText = resourcesList.map { res ->
                 when (res) {
                     "android.webkit.resource.VIDEO_CAPTURE" -> "Camera"
@@ -2199,98 +2432,446 @@ fun BrowserScreen(
                 }
             }.joinToString(" and ")
 
-            AlertDialog(
-                onDismissRequest = { 
-                    request.deny()
-                    viewModel.clearPermissionRequest()
-                },
-                icon = { Icon(Icons.Default.Lock, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+            if (!isAllAllowed) {
+                AlertDialog(
+                    onDismissRequest = { 
+                        request.deny()
+                        viewModel.clearPermissionRequest()
+                        viewModel.logPermissionAction(host, permissionMappedTypes.joinToString(), "Permission Denied (Prompt Dismissed)")
+                    },
+                    icon = { Icon(Icons.Default.Lock, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
                 title = { Text("Approve Website Access?", fontWeight = FontWeight.Bold) },
                 text = { 
                     Text("The website $originUrl wants permission to access your:\n$permissionText\n\nAllowing this gives the page access to your device's sensors and hardware.", fontSize = 13.sp) 
                 },
                 confirmButton = {
-                    Button(
-                        onClick = {
-                            val listToRequest = mutableListOf<String>()
-                            if (resourcesList.contains("android.webkit.resource.VIDEO_CAPTURE")) {
-                                listToRequest.add(android.Manifest.permission.CAMERA)
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = {
+                                val listToRequest = mutableListOf<String>()
+                                if (resourcesList.contains("android.webkit.resource.VIDEO_CAPTURE")) {
+                                    listToRequest.add(android.Manifest.permission.CAMERA)
+                                }
+                                if (resourcesList.contains("android.webkit.resource.AUDIO_CAPTURE")) {
+                                    listToRequest.add(android.Manifest.permission.RECORD_AUDIO)
+                                }
+                                
+                                val listToPrompt = listToRequest.filter {
+                                    androidx.core.content.ContextCompat.checkSelfPermission(context, it) != android.content.pm.PackageManager.PERMISSION_GRANTED
+                                }
+                                
+                                if (listToPrompt.isNotEmpty()) {
+                                    for (perm in permissionMappedTypes) {
+                                        viewModel.addSessionPermission(host, perm)
+                                    }
+                                    systemPermissionLauncher.launch(listToPrompt.toTypedArray())
+                                } else {
+                                    for (perm in permissionMappedTypes) {
+                                        viewModel.addSessionPermission(host, perm)
+                                    }
+                                    try {
+                                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                            try {
+                                                request.grant(request.resources)
+                                            } catch (e: Exception) {
+                                                android.util.Log.e("Permissions", "Failed to grant request resources in AlertDialog Allow Once inside MainLooper", e)
+                                            }
+                                        }
+                                        android.util.Log.i("Permissions", "Success posting grant request resources in AlertDialog Allow Once")
+                                        com.example.browser.OrionDeveloperEngine.permissionConnectionState.value = com.example.browser.OrionDeveloperEngine.permissionConnectionState.value.copy(
+                                            webViewGrantApplied = true,
+                                            mediaStreamCreated = true,
+                                            websiteActuallyWorking = true
+                                        )
+                                    } catch (e: Exception) {
+                                        android.util.Log.e("Permissions", "Failed to grant request resources in AlertDialog Allow Once", e)
+                                    }
+                                    viewModel.clearPermissionRequest()
+                                }
                             }
-                            if (resourcesList.contains("android.webkit.resource.AUDIO_CAPTURE")) {
-                                listToRequest.add(android.Manifest.permission.RECORD_AUDIO)
+                        ) {
+                            Text("Allow Once", fontWeight = FontWeight.Bold)
+                        }
+
+                        Button(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = {
+                                val listToRequest = mutableListOf<String>()
+                                if (resourcesList.contains("android.webkit.resource.VIDEO_CAPTURE")) {
+                                    listToRequest.add(android.Manifest.permission.CAMERA)
+                                }
+                                if (resourcesList.contains("android.webkit.resource.AUDIO_CAPTURE")) {
+                                    listToRequest.add(android.Manifest.permission.RECORD_AUDIO)
+                                }
+                                
+                                val listToPrompt = listToRequest.filter {
+                                    androidx.core.content.ContextCompat.checkSelfPermission(context, it) != android.content.pm.PackageManager.PERMISSION_GRANTED
+                                }
+                                
+                                if (listToPrompt.isNotEmpty()) {
+                                    for (perm in permissionMappedTypes) {
+                                        viewModel.setPermissionStatus(host, perm, "Allow")
+                                    }
+                                    systemPermissionLauncher.launch(listToPrompt.toTypedArray())
+                                } else {
+                                    for (perm in permissionMappedTypes) {
+                                        viewModel.setPermissionStatus(host, perm, "Allow")
+                                    }
+                                    try {
+                                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                            try {
+                                                request.grant(request.resources)
+                                            } catch (e: Exception) {
+                                                android.util.Log.e("Permissions", "Failed to grant request resources in AlertDialog Allow Always inside MainLooper", e)
+                                            }
+                                        }
+                                        android.util.Log.i("Permissions", "Success posting grant request resources in AlertDialog Allow Always")
+                                        com.example.browser.OrionDeveloperEngine.permissionConnectionState.value = com.example.browser.OrionDeveloperEngine.permissionConnectionState.value.copy(
+                                            webViewGrantApplied = true,
+                                            mediaStreamCreated = true,
+                                            websiteActuallyWorking = true
+                                        )
+                                    } catch (e: Exception) {
+                                        android.util.Log.e("Permissions", "Failed to grant request resources in AlertDialog Allow Always", e)
+                                    }
+                                    viewModel.clearPermissionRequest()
+                                }
                             }
-                            
-                            val listToPrompt = listToRequest.filter {
-                                androidx.core.content.ContextCompat.checkSelfPermission(context, it) != android.content.pm.PackageManager.PERMISSION_GRANTED
-                            }
-                            
-                            if (listToPrompt.isNotEmpty()) {
-                                systemPermissionLauncher.launch(listToPrompt.toTypedArray())
-                            } else {
-                                request.grant(request.resources)
+                        ) {
+                            Text("Allow Always", fontWeight = FontWeight.Bold)
+                        }
+
+                        TextButton(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = {
+                                for (perm in permissionMappedTypes) {
+                                    viewModel.setPermissionStatus(host, perm, "Block")
+                                }
+                                try {
+                                    request.deny()
+                                    android.util.Log.i("Permissions", "Success denying request in AlertDialog Block")
+                                    com.example.browser.OrionDeveloperEngine.permissionConnectionState.value = com.example.browser.OrionDeveloperEngine.permissionConnectionState.value.copy(
+                                        webViewGrantApplied = false,
+                                        mediaStreamCreated = false,
+                                        websiteActuallyWorking = false
+                                    )
+                                } catch (e: Exception) {
+                                    android.util.Log.e("Permissions", "Failed to deny request in AlertDialog Block", e)
+                                }
                                 viewModel.clearPermissionRequest()
                             }
+                        ) {
+                            Text("Block", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                },
+                shape = RoundedCornerShape(20.dp)
+                )
+            }
+        }
+
+        pendingSpeechRecognition?.let { speechRequest ->
+            val host = viewModel.getDomain(activeTab?.url ?: "")
+            AlertDialog(
+                onDismissRequest = {
+                    speechRequest.bridge.triggerJsError(speechRequest.id, "not-allowed")
+                    speechRequest.bridge.triggerJsEnd(speechRequest.id)
+                    viewModel.clearPendingSpeechRequest()
+                },
+                icon = { Icon(Icons.Default.Mic, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                title = { Text("Allow Speech Search?", fontWeight = FontWeight.Bold) },
+                text = {
+                    Text("The website $host wants to use your microphone for speech recognition. Would you like to grant access?", fontSize = 13.sp)
+                },
+                confirmButton = {
+                    Button(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = {
+                            speechPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
                         }
                     ) {
-                        Text("Allow", fontWeight = FontWeight.Bold)
+                        Text("Grant Permission", fontWeight = FontWeight.Bold)
                     }
                 },
                 dismissButton = {
                     TextButton(
+                        modifier = Modifier.fillMaxWidth(),
                         onClick = {
-                            request.deny()
-                            viewModel.clearPermissionRequest()
+                            speechRequest.bridge.triggerJsError(speechRequest.id, "not-allowed")
+                            speechRequest.bridge.triggerJsEnd(speechRequest.id)
+                            viewModel.clearPendingSpeechRequest()
                         }
                     ) {
-                        Text("Block")
+                        Text("Block", color = MaterialTheme.colorScheme.error)
                     }
                 },
                 shape = RoundedCornerShape(20.dp)
             )
         }
 
-        pendingGeolocationPrompt?.let { (origin, callback) ->
+        pendingWebPermissionRequest?.let { request ->
+            val host = viewModel.getDomain(request.origin)
+            val icon = if (request.permissionType == "MICROPHONE") Icons.Default.Mic else Icons.Default.Videocam
+            val label = if (request.permissionType == "MICROPHONE") "Microphone" else "Camera"
+            val systemPermissions = if (request.permissionType == "MICROPHONE") {
+                arrayOf(android.Manifest.permission.RECORD_AUDIO)
+            } else {
+                arrayOf(android.Manifest.permission.CAMERA)
+            }
+
             AlertDialog(
-                onDismissRequest = { 
-                    callback.invoke(origin, false, false)
-                    viewModel.clearGeolocationPrompt()
+                onDismissRequest = {
+                    com.example.browser.DynamicPermissionEngine.completeRequest(request.transactionId, false)
+                    viewModel.clearWebPermissionRequest()
                 },
-                icon = { Icon(Icons.Default.LocationOn, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                icon = { Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                title = { Text("Approve Website Access?", fontWeight = FontWeight.Bold) },
+                text = {
+                    Text("The website ${request.origin} wants permission to access your $label.\n\nAllowing this gives the page live access to your device input stream.", fontSize = 13.sp)
+                },
+                confirmButton = {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = {
+                                // Request system-level synchronization permissions
+                                universalPermissionLauncher.launch(systemPermissions)
+                            }
+                        ) {
+                            Text("Allow Access", fontWeight = FontWeight.Bold)
+                        }
+
+                        TextButton(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = {
+                                com.example.browser.DynamicPermissionEngine.savePermissionDecision(
+                                    context,
+                                    request.origin,
+                                    request.permissionType,
+                                    false
+                                )
+                                com.example.browser.DynamicPermissionEngine.completeRequest(request.transactionId, false)
+                                viewModel.clearWebPermissionRequest()
+                            }
+                        ) {
+                            Text("Block Website", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                },
+                shape = RoundedCornerShape(20.dp)
+            )
+        }
+
+        LaunchedEffect(pendingSystemPermissions) {
+            pendingSystemPermissions?.let { perms ->
+                systemPermissionLauncher.launch(perms.toTypedArray())
+            }
+        }
+
+        pendingExtensionPermission?.let { request ->
+            val spec = com.example.browser.OrionExtensionPermissionEngine.permissionsCatalog[request.permission]
+            val riskLevel = spec?.riskLevel ?: "Medium"
+            val riskColor = when (riskLevel) {
+                "High" -> Color(0xFFEF4444)
+                "Medium" -> Color(0xFFF59E0B)
+                else -> Color(0xFF10B981)
+            }
+            AlertDialog(
+                onDismissRequest = { viewModel.dismissExtensionPermissionPrompt(); request.onResult("BLOCK") },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = androidx.compose.material.icons.Icons.Default.Extension,
+                            contentDescription = null,
+                            tint = Color(0xFF6366F1),
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(text = request.extName, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    }
+                },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text(
+                            text = "Requested Permission:",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Row(
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = spec?.name ?: request.permission,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 14.sp
+                                    )
+                                    Surface(
+                                        color = riskColor.copy(alpha = 0.1f),
+                                        contentColor = riskColor,
+                                        shape = RoundedCornerShape(4.dp)
+                                    ) {
+                                        Text(
+                                            text = "$riskLevel Risk",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = spec?.description ?: "This extension is requesting access to a native Chrome API.",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        Text(
+                            text = "This allows the extension to run custom scripts and control browser actions for the specified hardware/api.",
+                            fontSize = 11.sp,
+                            color = Color.Gray
+                        )
+                    }
+                },
+                confirmButton = {
+                    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = { viewModel.dismissExtensionPermissionPrompt(); request.onResult("ALLOW_ALWAYS") },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6366F1)),
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Text("Allow Always", fontWeight = FontWeight.Bold)
+                        }
+                        OutlinedButton(
+                            onClick = { viewModel.dismissExtensionPermissionPrompt(); request.onResult("ALLOW_ONCE") },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Text("Allow Once", fontWeight = FontWeight.Bold, color = Color(0xFF6366F1))
+                        }
+                        TextButton(
+                            onClick = { viewModel.dismissExtensionPermissionPrompt(); request.onResult("BLOCK") },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Block", color = Color.Red, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                },
+                shape = RoundedCornerShape(24.dp)
+            )
+        }
+
+        pendingGeolocationPrompt?.let { (origin, callback) ->
+            val host = viewModel.getDomain(origin)
+            val isLocationAllowed = remember(host) { viewModel.getPermissionStatus(host, "location") == "Allow" }
+            val hasSystemLocationPermission = remember {
+                androidx.core.content.ContextCompat.checkSelfPermission(
+                    context,
+                    android.Manifest.permission.ACCESS_FINE_LOCATION
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            }
+
+            LaunchedEffect(origin) {
+                if (isLocationAllowed) {
+                    if (!hasSystemLocationPermission) {
+                        geolocationPermissionLauncher.launch(android.Manifest.permission.ACCESS_FINE_LOCATION)
+                    } else {
+                        callback.invoke(origin, true, false)
+                        viewModel.clearGeolocationPrompt()
+                    }
+                }
+            }
+
+            if (!isLocationAllowed) {
+                AlertDialog(
+                    onDismissRequest = { 
+                        callback.invoke(origin, false, false)
+                        viewModel.clearGeolocationPrompt()
+                        viewModel.logPermissionAction(host, "location", "Permission Denied (Prompt Dismissed)")
+                    },
+                    icon = { Icon(Icons.Default.LocationOn, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
                 title = { Text("Approve Location Access?", fontWeight = FontWeight.Bold) },
                 text = { 
                     Text("The website $origin wants to access your current location. This is used by pages to provide nearby services or search results.", fontSize = 13.sp) 
                 },
                 confirmButton = {
-                    Button(
-                        onClick = {
-                            val hasPermission = androidx.core.content.ContextCompat.checkSelfPermission(
-                                context,
-                                android.Manifest.permission.ACCESS_FINE_LOCATION
-                            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                            
-                            if (!hasPermission) {
-                                geolocationPermissionLauncher.launch(android.Manifest.permission.ACCESS_FINE_LOCATION)
-                            } else {
-                                callback.invoke(origin, true, false)
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = {
+                                val hasPermission = androidx.core.content.ContextCompat.checkSelfPermission(
+                                    context,
+                                    android.Manifest.permission.ACCESS_FINE_LOCATION
+                                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                                
+                                if (!hasPermission) {
+                                    viewModel.addSessionPermission(host, "location")
+                                    geolocationPermissionLauncher.launch(android.Manifest.permission.ACCESS_FINE_LOCATION)
+                                } else {
+                                    viewModel.addSessionPermission(host, "location")
+                                    callback.invoke(origin, true, false)
+                                    viewModel.clearGeolocationPrompt()
+                                }
+                            }
+                        ) {
+                            Text("Allow Once", fontWeight = FontWeight.Bold)
+                        }
+
+                        Button(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = {
+                                val hasPermission = androidx.core.content.ContextCompat.checkSelfPermission(
+                                    context,
+                                    android.Manifest.permission.ACCESS_FINE_LOCATION
+                                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                                
+                                if (!hasPermission) {
+                                    viewModel.setPermissionStatus(host, "location", "Allow")
+                                    geolocationPermissionLauncher.launch(android.Manifest.permission.ACCESS_FINE_LOCATION)
+                                } else {
+                                    viewModel.setPermissionStatus(host, "location", "Allow")
+                                    callback.invoke(origin, true, false)
+                                    viewModel.clearGeolocationPrompt()
+                                }
+                            }
+                        ) {
+                            Text("Allow Always", fontWeight = FontWeight.Bold)
+                        }
+
+                        TextButton(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = {
+                                viewModel.setPermissionStatus(host, "location", "Block")
+                                callback.invoke(origin, false, false)
                                 viewModel.clearGeolocationPrompt()
                             }
+                        ) {
+                            Text("Block", color = MaterialTheme.colorScheme.error)
                         }
-                    ) {
-                        Text("Allow", fontWeight = FontWeight.Bold)
-                    }
-                },
-                dismissButton = {
-                    TextButton(
-                        onClick = {
-                            callback.invoke(origin, false, false)
-                            viewModel.clearGeolocationPrompt()
-                        }
-                    ) {
-                        Text("Block")
                     }
                 },
                 shape = RoundedCornerShape(20.dp)
-            )
+                )
+            }
         }
 
         if (showDelayedNotificationDialog) {
@@ -4452,6 +5033,7 @@ fun SettingsOverlay(
     var newWhitelistHost by remember { mutableStateOf("") }
     var showLocalClearDataDialog by remember { mutableStateOf(false) }
     var showAboutDialog by remember { mutableStateOf(false) }
+    var showDeveloperOptionsDialogLocal by remember { mutableStateOf(false) }
     
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -4825,6 +5407,16 @@ fun SettingsOverlay(
                                     modifier = Modifier.clickable { showAboutDialog = true }
                                 )
 
+                                val isDevModeActive = OrionDeveloperEngine.isDeveloperModeEnabled.collectAsState().value
+                                if (isDevModeActive) {
+                                    ListItem(
+                                        headlineContent = { Text("Developer Options", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary) },
+                                        supportingContent = { Text("Orion Developer Engine Live Monitors & Diagnostic Traces", fontSize = 11.sp) },
+                                        leadingContent = { Icon(Icons.Default.Terminal, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                                        modifier = Modifier.clickable { showDeveloperOptionsDialogLocal = true }
+                                    )
+                                }
+
                                 ListItem(
                                     headlineContent = { Text("Open Source Licenses", fontWeight = FontWeight.Medium) },
                                     supportingContent = { Text("View license agreements of integrated components", fontSize = 11.sp) },
@@ -5010,6 +5602,12 @@ fun SettingsOverlay(
     AboutAppDialog(
         show = showAboutDialog,
         onDismiss = { showAboutDialog = false }
+    )
+
+    OrionDeveloperEngineOverlay(
+        show = showDeveloperOptionsDialogLocal,
+        onDismiss = { showDeveloperOptionsDialogLocal = false },
+        viewModel = viewModel
     )
 }
 

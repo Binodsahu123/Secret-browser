@@ -53,3 +53,19 @@ data class DownloadItem(
     val timestamp: Long = System.currentTimeMillis()
 )
 
+@Entity(tableName = "tab_sessions")
+data class TabSessionEntity(
+    @PrimaryKey val id: String,
+    val title: String,
+    val url: String,
+    val isSuspended: Boolean,
+    val lastActiveTime: Long,
+    val scrollX: Int,
+    val scrollY: Int,
+    val groupColor: String?,
+    val groupName: String?,
+    val isIncognito: Boolean = false,
+    val parentTabId: String? = null
+)
+
+

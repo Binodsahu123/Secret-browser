@@ -37,6 +37,7 @@ fun SiteInfoBottomSheet(
     blockedCount: Int,
     isAdBlockWhitelisted: Boolean,
     historyItems: List<HistoryItem>,
+    viewModel: BrowserViewModel,
     onToggleAdBlock: () -> Unit,
     onOpenSearch: (String) -> Unit,
     onOpenSiteSettings: () -> Unit,
@@ -53,7 +54,7 @@ fun SiteInfoBottomSheet(
         }
     }
 
-    var activeSubSheet by remember { mutableStateOf<String?>(null) } // "ssl", "cookies", "history", "about"
+    var activeSubSheet by remember { mutableStateOf<String?>(null) } // "ssl", "cookies", "history", "about", "permissions"
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -152,6 +153,9 @@ fun SiteInfoBottomSheet(
                         "about" -> {
                             AboutWebPageSheet(url = url, title = title, onOpenSearch = onOpenSearch)
                         }
+                        "permissions" -> {
+                            PermissionsDetailSheet(host = host, viewModel = viewModel, onDismissSheet = { activeSubSheet = null })
+                        }
                     }
                 }
             }
@@ -193,6 +197,15 @@ fun MainSiteInfoRows(
             title = "Cookies and site data",
             description = "In use: $cookiesCount cookies from this site and track points.",
             onClick = { onRowClick("cookies") }
+        )
+
+        // Row 2.5: Permissions
+        SiteInfoRow(
+            icon = Icons.Default.Security,
+            iconTint = MaterialTheme.colorScheme.tertiary,
+            title = "Permissions",
+            description = "Manage microphone, camera, location, notifications and pop-ups.",
+            onClick = { onRowClick("permissions") }
         )
 
         // Row 3: History visit
@@ -527,6 +540,126 @@ fun AboutWebPageSheet(url: String, title: String, onOpenSearch: (String) -> Unit
             Icon(imageVector = Icons.Default.Search, contentDescription = null)
             Spacer(modifier = Modifier.width(8.dp))
             Text("Search this host on Google")
+        }
+    }
+}
+
+@Composable
+fun PermissionsDetailSheet(
+    host: String,
+    viewModel: BrowserViewModel,
+    onDismissSheet: () -> Unit
+) {
+    val context = LocalContext.current
+    val permissions = remember {
+        listOf(
+            "microphone" to ("Microphone" to Icons.Default.Mic),
+            "camera" to ("Camera" to Icons.Default.Videocam),
+            "location" to ("Location" to Icons.Default.LocationOn),
+            "notifications" to ("Notifications" to Icons.Default.Notifications),
+            "popups" to ("Pop-ups and redirects" to Icons.Default.Launch)
+        )
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Permissions", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        }
+
+        Text(
+            text = "Control this site's access to your device",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f))
+        ) {
+            Column(
+                modifier = Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                permissions.forEach { (permKey, permData) ->
+                    val (label, icon) = permData
+                    // Read state dynamically
+                    var currentStatus by remember(host, permKey) {
+                        mutableStateOf(viewModel.getPermissionStatus(host, permKey))
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = icon,
+                                contentDescription = null,
+                                tint = if (currentStatus == "Allow") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(16.dp))
+                            Column {
+                                Text(
+                                    text = label,
+                                    fontWeight = FontWeight.Bold,
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                                Text(
+                                    text = when (currentStatus) {
+                                        "Allow" -> "Allowed"
+                                        "Block" -> "Blocked"
+                                        else -> "Ask"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = when (currentStatus) {
+                                        "Allow" -> MaterialTheme.colorScheme.primary
+                                        "Block" -> MaterialTheme.colorScheme.error
+                                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                    }
+                                )
+                            }
+                        }
+
+                        Switch(
+                            checked = currentStatus == "Allow",
+                            onCheckedChange = { checked ->
+                                val newStatus = if (checked) "Allow" else "Block"
+                                viewModel.setPermissionStatus(host, permKey, newStatus)
+                                currentStatus = newStatus
+                            }
+                        )
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Button(
+            onClick = {
+                viewModel.resetAllPermissionsForDomain(host)
+                android.widget.Toast.makeText(context, "Permissions reset for $host", android.widget.Toast.LENGTH_SHORT).show()
+                onDismissSheet()
+            },
+            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.errorContainer, contentColor = MaterialTheme.colorScheme.onErrorContainer),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Icon(imageVector = Icons.Default.Refresh, contentDescription = null)
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("Reset permissions", fontWeight = FontWeight.Bold)
         }
     }
 }

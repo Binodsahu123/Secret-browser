@@ -29,6 +29,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 
+import androidx.compose.foundation.clickable
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AboutAppDialog(
@@ -41,6 +43,7 @@ fun AboutAppDialog(
     var checkingUpdates by remember { mutableStateOf(false) }
     var updateResult by remember { mutableStateOf<String?>(null) }
     var activeOverlay by remember { mutableStateOf<String?>(null) } // "privacy", "licenses"
+    var tapCount by remember { mutableStateOf(0) }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -122,7 +125,20 @@ fun AboutAppDialog(
                             verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             Row(
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        tapCount++
+                                        if (tapCount < 7) {
+                                            val remaining = 7 - tapCount
+                                            if (remaining <= 3) {
+                                                android.widget.Toast.makeText(context, "You are now $remaining steps away from being a developer.", android.widget.Toast.LENGTH_SHORT).show()
+                                            }
+                                        } else if (tapCount == 7) {
+                                            com.example.browser.OrionDeveloperEngine.setDeveloperModeEnabled(context, true)
+                                            android.widget.Toast.makeText(context, "Orion Developer Engine Activated", android.widget.Toast.LENGTH_LONG).show()
+                                        }
+                                    },
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
                                 Text("Version:", fontWeight = FontWeight.Bold, fontSize = 13.sp)

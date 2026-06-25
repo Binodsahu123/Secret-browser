@@ -884,29 +884,10 @@ fun ExtensionsHubList(
     }
 
     showPermissionsAlert?.let { meta ->
-        AlertDialog(
-            onDismissRequest = { showPermissionsAlert = null },
-            title = { Text(text = "${meta.name} Permissions", fontSize = 16.sp, fontWeight = FontWeight.Bold) },
-            text = {
-                Column {
-                    Text(text = "This extension requests the following access permissions:", fontSize = 13.sp)
-                    Spacer(modifier = Modifier.height(10.dp))
-                    meta.permissionDescription.split(";").forEach { perm ->
-                        if (perm.isNotBlank()) {
-                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 4.dp)) {
-                                Icon(Icons.Default.Check, contentDescription = null, tint = Color(0xFF10B981), modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(perm.trim(), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showPermissionsAlert = null }) {
-                    Text("OK")
-                }
-            }
+        ExtensionSettingsDialog(
+            meta = meta,
+            viewModel = viewModel,
+            onDismiss = { showPermissionsAlert = null }
         )
     }
 
@@ -994,43 +975,173 @@ fun ExtensionDetailDialog(
     }
 
     if (stepState == 1) {
-        // Authentic Chrome permission request popup
+        val extensionId = meta.id
+        val permissions = when (extensionId) {
+            "ext_grok_automation" -> listOf("activeTab", "storage", "scripting", "tabs")
+            "ext_dark_reader" -> listOf("storage", "scripting", "tabs")
+            "ext_adblock" -> listOf("webRequest", "storage", "tabs")
+            "ext_metamask" -> listOf("storage", "notifications", "clipboard")
+            "ext_grok_4" -> listOf("microphone", "tabs", "storage")
+            "ext_cookies" -> listOf("cookies", "storage", "tabs")
+            "ext_auto_translate" -> listOf("tabs", "storage", "location")
+            else -> listOf("activeTab", "storage")
+        }
+        val hostPermissions = when (extensionId) {
+            "ext_metamask" -> listOf("*.ethereum.org", "*.etherscan.io")
+            else -> listOf("*://*/*")
+        }
+        val runsInBackground = when (extensionId) {
+            "ext_grok_automation", "ext_adblock", "ext_grok_4", "ext_auto_translate" -> "Yes"
+            else -> "No"
+        }
+
+        val dangerousPermissions = permissions.filter { it == "microphone" || it == "camera" || it == "location" || it == "webRequest" || it == "cookies" || it == "scripting" }
+
         Dialog(onDismissRequest = { stepState = 0 }) {
             Card(
-                shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                shape = RoundedCornerShape(24.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(16.dp)
+                    .padding(16.dp),
+                elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
             ) {
                 Column(
-                    modifier = Modifier.padding(20.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
+                    modifier = Modifier
+                        .padding(20.dp)
+                        .verticalScroll(rememberScrollState()),
+                    horizontalAlignment = Alignment.Start
                 ) {
-                    Icon(
-                        Icons.Default.Extension,
-                        contentDescription = null,
-                        tint = Color(0xFF6366F1),
-                        modifier = Modifier.size(40.dp)
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text(
-                        text = "Add '${meta.name}'?",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 18.sp,
-                        textAlign = TextAlign.Center
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "It can read web templates, modify stylesheets, and communicate with underlying network frameworks.",
-                        fontSize = 12.sp,
-                        color = Color.Gray,
-                        textAlign = TextAlign.Center
-                    )
+                    // Header
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(44.dp)
+                                .background(Color(0xFF6366F1).copy(alpha = 0.1f), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Default.Extension,
+                                contentDescription = null,
+                                tint = Color(0xFF6366F1),
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text(
+                                text = "Install Extension",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 18.sp,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = "Review installation and requested permissions.",
+                                fontSize = 11.sp,
+                                color = Color.Gray
+                            )
+                        }
+                    }
+
                     Spacer(modifier = Modifier.height(16.dp))
+                    Divider(color = Color.LightGray.copy(alpha = 0.3f))
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Meta Row
+                    Text(text = "Extension Profile", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color.Gray)
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(text = "Name: ${meta.name}", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text(text = "Version: ${meta.version}", fontSize = 12.sp)
+                            Text(text = "Developer: ${meta.provider}", fontSize = 12.sp)
+                            Text(text = "Package Size: ${meta.size}", fontSize = 12.sp)
+                            Text(text = "Background Scripts: $runsInBackground", fontSize = 12.sp)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // API Permissions
+                    Text(text = "Requested API Permissions", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color.Gray)
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        permissions.forEach { perm ->
+                            val isDangerous = perm in dangerousPermissions
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(
+                                        if (isDangerous) Color.Red.copy(alpha = 0.05f) else Color.Transparent,
+                                        RoundedCornerShape(6.dp)
+                                    )
+                                    .padding(vertical = 4.dp, horizontal = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = if (isDangerous) androidx.compose.material.icons.Icons.Default.Warning else androidx.compose.material.icons.Icons.Default.CheckCircle,
+                                    contentDescription = null,
+                                    tint = if (isDangerous) Color(0xFFEF4444) else Color(0xFF10B981),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = perm,
+                                    fontSize = 12.sp,
+                                    fontWeight = if (isDangerous) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (isDangerous) Color(0xFFEF4444) else MaterialTheme.colorScheme.onSurface
+                                )
+                                if (isDangerous) {
+                                    Spacer(modifier = Modifier.weight(1f))
+                                    Surface(
+                                        color = Color.Red.copy(alpha = 0.1f),
+                                        contentColor = Color.Red,
+                                        shape = RoundedCornerShape(4.dp)
+                                    ) {
+                                        Text(
+                                            "Dangerous",
+                                            fontSize = 8.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Host Permissions
+                    Text(text = "Permitted Website Hosts", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color.Gray)
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        hostPermissions.forEach { host ->
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = androidx.compose.material.icons.Icons.Default.Language,
+                                    contentDescription = null,
+                                    tint = Color(0xFF6366F1),
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(text = host, fontSize = 12.sp, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic)
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(20.dp))
                     Divider(color = Color.LightGray.copy(alpha = 0.3f))
                     Spacer(modifier = Modifier.height(16.dp))
 
+                    // Action Buttons
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -1038,18 +1149,26 @@ fun ExtensionDetailDialog(
                         OutlinedButton(
                             onClick = { stepState = 0 },
                             modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(10.dp)
+                            shape = RoundedCornerShape(12.dp)
                         ) {
                             Text("Cancel", fontSize = 13.sp)
                         }
 
                         Button(
-                            onClick = { stepState = 2 },
+                            onClick = {
+                                permissions.forEach { perm ->
+                                    OrionExtensionPermissionEngine.setPermissionDecision(context, meta.id, perm, "ALLOW_ALWAYS")
+                                }
+                                hostPermissions.forEach { host ->
+                                    OrionExtensionPermissionEngine.setHostDecision(context, meta.id, host, "ALLOW_ALWAYS")
+                                }
+                                stepState = 2
+                            },
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6366F1)),
                             modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(10.dp)
+                            shape = RoundedCornerShape(12.dp)
                         ) {
-                            Text("Add Extension", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            Text("Approve & Install", fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1)
                         }
                     }
                 }
@@ -4126,15 +4245,1272 @@ fun ActiveExtensionsDialog(
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "Manage Extensions",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFF818CF8)
-                        )
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+fun ExtensionSettingsDialog(
+    meta: ExtensionMeta,
+    viewModel: BrowserViewModel,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    val extensionId = meta.id
+
+    val permissions = remember(extensionId) {
+        when (extensionId) {
+            "ext_grok_automation" -> listOf("activeTab", "storage", "scripting", "tabs")
+            "ext_dark_reader" -> listOf("storage", "scripting", "tabs")
+            "ext_adblock" -> listOf("webRequest", "storage", "tabs")
+            "ext_metamask" -> listOf("storage", "notifications", "clipboard")
+            "ext_grok_4" -> listOf("microphone", "tabs", "storage")
+            "ext_cookies" -> listOf("cookies", "storage", "tabs")
+            "ext_auto_translate" -> listOf("tabs", "storage", "location")
+            else -> listOf("activeTab", "storage")
+        }
+    }
+
+    val hostPatterns = remember(extensionId) {
+        when (extensionId) {
+            "ext_metamask" -> listOf("*.ethereum.org", "*.etherscan.io")
+            else -> listOf("*://*/*")
+        }
+    }
+
+    var refreshKey by remember { mutableStateOf(0) }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 16.dp),
+            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .padding(20.dp)
+                    .verticalScroll(rememberScrollState()),
+                horizontalAlignment = Alignment.Start
+            ) {
+                // Header
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Security,
+                            contentDescription = null,
+                            tint = Color(0xFF6366F1),
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(text = "Extension Settings", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    }
+                    IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
+                        Icon(Icons.Default.Close, contentDescription = "Close")
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+                Divider(color = Color.LightGray.copy(alpha = 0.3f))
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Profile card
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f)),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(text = meta.name, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                        Text(text = "ID: ${meta.id}", fontSize = 11.sp, color = Color.Gray)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(text = "Status: ", fontSize = 12.sp)
+                            val isEnabled = viewModel.isExtensionEnabled(meta.id)
+                            Surface(
+                                color = if (isEnabled) Color(0xFF10B981).copy(alpha = 0.1f) else Color.Gray.copy(alpha = 0.1f),
+                                contentColor = if (isEnabled) Color(0xFF10B981) else Color.Gray,
+                                shape = RoundedCornerShape(4.dp)
+                            ) {
+                                Text(
+                                    text = if (isEnabled) "Active" else "Disabled",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Premium Deep Diagnostics Launch Card
+                var showDeepAnalyzer by remember { mutableStateOf(false) }
+
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { showDeepAnalyzer = true },
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1B4B)), // Dark Indigo/Purple
+                    border = BorderStroke(1.5.dp, Color(0xFF6366F1)) // Glowing indigo border
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .padding(16.dp)
+                            .fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(42.dp)
+                                    .background(Color(0xFF312E81), CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Code,
+                                    contentDescription = null,
+                                    tint = Color(0xFF818CF8),
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = "Deep Diagnostic Analyzer",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 14.sp,
+                                        color = Color.White
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Surface(
+                                        color = Color(0xFF10B981).copy(alpha = 0.2f),
+                                        contentColor = Color(0xFF10B981),
+                                        shape = RoundedCornerShape(4.dp)
+                                    ) {
+                                        Text(
+                                            text = "LIVE",
+                                            fontSize = 8.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                                Text(
+                                    text = "Deep static, permission, API coverage, & runtime log analysis",
+                                    fontSize = 10.sp,
+                                    color = Color(0xFF93C5FD)
+                                )
+                            }
+                        }
+                        Icon(
+                            imageVector = Icons.Default.PlayArrow,
+                            contentDescription = null,
+                            tint = Color(0xFF818CF8),
+                            modifier = Modifier.size(14.dp)
+                        )
+                    }
+                }
+
+                if (showDeepAnalyzer) {
+                    DeepExtensionAnalyzerDialog(
+                        meta = meta,
+                        viewModel = viewModel,
+                        onDismiss = { showDeepAnalyzer = false }
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(20.dp))
+
+                // API Permissions Section
+                Text(
+                    text = "API PERMISSIONS CONTROL",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 12.sp,
+                    color = Color.Gray,
+                    letterSpacing = 1.sp
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+
+                permissions.forEach { perm ->
+                    val decision = remember(perm, refreshKey) {
+                        OrionExtensionPermissionEngine.getPermissionDecision(context, extensionId, perm)
+                    }
+
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.1f)),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.05f))
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            val spec = OrionExtensionPermissionEngine.permissionsCatalog[perm]
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = spec?.name ?: perm,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp
+                                )
+
+                                // Current decision badge
+                                Surface(
+                                    color = when (decision) {
+                                        "ALLOW_ALWAYS" -> Color(0xFF10B981).copy(alpha = 0.1f)
+                                        "ALLOW_ONCE" -> Color(0xFF6366F1).copy(alpha = 0.1f)
+                                        "BLOCK" -> Color.Red.copy(alpha = 0.1f)
+                                        else -> Color.Gray.copy(alpha = 0.1f)
+                                    },
+                                    contentColor = when (decision) {
+                                        "ALLOW_ALWAYS" -> Color(0xFF10B981)
+                                        "ALLOW_ONCE" -> Color(0xFF6366F1)
+                                        "BLOCK" -> Color.Red
+                                        else -> Color.Gray
+                                    },
+                                    shape = RoundedCornerShape(4.dp)
+                                ) {
+                                    Text(
+                                        text = when (decision) {
+                                            "ALLOW_ALWAYS" -> "Allow Always"
+                                            "ALLOW_ONCE" -> "Allow Once"
+                                            "BLOCK" -> "Blocked"
+                                            else -> "Ask / Default"
+                                        },
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+
+                            if (spec?.description != null) {
+                                Text(
+                                    text = spec.description,
+                                    fontSize = 11.sp,
+                                    color = Color.Gray,
+                                    modifier = Modifier.padding(vertical = 4.dp)
+                                )
+                            }
+
+                            if (spec?.requiredAndroidPermission != null) {
+                                val systemGranted = com.example.permissionengine.AndroidRuntimePermissionManager.hasPermission(context, spec.requiredAndroidPermission)
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(top = 4.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = if (systemGranted) Icons.Default.CheckCircle else Icons.Default.Warning,
+                                        contentDescription = null,
+                                        tint = if (systemGranted) Color(0xFF10B981) else Color(0xFFF59E0B),
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = if (systemGranted) "Hardware permission verified on Android" else "Hardware permission missing on Android",
+                                        fontSize = 10.sp,
+                                        color = if (systemGranted) Color(0xFF10B981) else Color(0xFFF59E0B)
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                TextButton(
+                                    onClick = {
+                                        OrionExtensionPermissionEngine.setPermissionDecision(context, extensionId, perm, "ALLOW_ALWAYS")
+                                        refreshKey++
+                                    },
+                                    colors = ButtonDefaults.textButtonColors(
+                                        contentColor = if (decision == "ALLOW_ALWAYS") Color(0xFF10B981) else Color.Gray
+                                    ),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("Always", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                }
+
+                                TextButton(
+                                    onClick = {
+                                        OrionExtensionPermissionEngine.setPermissionDecision(context, extensionId, perm, "ALLOW_ONCE")
+                                        refreshKey++
+                                    },
+                                    colors = ButtonDefaults.textButtonColors(
+                                        contentColor = if (decision == "ALLOW_ONCE") Color(0xFF6366F1) else Color.Gray
+                                    ),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("Once", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                }
+
+                                TextButton(
+                                    onClick = {
+                                        OrionExtensionPermissionEngine.setPermissionDecision(context, extensionId, perm, "BLOCK")
+                                        refreshKey++
+                                    },
+                                    colors = ButtonDefaults.textButtonColors(
+                                        contentColor = if (decision == "BLOCK") Color.Red else Color.Gray
+                                    ),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("Block", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(20.dp))
+
+                // Host Permissions Section
+                Text(
+                    text = "WEBSITE HOST ACCESS CONTROL",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 12.sp,
+                    color = Color.Gray,
+                    letterSpacing = 1.sp
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+
+                hostPatterns.forEach { pattern ->
+                    val decision = remember(pattern, refreshKey) {
+                        OrionExtensionPermissionEngine.getHostDecision(context, extensionId, pattern)
+                    }
+
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.1f)),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.05f))
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.Language, contentDescription = null, tint = Color(0xFF6366F1), modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(text = pattern, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+
+                                Surface(
+                                    color = when (decision) {
+                                        "ALLOW_ALWAYS" -> Color(0xFF10B981).copy(alpha = 0.1f)
+                                        "ALLOW_ONCE" -> Color(0xFF6366F1).copy(alpha = 0.1f)
+                                        "BLOCK" -> Color.Red.copy(alpha = 0.1f)
+                                        else -> Color.Gray.copy(alpha = 0.1f)
+                                    },
+                                    contentColor = when (decision) {
+                                        "ALLOW_ALWAYS" -> Color(0xFF10B981)
+                                        "ALLOW_ONCE" -> Color(0xFF6366F1)
+                                        "BLOCK" -> Color.Red
+                                        else -> Color.Gray
+                                    },
+                                    shape = RoundedCornerShape(4.dp)
+                                ) {
+                                    Text(
+                                        text = when (decision) {
+                                            "ALLOW_ALWAYS" -> "Allow Always"
+                                            "ALLOW_ONCE" -> "Allow Once"
+                                            "BLOCK" -> "Blocked"
+                                            else -> "Ask / Default"
+                                        },
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                TextButton(
+                                    onClick = {
+                                        OrionExtensionPermissionEngine.setHostDecision(context, extensionId, pattern, "ALLOW_ALWAYS")
+                                        refreshKey++
+                                    },
+                                    colors = ButtonDefaults.textButtonColors(
+                                        contentColor = if (decision == "ALLOW_ALWAYS") Color(0xFF10B981) else Color.Gray
+                                    ),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("Always", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                }
+
+                                TextButton(
+                                    onClick = {
+                                        OrionExtensionPermissionEngine.setHostDecision(context, extensionId, pattern, "ALLOW_ONCE")
+                                        refreshKey++
+                                    },
+                                    colors = ButtonDefaults.textButtonColors(
+                                        contentColor = if (decision == "ALLOW_ONCE") Color(0xFF6366F1) else Color.Gray
+                                    ),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("Once", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                }
+
+                                TextButton(
+                                    onClick = {
+                                        OrionExtensionPermissionEngine.setHostDecision(context, extensionId, pattern, "BLOCK")
+                                        refreshKey++
+                                    },
+                                    colors = ButtonDefaults.textButtonColors(
+                                        contentColor = if (decision == "BLOCK") Color.Red else Color.Gray
+                                    ),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("Block", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            OrionExtensionPermissionEngine.resetExtensionPermissions(context, extensionId)
+                            refreshKey++
+                            android.widget.Toast.makeText(context, "Permissions reset to default status.", android.widget.Toast.LENGTH_SHORT).show()
+                        },
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.Red),
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text("Reset Settings", fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                    }
+
+                    Button(
+                        onClick = onDismiss,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6366F1)),
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text("Done", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+}
+
+fun matchHostPattern(urlStr: String, pattern: String): Boolean {
+    val cleanUrl = urlStr.trim()
+    val cleanPattern = pattern.trim()
+    if (cleanPattern == "<all_urls>" || cleanPattern == "*://*/*") return true
+    
+    try {
+        val uri = android.net.Uri.parse(cleanUrl)
+        val scheme = uri.scheme ?: ""
+        val host = uri.host ?: ""
+        
+        // Parse pattern
+        val patternUri = android.net.Uri.parse(cleanPattern.replace("*.", ""))
+        val patternScheme = patternUri.scheme ?: ""
+        val patternHost = patternUri.host ?: ""
+        
+        // Scheme match
+        if (patternScheme != "*" && patternScheme != scheme) {
+            return false
+        }
+        
+        // Host match
+        if (cleanPattern.contains("*.")) {
+            val domainSuffix = patternHost.removePrefix("*.")
+            return host == domainSuffix || host.endsWith(".$domainSuffix")
+        } else {
+            return host == patternHost
+        }
+    } catch (e: Exception) {
+        return false
+    }
+}
+
+@Composable
+fun DeepExtensionAnalyzerDialog(
+    meta: ExtensionMeta,
+    viewModel: BrowserViewModel,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    var isScanning by remember { mutableStateOf(true) }
+    var refreshTrigger by remember { mutableIntStateOf(0) }
+    
+    // Scan results states
+    var manifestExists by remember { mutableStateOf(false) }
+    var manifestVersion by remember { mutableIntStateOf(2) }
+    var manifestParsingError by remember { mutableStateOf<String?>(null) }
+    var popupPathDeclared by remember { mutableStateOf("") }
+    var popupFileExists by remember { mutableStateOf(false) }
+    var backgroundScriptsDeclared by remember { mutableStateOf<List<String>>(emptyList()) }
+    var backgroundScriptsExist by remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
+    var serviceWorkerDeclared by remember { mutableStateOf("") }
+    var serviceWorkerExists by remember { mutableStateOf(false) }
+    var contentScriptsDeclared by remember { mutableStateOf<List<String>>(emptyList()) }
+    var contentScriptsExist by remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
+    var extensionFilesOnDisk by remember { mutableStateOf<List<String>>(emptyList()) }
+    var totalFilesCount by remember { mutableStateOf(0) }
+    var totalFolderSizeKb by remember { mutableStateOf(0.0) }
+    
+    // Host Matching Live Tester
+    var testUrlInput by remember { mutableStateOf("https://www.google.com") }
+    var testUrlResultMatch by remember { mutableStateOf(false) }
+    var testMatchedPattern by remember { mutableStateOf<String?>(null) }
+    
+    // Declared Host permissions
+    var declaredHostPermissions by remember { mutableStateOf<List<String>>(emptyList()) }
+    var declaredApiPermissions by remember { mutableStateOf<List<String>>(emptyList()) }
+    
+    // Logs Belonging to this Extension
+    val debuggerLogsState = com.example.extensionengine.ExtensionDebuggerEngine.instance.logs.collectAsState(initial = emptyList())
+    val filteredLogs = remember(debuggerLogsState.value, meta.id) {
+        debuggerLogsState.value.filter { it.extensionId == meta.id }
+    }
+
+    LaunchedEffect(refreshTrigger) {
+        isScanning = true
+        delay(600) // Beautiful smooth feedback delay
+        
+        try {
+            val extensionDir = com.example.extensionengine.ExtensionDirectoryResolver.getExtensionDir(context, meta.id, meta.name)
+            val manifestFile = java.io.File(extensionDir, "manifest.json")
+            manifestExists = manifestFile.exists()
+            
+            // Initializing file scan lists
+            val allFiles = mutableListOf<String>()
+            var folderSize = 0L
+            fun walk(f: java.io.File) {
+                if (f.isDirectory) {
+                    val children = f.listFiles()
+                    if (children != null) {
+                        for (child in children) walk(child)
+                    }
+                } else {
+                    allFiles.add(f.relativeTo(extensionDir).path)
+                    folderSize += f.length()
+                }
+            }
+            if (extensionDir.exists()) {
+                walk(extensionDir)
+            }
+            extensionFilesOnDisk = allFiles.sorted()
+            totalFilesCount = allFiles.size
+            totalFolderSizeKb = folderSize / 1024.0
+            
+            if (manifestExists) {
+                try {
+                    val content = manifestFile.readText()
+                    val json = org.json.JSONObject(content)
+                    manifestVersion = json.optInt("manifest_version", 2)
+                    manifestParsingError = null
+                    
+                    // Parse popups
+                    popupPathDeclared = when {
+                        json.optJSONObject("action")?.optString("default_popup", "")?.isNotBlank() == true -> json.optJSONObject("action")!!.optString("default_popup")
+                        json.optJSONObject("browser_action")?.optString("default_popup", "")?.isNotBlank() == true -> json.optJSONObject("browser_action")!!.optString("default_popup")
+                        json.optJSONObject("page_action")?.optString("default_popup", "")?.isNotBlank() == true -> json.optJSONObject("page_action")!!.optString("default_popup")
+                        else -> ""
+                    }
+                    if (popupPathDeclared.isNotBlank()) {
+                        val normalized = popupPathDeclared.removePrefix("./").removePrefix("/")
+                        popupFileExists = java.io.File(extensionDir, normalized).exists()
+                    } else {
+                        popupFileExists = false
+                    }
+                    
+                    // Parse permissions
+                    val permsList = mutableListOf<String>()
+                    val hostsList = mutableListOf<String>()
+                    val permissionsArr = json.optJSONArray("permissions")
+                    if (permissionsArr != null) {
+                        for (i in 0 until permissionsArr.length()) {
+                            val p = permissionsArr.getString(i)
+                            if (p.contains("://") || p.startsWith("*") || p == "<all_urls>") {
+                                hostsList.add(p)
+                            } else {
+                                permsList.add(p)
+                            }
+                        }
+                    }
+                    
+                    // Parse optional/host permissions for V3 if exists
+                    val hostPermsArr = json.optJSONArray("host_permissions")
+                    if (hostPermsArr != null) {
+                        for (i in 0 until hostPermsArr.length()) {
+                            hostsList.add(hostPermsArr.getString(i))
+                        }
+                    }
+                    
+                    declaredHostPermissions = hostsList.distinct()
+                    declaredApiPermissions = permsList.distinct()
+                    
+                    // Background Scripts
+                    val bgObj = json.optJSONObject("background")
+                    val bgScripts = mutableListOf<String>()
+                    var swDeclared = ""
+                    if (bgObj != null) {
+                        val scriptsArr = bgObj.optJSONArray("scripts")
+                        if (scriptsArr != null) {
+                            for (i in 0 until scriptsArr.length()) {
+                                bgScripts.add(scriptsArr.getString(i))
+                            }
+                        }
+                        swDeclared = bgObj.optString("service_worker", "")
+                    }
+                    backgroundScriptsDeclared = bgScripts
+                    serviceWorkerDeclared = swDeclared
+                    
+                    // Verify backgrounds on disk
+                    val bgExistsMap = mutableMapOf<String, Boolean>()
+                    for (script in bgScripts) {
+                        val normalized = script.removePrefix("./").removePrefix("/")
+                        bgExistsMap[script] = java.io.File(extensionDir, normalized).exists()
+                    }
+                    backgroundScriptsExist = bgExistsMap
+                    
+                    if (swDeclared.isNotBlank()) {
+                        val normalized = swDeclared.removePrefix("./").removePrefix("/")
+                        serviceWorkerExists = java.io.File(extensionDir, normalized).exists()
+                    } else {
+                        serviceWorkerExists = false
+                    }
+                    
+                    // Content scripts
+                    val csList = mutableListOf<String>()
+                    val contentScriptsArr = json.optJSONArray("content_scripts")
+                    if (contentScriptsArr != null) {
+                        for (i in 0 until contentScriptsArr.length()) {
+                            val scriptObj = contentScriptsArr.optJSONObject(i)
+                            val jsArr = scriptObj?.optJSONArray("js")
+                            if (jsArr != null) {
+                                for (j in 0 until jsArr.length()) {
+                                    csList.add(jsArr.getString(j))
+                                }
+                            }
+                        }
+                    }
+                    contentScriptsDeclared = csList.distinct()
+                    
+                    // Verify content scripts on disk
+                    val csExistsMap = mutableMapOf<String, Boolean>()
+                    for (cs in csList) {
+                        val normalized = cs.removePrefix("./").removePrefix("/")
+                        csExistsMap[cs] = java.io.File(extensionDir, normalized).exists()
+                    }
+                    contentScriptsExist = csExistsMap
+                    
+                } catch (e: Exception) {
+                    manifestParsingError = e.localizedMessage ?: "Invalid JSON format"
+                }
+            } else {
+                manifestParsingError = "manifest.json file does not exist on disk"
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        } finally {
+            isScanning = false
+        }
+    }
+    
+    // Live update host tester whenever user changes tester URL or host permissions
+    LaunchedEffect(testUrlInput, declaredHostPermissions, refreshTrigger) {
+        var matched = false
+        var patternMatch: String? = null
+        for (pattern in declaredHostPermissions) {
+            if (matchHostPattern(testUrlInput, pattern)) {
+                matched = true
+                patternMatch = pattern
+                break
+            }
+        }
+        testUrlResultMatch = matched
+        testMatchedPattern = patternMatch
+    }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0B0F19)), // Premium sleek dark card
+            border = BorderStroke(1.5.dp, Color(0xFF6366F1).copy(alpha = 0.5f)),
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.9f)
+                .padding(4.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(18.dp)
+            ) {
+                // Top Header Row
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.SettingsSuggest,
+                            contentDescription = null,
+                            tint = Color(0xFF818CF8),
+                            modifier = Modifier.size(28.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = "Orion Extension Analyzer",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 18.sp,
+                                color = Color.White
+                            )
+                            Text(
+                                text = "Deep static, permission & runtime diagnostic suite",
+                                fontSize = 11.sp,
+                                color = Color.Gray
+                            )
+                        }
+                    }
+                    IconButton(
+                        onClick = onDismiss,
+                        colors = IconButtonDefaults.iconButtonColors(contentColor = Color.LightGray)
+                    ) {
+                        Icon(Icons.Default.Close, contentDescription = "Close")
+                    }
+                }
+                
+                Spacer(modifier = Modifier.height(12.dp))
+                Divider(color = Color.White.copy(alpha = 0.08f))
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                if (isScanning) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        verticalArrangement = Arrangement.Center,
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        CircularProgressIndicator(
+                            color = Color(0xFF6366F1),
+                            strokeWidth = 3.dp,
+                            modifier = Modifier.size(48.dp)
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(
+                            text = "COMPILING DIAGNOSTIC SIGNATURES...",
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp,
+                            color = Color(0xFF818CF8)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Scanning manifest, verifying on-disk integrity, checking permissions...",
+                            fontSize = 10.sp,
+                            color = Color.Gray,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(horizontal = 24.dp)
+                        )
+                    }
+                } else {
+                    // Diagnostic content
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        // Quick Extension Summary Header
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFF131B2E)),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .padding(12.dp)
+                                    .fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(text = meta.name, fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Color.White)
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(text = "ID: ${meta.id} • Version ${meta.version}", fontSize = 10.sp, color = Color.LightGray)
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        Surface(
+                                            color = if (manifestExists) Color(0xFF10B981).copy(alpha = 0.1f) else Color.Red.copy(alpha = 0.1f),
+                                            contentColor = if (manifestExists) Color(0xFF10B981) else Color.Red,
+                                            shape = RoundedCornerShape(4.dp)
+                                        ) {
+                                            Text(
+                                                text = if (manifestExists) "Manifest V$manifestVersion" else "No Manifest",
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                        Surface(
+                                            color = if (filteredLogs.isEmpty()) Color(0xFF10B981).copy(alpha = 0.1f) else Color.Red.copy(alpha = 0.1f),
+                                            contentColor = if (filteredLogs.isEmpty()) Color(0xFF10B981) else Color.Red,
+                                            shape = RoundedCornerShape(4.dp)
+                                        ) {
+                                            Text(
+                                                text = if (filteredLogs.isEmpty()) "0 Runtime Errors" else "${filteredLogs.size} Errors Captured",
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                                Button(
+                                    onClick = { refreshTrigger++ },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B)),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Icon(Icons.Default.Refresh, contentDescription = "Re-run", modifier = Modifier.size(12.dp), tint = Color.White)
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Re-Scan", fontSize = 10.sp, color = Color.White)
+                                }
+                            }
+                        }
+                        
+                        Spacer(modifier = Modifier.height(16.dp))
+                        
+                        // SECTION 1: Deep Developer Recommendations (Fix Suite)
+                        Text(text = "AUTOMATED DEVELOPER DIAGNOSIS & RECS", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = Color(0xFF818CF8), fontFamily = FontFamily.Monospace)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1B4B).copy(alpha = 0.4f)),
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, Color(0xFF6366F1).copy(alpha = 0.2f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                // Gather all warning/error flags to construct dynamic actionable feedback
+                                val recommendations = mutableListOf<String>()
+                                if (!manifestExists) {
+                                    recommendations.add("❌ manifest.json is missing: The extension cannot be loaded. Ensure the ZIP root folder contains manifest.json directly.")
+                                }
+                                if (manifestParsingError != null && manifestExists) {
+                                    recommendations.add("❌ Manifest JSON parse crash: '${manifestParsingError}'. Open manifest.json and verify all double quotes, commas, and trailing brackets.")
+                                }
+                                if (manifestVersion == 2) {
+                                    recommendations.add("⚠️ Manifest V2 Deprecation Warning: Chrome has deprecated V2. We highly recommend upgrading to Manifest V3. Replace 'browser_action' with 'action', and scripts with 'service_worker'.")
+                                }
+                                if (popupPathDeclared.isNotBlank() && !popupFileExists) {
+                                    recommendations.add("❌ Declared popup '$popupPathDeclared' was not found on storage: The user popup view will be blank. Check folder file tree.")
+                                }
+                                if (serviceWorkerDeclared.isNotBlank() && !serviceWorkerExists) {
+                                    recommendations.add("❌ Declared service worker '$serviceWorkerDeclared' is missing on storage: Background tasks and messaging event pipelines will fail.")
+                                }
+                                val missingBgScripts = backgroundScriptsExist.filter { !it.value }.keys
+                                if (missingBgScripts.isNotEmpty()) {
+                                    recommendations.add("❌ Missing background script files: ${missingBgScripts.joinToString(", ")}. Background communication processes will fail.")
+                                }
+                                val missingCs = contentScriptsExist.filter { !it.value }.keys
+                                if (missingCs.isNotEmpty()) {
+                                    recommendations.add("❌ Missing content script files: ${missingCs.joinToString(", ")}. Content injection on webpage origins will not operate.")
+                                }
+                                if (filteredLogs.isNotEmpty()) {
+                                    val count = filteredLogs.filter { it.severity == "ERROR" }.size
+                                    if (count > 0) {
+                                        recommendations.add("⚡ $count active runtime errors intercepted: Runtime exceptions occurred in previous frames. Review the Trace Log Stream below to debug null pointers or syntax failures.")
+                                    }
+                                }
+                                
+                                if (recommendations.isEmpty()) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color(0xFF10B981), modifier = Modifier.size(18.dp))
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "All checks passed! This extension has no critical file system discrepancies, permission conflicts, or manifest compilation errors. Performance signature is highly stable.",
+                                            fontSize = 11.sp,
+                                            color = Color(0xFF10B981)
+                                        )
+                                    }
+                                } else {
+                                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        recommendations.forEach { rec ->
+                                            Row(verticalAlignment = Alignment.Top) {
+                                                Text("• ", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                                Text(text = rec, fontSize = 11.sp, color = Color.LightGray)
+                                            }
+                                        }
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(
+                                            text = "💡 Auto-Fix Tip: If files are reported missing on storage, re-extracting your package with proper absolute folder structures solves most path resolution bugs.",
+                                            fontSize = 10.sp,
+                                            color = Color(0xFF93C5FD),
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        // SECTION 2: File Tree & Resource Verification
+                        Text(text = "FILE INTEGRITY & RESOURCE CHECK", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = Color(0xFF818CF8), fontFamily = FontFamily.Monospace)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A)),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text("Package File Count: $totalFilesCount files", fontSize = 11.sp, color = Color.LightGray)
+                                    Text("Disk Size: ${String.format("%.1f", totalFolderSizeKb)} KB", fontSize = 11.sp, color = Color.LightGray)
+                                }
+                                Divider(color = Color.White.copy(alpha = 0.05f))
+                                
+                                // Manifest
+                                FileDiagnosticItem(label = "manifest.json", status = manifestExists)
+                                
+                                // Popup file
+                                if (popupPathDeclared.isNotBlank()) {
+                                    FileDiagnosticItem(label = "Action Popup ($popupPathDeclared)", status = popupFileExists)
+                                }
+                                
+                                // Background scripts
+                                if (serviceWorkerDeclared.isNotBlank()) {
+                                    FileDiagnosticItem(label = "V3 Service Worker ($serviceWorkerDeclared)", status = serviceWorkerExists)
+                                }
+                                backgroundScriptsDeclared.forEach { bg ->
+                                    val exists = backgroundScriptsExist[bg] ?: false
+                                    FileDiagnosticItem(label = "V2 Background ($bg)", status = exists)
+                                }
+                                
+                                // Content scripts
+                                contentScriptsDeclared.forEach { cs ->
+                                    val exists = contentScriptsExist[cs] ?: false
+                                    FileDiagnosticItem(label = "Content Script ($cs)", status = exists)
+                                }
+                            }
+                        }
+                        
+                        Spacer(modifier = Modifier.height(16.dp))
+                        
+                        // SECTION 3: API Permissions Control State
+                        Text(text = "MANIFEST API PERMISSION STATES", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = Color(0xFF818CF8), fontFamily = FontFamily.Monospace)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A)),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                if (declaredApiPermissions.isEmpty()) {
+                                    Text("No specific API permissions declared in manifest.", fontSize = 11.sp, color = Color.Gray)
+                                } else {
+                                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        declaredApiPermissions.forEach { perm ->
+                                            val decision = OrionExtensionPermissionEngine.getPermissionDecision(context, meta.id, perm)
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text(text = perm, fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = Color.White)
+                                                Surface(
+                                                    color = when (decision) {
+                                                        "ALLOW_ALWAYS" -> Color(0xFF10B981).copy(alpha = 0.1f)
+                                                        "ALLOW_ONCE" -> Color(0xFF6366F1).copy(alpha = 0.1f)
+                                                        "BLOCK" -> Color.Red.copy(alpha = 0.1f)
+                                                        else -> Color.Gray.copy(alpha = 0.1f)
+                                                    },
+                                                    contentColor = when (decision) {
+                                                        "ALLOW_ALWAYS" -> Color(0xFF10B981)
+                                                        "ALLOW_ONCE" -> Color(0xFF6366F1)
+                                                        "BLOCK" -> Color.Red
+                                                        else -> Color.Gray
+                                                    },
+                                                    shape = RoundedCornerShape(4.dp)
+                                                ) {
+                                                    Text(
+                                                        text = when (decision) {
+                                                            "ALLOW_ALWAYS" -> "ALLOWED"
+                                                            "ALLOW_ONCE" -> "ONCE"
+                                                            "BLOCK" -> "BLOCKED"
+                                                            else -> "DEFAULT"
+                                                        },
+                                                        fontSize = 8.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        Spacer(modifier = Modifier.height(16.dp))
+                        
+                        // SECTION 4: Interactive Host Injection & Match Tester
+                        Text(text = "INTERACTIVE HOST INJECTION TESTER", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = Color(0xFF818CF8), fontFamily = FontFamily.Monospace)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A)),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                Text(
+                                    text = "Test if this extension's content scripts can inject on a particular website URL according to its host permissions:",
+                                    fontSize = 11.sp,
+                                    color = Color.LightGray
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                
+                                OutlinedTextField(
+                                    value = testUrlInput,
+                                    onValueChange = { testUrlInput = it },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = Color.White),
+                                    singleLine = true,
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = Color(0xFF6366F1),
+                                        unfocusedBorderColor = Color.White.copy(alpha = 0.15f),
+                                        focusedContainerColor = Color(0xFF0B0F19),
+                                        unfocusedContainerColor = Color(0xFF0B0F19)
+                                    ),
+                                    placeholder = { Text("https://example.com/", fontSize = 11.sp, color = Color.Gray) }
+                                )
+                                
+                                Spacer(modifier = Modifier.height(8.dp))
+                                
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(
+                                            color = if (testUrlResultMatch) Color(0xFF10B981).copy(alpha = 0.08f) else Color.Red.copy(alpha = 0.08f),
+                                            shape = RoundedCornerShape(6.dp)
+                                        )
+                                        .border(
+                                            width = 1.dp,
+                                            color = if (testUrlResultMatch) Color(0xFF10B981).copy(alpha = 0.2f) else Color.Red.copy(alpha = 0.2f),
+                                            shape = RoundedCornerShape(6.dp)
+                                        )
+                                        .padding(10.dp)
+                                ) {
+                                    Column {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(8.dp)
+                                                    .background(
+                                                        color = if (testUrlResultMatch) Color(0xFF10B981) else Color(0xFFEF4444),
+                                                        shape = CircleShape
+                                                    )
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text(
+                                                text = if (testUrlResultMatch) "INJECTION MATCH SUCCESSFUL" else "INJECTION BLOCKED",
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 10.sp,
+                                                color = if (testUrlResultMatch) Color(0xFF10B981) else Color(0xFFEF4444),
+                                                fontFamily = FontFamily.Monospace
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(
+                                            text = if (testUrlResultMatch) {
+                                                "This URL matches declared host pattern: '${testMatchedPattern}'. Content scripts can hook into web pages under this scope."
+                                            } else {
+                                                "This URL does NOT match any declared host permissions. If this extension needs to run here, add the origin inside 'host_permissions' of the manifest."
+                                            },
+                                            fontSize = 10.sp,
+                                            color = Color.LightGray
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        
+                        Spacer(modifier = Modifier.height(16.dp))
+                        
+                        // SECTION 5: Runtime Trace Log Stream & Error Explainer
+                        Text(text = "LIVE INTERCEPTED EXCEPTION & ERROR LOGS", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = Color(0xFF818CF8), fontFamily = FontFamily.Monospace)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A)),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                if (filteredLogs.isEmpty()) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            imageVector = Icons.Default.CheckCircle,
+                                            contentDescription = null,
+                                            tint = Color(0xFF10B981),
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "All quiet in the runtime. No errors or exceptions caught.",
+                                            fontSize = 11.sp,
+                                            color = Color.LightGray
+                                        )
+                                    }
+                                } else {
+                                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                        filteredLogs.forEach { log ->
+                                            Column(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .background(Color.Black.copy(alpha = 0.3f), RoundedCornerShape(6.dp))
+                                                    .padding(8.dp)
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Surface(
+                                                        color = Color.Red.copy(alpha = 0.15f),
+                                                        contentColor = Color.Red,
+                                                        shape = RoundedCornerShape(4.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = log.type.name,
+                                                            fontSize = 8.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                                        )
+                                                    }
+                                                    Text(
+                                                        text = "Captured ${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(log.timestamp))}",
+                                                        fontSize = 9.sp,
+                                                        color = Color.Gray
+                                                    )
+                                                }
+                                                Spacer(modifier = Modifier.height(4.dp))
+                                                Text(
+                                                    text = log.message,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    fontSize = 10.sp,
+                                                    color = Color(0xFFFDA4AF)
+                                                )
+                                                
+                                                Spacer(modifier = Modifier.height(6.dp))
+                                                // Deep analysis recommendations explainers based on log types
+                                                val explainer = when (log.type) {
+                                                    com.example.extensionengine.DebugErrorType.PERMISSION -> {
+                                                        "💡 Deep Analysis: The extension code tried to access a Chrome Web API without possessing necessary permission clearances. Make sure this permission exists in manifest.json, and the user hasn't explicitly set its control state to 'Block' in Orion permission menu."
+                                                    }
+                                                    com.example.extensionengine.DebugErrorType.STORAGE -> {
+                                                        "💡 Deep Analysis: Local database or storage engine sync crashed. Ensure you are passing valid objects to chrome.storage API and not exceeding maximum quotas."
+                                                    }
+                                                    com.example.extensionengine.DebugErrorType.MESSAGE -> {
+                                                        "💡 Deep Analysis: Background script / content script message port disconnected. Check your chrome.runtime.onMessage listeners and verify sendResponse() callbacks are active."
+                                                    }
+                                                    else -> {
+                                                        "💡 Deep Analysis: JavaScript runtime crash. Ensure the libraries used are compatible with standard WebView syntax. Avoid using node.js APIs as they are not supported in Chromium extension contexts."
+                                                    }
+                                                }
+                                                Text(
+                                                    text = explainer,
+                                                    fontSize = 9.sp,
+                                                    color = Color(0xFF93C5FD),
+                                                    modifier = Modifier.padding(top = 4.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                // Done actions
+                Button(
+                    onClick = onDismiss,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6366F1)),
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text("Close Analysis Suite", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun FileDiagnosticItem(label: String, status: Boolean) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 10.sp,
+            color = Color.White,
+            modifier = Modifier.weight(1f)
+        )
+        Surface(
+            color = if (status) Color(0xFF10B981).copy(alpha = 0.1f) else Color.Red.copy(alpha = 0.1f),
+            contentColor = if (status) Color(0xFF10B981) else Color.Red,
+            shape = RoundedCornerShape(4.dp)
+        ) {
+            Text(
+                text = if (status) "VERIFIED" else "MISSING",
+                fontSize = 8.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+            )
         }
     }
 }

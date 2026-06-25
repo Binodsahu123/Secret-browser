@@ -8,6 +8,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.coroutines.resume
 
 private var lastExtensionToast: android.widget.Toast? = null
 
@@ -21,6 +22,7 @@ interface BrowserDelegate {
     fun downloadFile(url: String, filename: String?)
     fun getActiveTabId(): String?
     fun executeScriptOnTab(tabId: String, code: String, callback: (String?) -> Unit)
+    fun checkExtensionPermission(extensionId: String, permission: String, callback: (Boolean) -> Unit)
 }
 
 class RuntimeBridge(
@@ -32,8 +34,47 @@ class RuntimeBridge(
     private val eventManager: EventManager,
     val tabId: String? = null,
     private val portManager: PortManager,
-    private val tabBridge: TabBridge
+    private val tabBridge: TabBridge,
+    private val registry: ExtensionRegistry,
+    private val permissionManager: PermissionManager
 ) : MessageListener, PortConnectionListener {
+
+    private suspend fun verifyPermission(extensionId: String, requiredPermission: String): Boolean {
+        val ext = registry.getExtension(extensionId) ?: return true
+        
+        // Let's check if the manifest actually declares this permission or hostPermission
+        val declared = ext.permissions.contains(requiredPermission) || ext.hostPermissions.contains(requiredPermission) ||
+                (requiredPermission == "activeTab" && ext.permissions.contains("activeTab"))
+        
+        if (!declared) {
+            com.example.extensionengine.ExtensionDebuggerEngine.instance.logError(
+                extensionId,
+                ext.name,
+                com.example.extensionengine.DebugErrorType.PERMISSION,
+                "Permission Denied: Extension does not have '$requiredPermission' permission in manifest."
+            )
+            return false
+        }
+
+        val d = delegate ?: return true
+
+        val result = kotlinx.coroutines.suspendCancellableCoroutine<Boolean> { continuation ->
+            d.checkExtensionPermission(extensionId, requiredPermission) { granted ->
+                continuation.resume(granted)
+            }
+        }
+
+        if (!result) {
+            com.example.extensionengine.ExtensionDebuggerEngine.instance.logError(
+                extensionId,
+                ext.name,
+                com.example.extensionengine.DebugErrorType.PERMISSION,
+                "Permission Denied: Either user blocked '$requiredPermission', or hardware validation/system permission failed."
+            )
+        }
+
+        return result
+    }
 
     private val mainScope = CoroutineScope(Dispatchers.Main)
 
@@ -85,6 +126,10 @@ class RuntimeBridge(
     private suspend fun handleApiCall(api: String, extensionId: String, args: JSONArray, callbackId: String) {
         when {
             api.startsWith("storage.") -> {
+                if (!verifyPermission(extensionId, "storage")) {
+                    sendErrorResponse(callbackId, "SecurityError: Extension does not have 'storage' permission in manifest.")
+                    return
+                }
                 val area = args.optString(0, "local")
                 when {
                     api.endsWith(".get") -> {
@@ -174,6 +219,10 @@ class RuntimeBridge(
                 sendSuccessResponse(callbackId, JSONObject().put("status", "reloading"))
             }
             api == "tabs.get" -> {
+                if (!verifyPermission(extensionId, "tabs") && !verifyPermission(extensionId, "activeTab")) {
+                    sendErrorResponse(callbackId, "SecurityError: Extension does not have 'tabs' or 'activeTab' permission in manifest.")
+                    return
+                }
                 val tabIdRaw = args.optString(0, "")
                 val resolvedTabId = TabIdMapper.getUuidFromString(tabIdRaw)
                 val allTabs = delegate?.queryTabs(JSONObject()) ?: JSONArray()
@@ -196,11 +245,19 @@ class RuntimeBridge(
                 }
             }
             api == "tabs.query" -> {
+                if (!verifyPermission(extensionId, "tabs") && !verifyPermission(extensionId, "activeTab")) {
+                    sendErrorResponse(callbackId, "SecurityError: Extension does not have 'tabs' or 'activeTab' permission in manifest.")
+                    return
+                }
                 val queryInfo = args.optJSONObject(0) ?: JSONObject()
                 val tabsArray = delegate?.queryTabs(queryInfo) ?: JSONArray()
                 sendSuccessResponse(callbackId, tabsArray)
             }
             api == "tabs.create" -> {
+                if (!verifyPermission(extensionId, "tabs") && !verifyPermission(extensionId, "activeTab")) {
+                    sendErrorResponse(callbackId, "SecurityError: Extension does not have 'tabs' or 'activeTab' permission in manifest.")
+                    return
+                }
                 val createProperties = args.optJSONObject(0) ?: JSONObject()
                 val url = createProperties.optString("url", "about:blank")
                 val active = createProperties.optBoolean("active", true)
@@ -208,6 +265,10 @@ class RuntimeBridge(
                 sendSuccessResponse(callbackId, JSONObject().put("status", "created"))
             }
             api == "tabs.remove" -> {
+                if (!verifyPermission(extensionId, "tabs") && !verifyPermission(extensionId, "activeTab")) {
+                    sendErrorResponse(callbackId, "SecurityError: Extension does not have 'tabs' or 'activeTab' permission in manifest.")
+                    return
+                }
                 val tabIdRaw = args.optString(0, "")
                 val resolvedTabId = TabIdMapper.getUuidFromString(tabIdRaw)
                 if (resolvedTabId.isNotBlank()) {
@@ -216,12 +277,20 @@ class RuntimeBridge(
                 sendSuccessResponse(callbackId, JSONObject().put("status", "removed"))
             }
             api == "tabs.reload" -> {
+                if (!verifyPermission(extensionId, "tabs") && !verifyPermission(extensionId, "activeTab")) {
+                    sendErrorResponse(callbackId, "SecurityError: Extension does not have 'tabs' or 'activeTab' permission in manifest.")
+                    return
+                }
                 val tabIdRaw = args.optString(0, "")
                 val resolvedTabId = TabIdMapper.getUuidFromString(tabIdRaw)
                 delegate?.reloadTab(resolvedTabId)
                 sendSuccessResponse(callbackId, JSONObject().put("status", "reloaded"))
             }
             api == "tabs.update" -> {
+                if (!verifyPermission(extensionId, "tabs") && !verifyPermission(extensionId, "activeTab")) {
+                    sendErrorResponse(callbackId, "SecurityError: Extension does not have 'tabs' or 'activeTab' permission in manifest.")
+                    return
+                }
                 val tabIdRaw = args.optString(0, "")
                 val resolvedTabId = TabIdMapper.getUuidFromString(tabIdRaw)
                 val updateProperties = args.optJSONObject(1) ?: JSONObject()
@@ -232,6 +301,10 @@ class RuntimeBridge(
                 sendSuccessResponse(callbackId, JSONObject().put("status", "updated"))
             }
             api == "notifications.create" -> {
+                if (!verifyPermission(extensionId, "notifications")) {
+                    sendErrorResponse(callbackId, "SecurityError: Extension does not have 'notifications' permission in manifest.")
+                    return
+                }
                 val title = args.optString(0, "Extension Alert")
                 val options = args.optJSONObject(1) ?: JSONObject()
                 val message = options.optString("message", options.optString("title", "Alert"))
@@ -239,6 +312,10 @@ class RuntimeBridge(
                 sendSuccessResponse(callbackId, JSONObject().put("status", "success"))
             }
             api == "downloads.download" -> {
+                if (!verifyPermission(extensionId, "downloads")) {
+                    sendErrorResponse(callbackId, "SecurityError: Extension does not have 'downloads' permission in manifest.")
+                    return
+                }
                 val options = args.optJSONObject(0) ?: JSONObject()
                 val url = options.optString("url", "")
                 val filename = if (options.has("filename")) options.optString("filename") else null
@@ -248,6 +325,10 @@ class RuntimeBridge(
                 sendSuccessResponse(callbackId, JSONObject().put("status", "success"))
             }
             api == "scripting.executeScript" -> {
+                if (!verifyPermission(extensionId, "scripting")) {
+                    sendErrorResponse(callbackId, "SecurityError: Extension does not have 'scripting' permission in manifest.")
+                    return
+                }
                 val spec = args.optJSONObject(0) ?: JSONObject()
                 val target = spec.optJSONObject("target") ?: JSONObject()
                 val tabIdRaw = target.optString("tabId", "")
@@ -292,6 +373,10 @@ class RuntimeBridge(
                 }
             }
             api == "scripting.insertCSS" -> {
+                if (!verifyPermission(extensionId, "scripting")) {
+                    sendErrorResponse(callbackId, "SecurityError: Extension does not have 'scripting' permission in manifest.")
+                    return
+                }
                 val spec = args.optJSONObject(0) ?: JSONObject()
                 val target = spec.optJSONObject("target") ?: JSONObject()
                 val tabIdRaw = target.optString("tabId", "")
@@ -398,6 +483,10 @@ class RuntimeBridge(
                 }
             }
             api.startsWith("cookies.") -> {
+                if (!verifyPermission(extensionId, "cookies")) {
+                    sendErrorResponse(callbackId, "SecurityError: Extension does not have 'cookies' permission in manifest.")
+                    return
+                }
                 val cookieManager = android.webkit.CookieManager.getInstance()
                 when {
                     api.endsWith(".get") -> {

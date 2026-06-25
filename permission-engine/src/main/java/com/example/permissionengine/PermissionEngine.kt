@@ -1,6 +1,9 @@
 package com.example.permissionengine
 
 import android.content.Context
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
 
 interface PermissionEngine {
@@ -12,63 +15,78 @@ interface PermissionEngine {
 
 class PermissionEngineImpl(private val context: Context) : PermissionEngine {
     
-    // Thread-safe memory cache of site permission states: Map<Origin, Map<PermissionId, State>>
-    private val permissionsCache = ConcurrentHashMap<String, ConcurrentHashMap<String, String>>()
-    private val prefs = context.getSharedPreferences("orion_browser_prefs", Context.MODE_PRIVATE)
-
-    init {
-        try {
-            val allPrefs = prefs.all
-            for ((key, value) in allPrefs) {
-                if (key.startsWith("site_perm_exception/")) {
-                    // Format: site_perm_exception/{permission}/{origin}
-                    val parts = key.removePrefix("site_perm_exception/").split("/", limit = 2)
-                    if (parts.size == 2) {
-                        val permId = parts[0]
-                        val origin = parts[1]
-                        val state = value as? String ?: "Ask"
-                        permissionsCache.getOrPut(origin) { ConcurrentHashMap() }[permId] = state
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
+    private val memoryStore = OriginPermissionStore()
+    private val db = PermissionDatabase.getDatabase(context)
+    private val dao = db.permissionDao()
+    private val repository = SitePermissionRepository(dao)
+    
+    val manager = PermissionManager(context, repository, memoryStore)
+    val bridge = WebViewPermissionBridge(manager)
 
     override fun getPermissionState(origin: String, permission: String): String {
-        val cleanOrigin = cleanOrigin(origin)
-        return permissionsCache[cleanOrigin]?.get(permission) ?: "Ask"
+        val mappedPerm = mapLegacyPermission(permission)
+        val cached = memoryStore.getMemoryState(origin, mappedPerm) ?: "ASK"
+        return when (cached) {
+            "ALLOW_ALWAYS" -> "Allow"
+            "ALLOW_ONCE" -> "Allow"
+            "BLOCK" -> "Block"
+            else -> "Ask"
+        }
     }
 
     override fun setPermissionState(origin: String, permission: String, state: String) {
-        val cleanOrigin = cleanOrigin(origin)
-        permissionsCache.getOrPut(cleanOrigin) { ConcurrentHashMap() }[permission] = state
-        prefs.edit().putString("site_perm_exception/$permission/$cleanOrigin", state).apply()
+        val mappedPerm = mapLegacyPermission(permission)
+        val mappedState = when (state.lowercase()) {
+            "allow" -> "ALLOW_ALWAYS"
+            "block" -> "BLOCK"
+            else -> "ASK"
+        }
+        
+        CoroutineScope(Dispatchers.IO).launch {
+            if (mappedState == "ASK") {
+                repository.deletePermission(origin, mappedPerm)
+                memoryStore.clearMemoryState(origin, mappedPerm)
+            } else {
+                manager.savePermissionState(origin, mappedPerm, mappedState)
+            }
+        }
     }
 
     override fun clearPermissionState(origin: String, permission: String) {
-        val cleanOrigin = cleanOrigin(origin)
-        permissionsCache[cleanOrigin]?.remove(permission)
-        if (permissionsCache[cleanOrigin]?.isEmpty() == true) {
-            permissionsCache.remove(cleanOrigin)
+        val mappedPerm = mapLegacyPermission(permission)
+        CoroutineScope(Dispatchers.IO).launch {
+            repository.deletePermission(origin, mappedPerm)
+            memoryStore.clearMemoryState(origin, mappedPerm)
         }
-        prefs.edit().remove("site_perm_exception/$permission/$cleanOrigin").apply()
     }
 
     override fun getAllPermissions(): Map<String, Map<String, String>> {
         val result = mutableMapOf<String, Map<String, String>>()
-        for ((origin, permMap) in permissionsCache) {
-            result[origin] = permMap.toMap()
+        val cached = memoryStore.getAllCached()
+        for ((origin, permMap) in cached) {
+            val innerMap = mutableMapOf<String, String>()
+            for ((perm, state) in permMap) {
+                val legacyState = when (state) {
+                    "ALLOW_ALWAYS" -> "Allow"
+                    "ALLOW_ONCE" -> "Allow"
+                    "BLOCK" -> "Block"
+                    else -> "Ask"
+                }
+                innerMap[perm.lowercase()] = legacyState
+            }
+            result[origin] = innerMap
         }
         return result
     }
 
-    private fun cleanOrigin(origin: String): String {
-        var clean = origin.trim().lowercase()
-        if (clean.endsWith("/")) {
-            clean = clean.substring(0, clean.length - 1)
+    private fun mapLegacyPermission(perm: String): String {
+        return when (perm.lowercase()) {
+            "camera" -> "CAMERA"
+            "microphone" -> "MICROPHONE"
+            "location" -> "LOCATION"
+            "storage" -> "STORAGE"
+            "notifications" -> "NOTIFICATIONS"
+            else -> perm.uppercase()
         }
-        return clean
     }
 }
