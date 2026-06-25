@@ -123,6 +123,11 @@ class DownloadManagerImpl(private val context: Context) : DownloadEngine {
         repository.insertOrUpdateDownload(initialItem)
         startDownloadForegroundServiceSafely()
         triggerQueueCheck()
+        try {
+            DownloadWorker.enqueueDownload(context, id)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
         return id
     }
 
@@ -143,6 +148,11 @@ class DownloadManagerImpl(private val context: Context) : DownloadEngine {
             repository.insertOrUpdateDownload(updated)
             startDownloadForegroundServiceSafely()
             triggerQueueCheck()
+            try {
+                DownloadWorker.enqueueDownload(context, id)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
     }
 

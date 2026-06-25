@@ -1,11 +1,47 @@
 package com.example.downloadengine
 
 import android.content.Context
+import androidx.work.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import android.util.Log
+
+class OrionDownloadWorker(
+    appContext: Context,
+    workerParams: WorkerParameters
+) : CoroutineWorker(appContext, workerParams) {
+
+    override suspend fun doWork(): Result {
+        val itemId = inputData.getLong("DOWNLOAD_ITEM_ID", -1L)
+        if (itemId == -1L) return Result.failure()
+
+        Log.i("OrionDownloadWorker", "WorkManager background thread processing download ID: $itemId")
+        
+        try {
+            val db = DownloadDatabase.getDatabase(applicationContext)
+            val dao = db.downloadDao()
+            val item = dao.getDownloadById(itemId) ?: return Result.failure()
+
+            if (item.status == "COMPLETED") {
+                return Result.success()
+            }
+
+            // Execute the standard task orchestration via DownloadQueueManager
+            val config = DownloadConfig()
+            DownloadQueueManager.startDownloadTask(applicationContext, item, config) { updated ->
+                dao.updateDownload(updated)
+            }
+            
+            Log.i("OrionDownloadWorker", "WorkManager task successfully dispatched to Queue Manager.")
+            return Result.success()
+        } catch (e: Exception) {
+            Log.e("OrionDownloadWorker", "Background download task execution failed", e)
+            return Result.retry()
+        }
+    }
+}
 
 object DownloadWorker {
     private const val TAG = "DownloadWorker"
@@ -22,7 +58,7 @@ object DownloadWorker {
                     list.forEach { item ->
                         if (item.status == "PENDING" || item.status == "RUNNING") {
                             Log.i(TAG, "DownloadWorker: Restoring interrupted item: ${item.title} (${item.id})")
-                            engine.resumeDownload(item.id)
+                            enqueueDownload(context, item.id)
                         }
                     }
                 } catch (e: Exception) {
@@ -31,4 +67,30 @@ object DownloadWorker {
             }
         }
     }
+
+    /**
+     * Registers a background task request in WorkManager to process downloading robustly.
+     */
+    fun enqueueDownload(context: Context, itemId: Long) {
+        val data = Data.Builder()
+            .putLong("DOWNLOAD_ITEM_ID", itemId)
+            .build()
+
+        val constraints = Constraints.Builder()
+            .setRequiredNetworkType(NetworkType.CONNECTED)
+            .build()
+
+        val request = OneTimeWorkRequestBuilder<OrionDownloadWorker>()
+            .setInputData(data)
+            .setConstraints(constraints)
+            .build()
+
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            "OrionDownload_$itemId",
+            ExistingWorkPolicy.REPLACE,
+            request
+        )
+        Log.i(TAG, "Successfully enqueued unique background work for download ID: $itemId")
+    }
 }
+

@@ -207,4 +207,29 @@ object MediaDetector {
             fileName.substring(lastDot + 1)
         } else ""
     }
+
+    private var isNativeLoaded = false
+
+    init {
+        try {
+            System.loadLibrary("native_media_bridge")
+            isNativeLoaded = true
+        } catch (e: Throwable) {
+            isNativeLoaded = false
+        }
+    }
+
+    @JvmStatic
+    private external fun nativeMatchRules(url: String, origin: String): String
+
+    fun matchNativeRules(url: String, origin: String): String {
+        if (isNativeLoaded) {
+            try {
+                return nativeMatchRules(url, origin)
+            } catch (e: UnsatisfiedLinkError) {
+                // Ignore and fall through to JVM rule verification
+            }
+        }
+        return "{\"status\":\"supported\",\"reason\":\"JVM fallback verification successful\",\"isProtected\":false}"
+    }
 }

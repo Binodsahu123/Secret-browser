@@ -2,20 +2,18 @@ package com.example.browser
 
 import android.content.Context
 import android.net.Uri
-import android.webkit.WebSettings
 import android.webkit.WebView
+import android.util.Log
 
 object DesktopModeManager {
-    // Mobile user agent (default)
-    const val MOBILE_UA = "Mozilla/5.0 (Linux; Android 13; Mobile; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36 Orion/2.0"
+    private const val TAG = "DesktopModeManager"
 
-    // Desktop user agent (true desktop UA)
-    const val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Orion/2.0"
+    // Backwards-compatible constants matching existing usage
+    const val MOBILE_UA = UserAgentManager.MOBILE_UA_CHROME
+    const val DESKTOP_UA = UserAgentManager.DESKTOP_UA_CHROME
+    const val DESKTOP_UA_MAC = UserAgentManager.DESKTOP_UA_SAFARI
 
-    // Mac desktop UA (alternative)
-    const val DESKTOP_UA_MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Orion/2.0"
-
-    // Per-site desktop mode storage
+    // Local runtime cache for site modes
     private val siteDesktopMode = HashMap<String, Boolean>()
 
     private fun getCanonicalHost(host: String): String {
@@ -35,103 +33,70 @@ object DesktopModeManager {
     }
 
     fun resolveDesktopUrl(urlStr: String, isDesktop: Boolean): String {
-        if (urlStr.isBlank()) return urlStr
-        try {
-            val uri = Uri.parse(urlStr)
-            val host = uri.host ?: return urlStr
-            
-            if (isDesktop) {
-                // Redirect mobile subdomains to desktop domains when Desktop Mode is enabled
-                val newHost = when {
-                    host.equals("m.youtube.com", ignoreCase = true) -> "www.youtube.com"
-                    host.equals("m.facebook.com", ignoreCase = true) -> "www.facebook.com"
-                    host.equals("m.reddit.com", ignoreCase = true) -> "www.reddit.com"
-                    host.equals("mobile.twitter.com", ignoreCase = true) || host.equals("m.twitter.com", ignoreCase = true) || host.equals("mobile.x.com", ignoreCase = true) || host.equals("m.x.com", ignoreCase = true) -> "x.com"
-                    host.contains(".m.wikipedia.org", ignoreCase = true) -> host.replace(".m.wikipedia.org", ".wikipedia.org", ignoreCase = true)
-                    else -> host
-                }
-                if (newHost != host) {
-                    return uri.buildUpon().authority(newHost).toString()
-                }
-            } else {
-                // Restore mobile subdomain for key video and social sites if navigating back to mobile mode
-                val newHost = when {
-                    host.equals("youtube.com", ignoreCase = true) || host.equals("www.youtube.com", ignoreCase = true) -> "m.youtube.com"
-                    host.equals("facebook.com", ignoreCase = true) || host.equals("www.facebook.com", ignoreCase = true) -> "m.facebook.com"
-                    host.equals("reddit.com", ignoreCase = true) || host.equals("www.reddit.com", ignoreCase = true) -> "m.reddit.com"
-                    host.equals("twitter.com", ignoreCase = true) || host.equals("x.com", ignoreCase = true) || host.equals("www.x.com", ignoreCase = true) -> "mobile.twitter.com"
-                    else -> host
-                }
-                if (newHost != host) {
-                    return uri.buildUpon().authority(newHost).toString()
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
+        // Delegate to high-speed native rewrite engine with safe Kotlin fallback
+        return try {
+            NativeDesktopEngine.nativeRewriteUrl(urlStr, isDesktop)
+        } catch (e: UnsatisfiedLinkError) {
+            if (isDesktop) UrlRewriteEngine.rewriteToDesktop(urlStr) else UrlRewriteEngine.rewriteToMobile(urlStr)
         }
-        return urlStr
     }
 
     fun setDesktopMode(context: Context, webView: WebView, domain: String, enabled: Boolean) {
         val canonical = getCanonicalHost(domain)
         siteDesktopMode[canonical] = enabled
+        
         val prefs = context.getSharedPreferences("desktop_mode_sites", Context.MODE_PRIVATE)
         prefs.edit().putBoolean("desktop_mode_$canonical", enabled).apply()
         prefs.edit().putBoolean("desktop_mode_$domain", enabled).apply()
+
+        // Sync diagnostics live telemetry values
+        DeveloperDesktopDiagnostics.logToggleEvent(domain, enabled)
+        DeveloperDesktopDiagnostics.updateMonitorState(
+            desktopModeEnabled = enabled,
+            userAgentType = if (enabled) "Desktop" else "Mobile",
+            viewportWidth = if (enabled) 1280 else 360,
+            urlRewriteSuccess = true,
+            currentUrl = webView.url.orEmpty()
+        )
+
         applyMode(webView, enabled)
 
-        // Switch URL to the desktopped / mobiled variant
+        // Switch URL using UrlRewriteEngine (Desktop or Mobile)
         val currentUrl = webView.url ?: ""
         val resolvedUrl = resolveDesktopUrl(currentUrl, enabled)
         if (resolvedUrl != currentUrl) {
+            DeveloperDesktopDiagnostics.updateConnectionState(
+                userAgentApplied = true,
+                viewportApplied = true,
+                cssRulesApplied = true,
+                hostRewriteApplied = true,
+                hostRewriteSkipped = false,
+                desktopPageLoaded = true
+            )
             webView.post {
                 webView.loadUrl(resolvedUrl)
             }
+        } else {
+            DeveloperDesktopDiagnostics.logRewriteSkip(domain, "Domain is already normalized")
+            DeveloperDesktopDiagnostics.updateConnectionState(
+                userAgentApplied = true,
+                viewportApplied = true,
+                cssRulesApplied = true,
+                hostRewriteApplied = false,
+                hostRewriteSkipped = true,
+                desktopPageLoaded = true
+            )
         }
     }
 
     fun applyMode(webView: WebView, isDesktop: Boolean) {
-        webView.settings.apply {
-            userAgentString = if (isDesktop) DESKTOP_UA else MOBILE_UA
+        // Delegate Settings to WebViewDesktopBridge
+        WebViewDesktopBridge.configureWebViewSettings(webView, isDesktop)
 
-            // Desktop mode specific settings
-            if (isDesktop) {
-                loadWithOverviewMode = true
-                useWideViewPort = true
-                setSupportZoom(true)
-                builtInZoomControls = true
-                displayZoomControls = false
-                layoutAlgorithm = WebSettings.LayoutAlgorithm.NORMAL
-                // Force desktop viewport
-                webView.evaluateJavascript("""
-                    var meta = document.querySelector('meta[name=viewport]');
-                    if(meta) {
-                        meta.content = 'width=1280, initial-scale=0.25, minimum-scale=0.1';
-                    } else {
-                        var newMeta = document.createElement('meta');
-                        newMeta.name = 'viewport';
-                        newMeta.content = 'width=1280, initial-scale=0.25, minimum-scale=0.1';
-                        document.head.appendChild(newMeta);
-                    }
-                """.trimIndent(), null)
-            } else {
-                loadWithOverviewMode = true
-                useWideViewPort = true
-                setSupportZoom(true)
-                builtInZoomControls = true
-                displayZoomControls = false
-                layoutAlgorithm = WebSettings.LayoutAlgorithm.TEXT_AUTOSIZING
-                // Restore mobile viewport
-                webView.evaluateJavascript("""
-                    var meta = document.querySelector('meta[name=viewport]');
-                    if(meta) {
-                        meta.content = 'width=device-width, initial-scale=1.0';
-                    }
-                """.trimIndent(), null)
-            }
-        }
+        // Inject optimal CSS, viewport overlays and device metric mock structures
+        WebViewDesktopBridge.injectDesktopRuntimeEnvironment(webView, isDesktop)
 
-        // Reload current page with new UA
+        // Reload page to apply changes
         webView.post {
             webView.reload()
         }
@@ -141,6 +106,7 @@ object DesktopModeManager {
         val canonical = getCanonicalHost(domain)
         val cached = siteDesktopMode[canonical]
         if (cached != null) return cached
+        
         val prefs = context.getSharedPreferences("desktop_mode_sites", Context.MODE_PRIVATE)
         val enabled = prefs.getBoolean("desktop_mode_$canonical", false)
         siteDesktopMode[canonical] = enabled

@@ -14,11 +14,11 @@ object NativeDownloadEngine {
 
     init {
         try {
-            System.loadLibrary("extension_native_parser")
+            System.loadLibrary("native_media_bridge")
             isNativeLoaded = true
-            Log.i(TAG, "Native download optimization module loaded successfully.")
+            Log.i(TAG, "Native download optimization module loaded successfully via native_media_bridge.")
         } catch (e: UnsatisfiedLinkError) {
-            Log.w(TAG, "Native library 'extension_native_parser' not loaded. Falling back to robust JVM implementation.")
+            Log.w(TAG, "Native library 'native_media_bridge' not loaded. Falling back to robust JVM implementation.")
             isNativeLoaded = false
         }
     }

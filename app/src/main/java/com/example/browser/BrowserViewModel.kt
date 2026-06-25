@@ -3324,11 +3324,14 @@ class BrowserViewModel(
             }
             // Modern, optimized User Agent strings to unlock high speed rendering capabilities of modern websites
             userAgentString = if (isDesktop) {
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Orion/2.0"
+                com.example.browser.UserAgentManager.getDesktopUserAgent(webView.url.orEmpty())
             } else {
-                "Mozilla/5.0 (Linux; Android 13; Mobile; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36 Orion/2.0"
+                com.example.browser.UserAgentManager.getMobileUserAgent()
             }
         }
+
+        // Apply our custom desktop/mobile runtime layout overlays and overrides
+        com.example.browser.WebViewDesktopBridge.injectDesktopRuntimeEnvironment(webView, isDesktop)
 
         // Enable third party cookies globally on normal cookie store to avoid login failures on high-security portals
         try {

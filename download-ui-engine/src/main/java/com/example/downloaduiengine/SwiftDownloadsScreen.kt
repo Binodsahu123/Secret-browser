@@ -59,7 +59,8 @@ fun SwiftDownloadsScreen(
     onBack: () -> Unit,
     onOpenFile: (filePath: String, fileName: String, mimeType: String) -> Unit,
     modifier: Modifier = Modifier,
-    onNavigateToUrl: ((String) -> Unit)? = null
+    onNavigateToUrl: ((String) -> Unit)? = null,
+    onLaunchDiagnostics: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -259,7 +260,8 @@ fun SwiftDownloadsScreen(
                         DownloadSettingsUI(
                             config = currentConfig,
                             engine = engine,
-                            onConfigChanged = { currentConfig = it }
+                            onConfigChanged = { currentConfig = it },
+                            onLaunchDiagnostics = onLaunchDiagnostics ?: {}
                         )
                     }
                     else -> {
@@ -949,7 +951,8 @@ fun CompletedDownloadCard(
 fun DownloadSettingsUI(
     config: DownloadConfig,
     engine: DownloadEngine,
-    onConfigChanged: (DownloadConfig) -> Unit
+    onConfigChanged: (DownloadConfig) -> Unit,
+    onLaunchDiagnostics: () -> Unit
 ) {
     val coroutineScope = rememberCoroutineScope()
     val scrollState = rememberScrollState()
@@ -1185,6 +1188,26 @@ fun DownloadSettingsUI(
                     ) {
                         Text("Clear All Lists History", color = Color.White, fontSize = 11.sp)
                     }
+                }
+            }
+        }
+
+        Text("DEVELOPER DIAGNOSTICS", color = Color(0xFFFF2E2E), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+
+        Card(
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF15151F)),
+            border = BorderStroke(1.dp, Color(0xFF22222F)),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Diagnostics & Traces:", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                Text("Inspect real-time download segments, assembly tasks, and JavaScript probe events live.", color = Color.Gray, fontSize = 11.sp)
+                Button(
+                    onClick = onLaunchDiagnostics,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E1E2C)),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("Launch Diagnostics Console", color = Color.White, fontSize = 11.sp)
                 }
             }
         }

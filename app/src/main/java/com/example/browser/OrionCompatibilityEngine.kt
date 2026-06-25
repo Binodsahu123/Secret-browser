@@ -519,6 +519,17 @@ object OrionCompatibilityEngine {
             Log.e("OrionCompatibilityEngine", "Failed to inject chromium_bridge.js from assets", e)
         }
 
+        // Inject the custom Orion Desktop Mode and Site Layout Probes
+        try {
+            val desktopProbeJs = context.assets.open("orion_desktop_probe.js").bufferedReader().use { it.readText() }
+            view.evaluateJavascript(desktopProbeJs, null)
+            val siteLayoutProbeJs = context.assets.open("orion_site_layout_probe.js").bufferedReader().use { it.readText() }
+            view.evaluateJavascript(siteLayoutProbeJs, null)
+            Log.d("OrionCompatibilityEngine", "Successfully loaded and injected desktop and layout probes!")
+        } catch (e: Exception) {
+            Log.e("OrionCompatibilityEngine", "Failed to inject custom probes from assets", e)
+        }
+
         // We bypass injecting ui_interceptor.js because it tries to establish a complex, buggy, local WebSocket loopback loop
         // for standard audio recording, which overrides the high-quality native WebRTC microphone stream.
         Log.d("OrionCompatibilityEngine", "Bypassed ui_interceptor.js to preserve high-performance, native WebRTC streams.")

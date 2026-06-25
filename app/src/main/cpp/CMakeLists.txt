@@ -14,6 +14,10 @@ add_library(
     SHARED
     native-media-bridge.cpp
     native_hardware_core.cpp
+    NativeUrlRewriteEngine.cpp
+    NativeViewportEngine.cpp
+    NativeCompatibilityScorer.cpp
+    NativeDesktopModeEngine.cpp
 )
 
 target_link_libraries(
